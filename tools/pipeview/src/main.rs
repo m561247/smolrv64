@@ -8,35 +8,52 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
-const LEGEND: &str = "One row per fetched instruction, one column per cycle; each letter is the
-stage the instruction is in during that cycle:
+const LEGEND: &str = "One row per fetched instruction, one column per cycle, ONE CODE PER CYCLE: the
+stage the instruction moved to, or what holds it. Read from the hardware's state that cycle.
 
-    f  fetched: in the bundle register, waiting for room in the decoupling queue
+  the frontend
+    f  in the bundle register (decoded)            Q  ...held: the decoupling queue is full
     q  in the decoupling queue (8 entries)
-    i  in the instruction register (decode), waiting to dispatch
-    d  dispatched (renamed, in the ROB and a scheduler), waiting to issue
-    a  issued on ALU a        b  issued on ALU b
-    M  in the M port (memory, CSR, mul/div)      F  in the FP port
-    c  in the control-flow (branch) unit
-    =  complete, waiting to retire
-    R  retired in this cycle (committed at the ROB head)
-    A B C  executed on ALU a / ALU b / the branch unit AND retired in this same cycle: an
-       ALU op writes the ROB the cycle it computes, and the ROB forwards that write to its
-       head, so when the op is the head it commits in its execute cycle ('dddA')
-    x  flushed in this cycle (a squash, or a frontend redirect before dispatch)
+  at the queue head, not popping (the dispatch credits and the group rules)
+    g  cut from the group by a rule (one FP-port op, load, store; not plain; after a
+       decode-redirect CTI)                        r  dispatch frozen: a redirect or restart
+    n  rename: a shard below its low-water mark    z  serialising: a fence, CSR or CBO gate
+    O  no ROB row      I  its scheduler is full    L  the LQ is full     S  the SQ is full
+    H  its lane's handoff op in flight             o  a head op in flight
+    i  in the IR (dispatches this cycle)
+  after dispatch
+    t  in its scheduler's dispatch stage (one cycle on the way in)
+    w  in its scheduler, waiting for an operand     s  ready, not picked (another op, or
+                                                       the lane's slot is reserved)
+    p  picked (select)          a b c d  executes in lane A / B / C / D
+    u  a multiply in flight (its lane's reserved slot comes two cycles on)
+    h  in its lane's handoff register, waiting for its unit (MD, F, the SYSQ)
+    v  a divide in the MD stage                    j  in the FP port's select register
+    F  in stage F or the FPU                       Y  a system op in the SYSQ, waiting
+                                                      for the ROB head
+    m  its address arrived, waiting for M's fill   M  in M (the fill: the dTLB lookup)
+    k  a load filled, waiting to access memory     l  a load accessing memory
+    y  a store waiting for its data                e  a result in its lane's landing buffer
+    !  a mispredicted CTI, waiting for its restart  X  killed by a restart, waiting for
+                                                      the release that drops it
+    =  complete, waiting to retire                 R  retired this cycle
+    A B C D  executed in lane A..D AND retired in this same cycle
+    x  flushed this cycle                          ?  not placed (a trace gap)
 
-Stall rows ('** cause', dimmed yellow) cover each run of cycles in which nothing was
-dispatched, filled with '#', and name the cause:
-    bs:redirect, bs:drain             bad speculation: the redirect cycle; a mispredict waiting
-                                      for the ROB head
-    fe:immu fe:icache fe:align fe:queue  the frontend: iTLB walk; no fetch bytes; bytes but
-                                      no whole instruction; an instruction fetched but none in
-                                      the IR
-    be:M-mem be:M-other be:rob-full be:dep-load be:dep-fp be:iq-full be:rename be:sq-full
-    be:lq-full be:serialize           the backend, in the order dispatch checks them
+Colours: executing (bold), moving (plain), waiting on data (yellow), held by a structure
+(red), complete (dim).
+
+  fetch rows ('~~ fetch: cause', '~'): a run of cycles the bundle register could take a bundle
+  and fetch has none: redirect, freeze (fence.i, I$ invalidation, a mapping change, a rejected
+  mark), itlb, page (the stream left the PC's page), pq-full, ring-full, icache-busy (the
+  I$ refuses the request), icache-wait (requests out, no bytes yet), straddle, reject,
+  bytes-late, align.
+  stall rows ('** cause', '#'): a run of non-producing cycles, the core's top-down cause:
+    bs:redirect bs:drain fe:immu fe:icache fe:align fe:queue be:M-mem be:M-other
+    be:rob-full be:dep-load be:dep-fp be:iq-full be:rename be:sq-full be:lq-full be:serialize
 
 The header counts the visible rows: the cycle span, retired instructions, IPC, flushed rows,
-and the cycles each stall cause took.
+and the cycles each fetch and stall cause took.
 ";
 
 const HELP: &str = "pipeview -- terminal pipe viewer for the SmolRV64 testbench's Kanata stream
@@ -66,7 +83,8 @@ struct Row {
     stages: Vec<(u64, u8)>, // (cycle, glyph) in order
     end: Option<u64>,
     flushed: bool,
-    stall: bool,
+    stall: bool, // a fetch or stall row: its own cycles filled with `fill`
+    fill: u8,
 }
 
 impl Row {
@@ -85,7 +103,7 @@ impl Row {
             return b' ';
         }
         if self.stall {
-            return if self.end.map_or(true, |e| c < e) { b'#' } else { b' ' };
+            return if self.end.map_or(true, |e| c < e) { self.fill } else { b' ' };
         }
         if let Some(e) = self.end {
             if c > e {
@@ -93,7 +111,7 @@ impl Row {
             }
             if c == e {
                 if let Some(&(_, g)) = self.stages.iter().rev().find(|s| s.0 == c) {
-                    if !self.flushed && b"abc".contains(&g) {
+                    if !self.flushed && b"abcd".contains(&g) {
                         return g.to_ascii_uppercase();
                     }
                 }
@@ -112,19 +130,18 @@ impl Row {
 }
 
 fn glyph(stage: &str) -> u8 {
-    match stage {
-        "Fe" => b'f',
-        "Dq" => b'q',
-        "Ir" => b'i',
-        "Ds" => b'd',
-        "Xa" => b'a',
-        "Xb" => b'b',
-        "Xc" | "Ct" => b'c',
-        "M" => b'M',
-        "F" => b'F',
-        "Cm" => b'=',
-        "St" => b'#',
-        s => s.bytes().next().unwrap_or(b'?'),
+    stage.bytes().next().unwrap_or(b'?')
+}
+
+// a code's colour class (ANSI SGR): executing, moving, waiting on data, held by a structure, complete
+fn sgr(g: u8) -> &'static str {
+    match g {
+        b'a' | b'b' | b'c' | b'd' | b'A' | b'B' | b'C' | b'D' | b'M' | b'F' | b'u' | b'v' | b'l' | b'R' => "1",
+        b'w' | b'k' | b'y' | b'm' | b'e' | b'Y' => "33",
+        b'Q' | b'g' | b'r' | b'n' | b'z' | b'O' | b'I' | b'L' | b'S' | b'H' | b'o' | b's' | b'h' | b'!' => "31",
+        b'=' | b'x' | b'X' => "2",
+        b'?' => "35",
+        _ => "",
     }
 }
 
@@ -171,13 +188,18 @@ fn load(path: &str, elf: Option<&str>) -> io::Result<Vec<Row>> {
             "C" if f.len() > 1 => cyc += f[1].parse::<u64>().unwrap_or(0),
             "I" if f.len() > 1 => {
                 by_id.insert(f[1].to_string(), rows.len());
-                rows.push(Row { label: String::new(), stages: Vec::new(), end: None, flushed: false, stall: false });
+                rows.push(Row { label: String::new(), stages: Vec::new(), end: None, flushed: false, stall: false, fill: b' ' });
             }
             "L" if f.len() > 3 => {
                 let Some(&i) = by_id.get(f[1]) else { continue };
                 let r = &mut rows[i];
                 if let Some(cause) = f[3].strip_prefix("** ") {
                     r.stall = true;
+                    r.fill = b'#';
+                    r.label = cause.to_string();
+                } else if let Some(cause) = f[3].strip_prefix("~~ ") {
+                    r.stall = true;
+                    r.fill = b'~';
                     r.label = cause.to_string();
                 } else if let Some((pc, word)) = f[3].split_once(": ") {
                     let p = u64::from_str_radix(pc.trim(), 16).unwrap_or(0);
@@ -233,10 +255,19 @@ fn stats(rows: &[Row]) -> (String, String) {
     (head, top)
 }
 
-fn line(r: &Row, lab_w: usize, c0: u64, ncol: usize) -> String {
-    let lab: String = if r.stall { format!("** {}", r.label) } else { r.label.clone() };
+fn line(r: &Row, lab_w: usize, c0: u64, ncol: usize, colour: bool) -> String {
+    let lab: String = if r.stall { format!("{} {}", if r.fill == b'~' { "~~" } else { "**" }, r.label) } else { r.label.clone() };
     let lab: String = lab.chars().take(lab_w).collect();
-    let cells: String = (0..ncol as u64).map(|k| r.glyph_at(c0 + k) as char).collect();
+    let mut cells = String::new();
+    for k in 0..ncol as u64 {
+        let g = r.glyph_at(c0 + k);
+        let a = if colour && !r.stall { sgr(g) } else { "" };
+        if a.is_empty() {
+            cells.push(g as char);
+        } else {
+            cells.push_str(&format!("\x1b[{a}m{}\x1b[0m", g as char));
+        }
+    }
     format!("{:>8} {:<lab_w$} {}", r.start(), lab, cells)
 }
 
@@ -354,7 +385,8 @@ fn tui(rows: &[Row]) -> io::Result<()> {
         write!(out, "{}\r\n", clip(if causes.is_empty() { "(no stall cycles in view)" } else { &causes }))?;
         write!(out, "\x1b[2m{}\x1b[0m\r\n", clip(&format!("{:>8} {:<lab_w$} cycles from {c0}", "cycle", "instruction")))?;
         for r in view {
-            let l = clip(&line(r, lab_w, c0, ncol));
+            // a coloured line fits by construction (ncol); a plain one is clipped
+            let l = if r.stall || r.flushed { clip(&line(r, lab_w, c0, ncol, false)) } else { line(r, lab_w, c0, ncol, true) };
             if r.stall {
                 write!(out, "\x1b[33m{l}\x1b[0m\r\n")?;
             } else if r.flushed {
@@ -446,7 +478,7 @@ fn main() {
         let (head, causes) = stats(v);
         println!("{head}\n{causes}");
         for r in v {
-            println!("{}", line(r, 44, v[0].start(), 110).trim_end());
+            println!("{}", line(r, 44, v[0].start(), 110, false).trim_end());
         }
     } else if let Err(e) = tui(&rows) {
         eprintln!("pipeview: {e}");

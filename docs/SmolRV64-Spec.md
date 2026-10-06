@@ -1691,23 +1691,41 @@ speculation (`bs:redirect`, `bs:drain` = `rd_wait`) wins over frontend (`fe:immu
 instructions dispatched that cycle. The run prints the totals as `TOPDOWN-SIM` lines, and
 `closed: <cycles>` confirms the causes sum to the run's cycle count.
 
-`+kanata=<file>` writes the same stream as a Konata pipe view (github.com/shioyadan/Konata),
-limited to the `+trace_from`/`+trace_to` window. There is one row per fetched instruction:
-`Fe` (fetched, in the bundle register), `Dq` (in the decoupling queue), `Ir` (in the
-instruction register), `Ds` (dispatched), the issue port (`Xa`/`Xb` ALUs, `M`, `F`, `Ct` control
-flow), `Cm` (complete), then retired or flushed; a frontend redirect flushes every row not yet
-dispatched. The fetch-side stages are keyed by the fetch sequence number until dispatch binds a
-ROB index. There is also one `St` row per run of non-producing cycles, labelled with its cause
-(`** fe:icache`), so each stall appears in program order at the point where it happened.
+`+kanata=<file>` writes the **pipe trace** (`core/tb_pipetrace.vh`) as a Konata pipe view
+(github.com/shioyadan/Konata), limited to the `+trace_from`/`+trace_to` window: one row per
+fetched instruction and ONE CODE PER CYCLE, the stage it moved to or what holds it, read from
+the hardware's own state that cycle. A row opens the cycle its instruction is in the bundle
+register; it is keyed by the fetch sequence number until dispatch binds a ROB index.
+
+| codes | where | from |
+|---|---|---|
+| `f` / `Q` | the bundle register / held there, the queue full | mirrors of the bundle register and the queue (`q_push`, `q_pop`; a mismatch with `q_cnt` is printed) |
+| `q` | the decoupling queue, behind the head group or popping | |
+| `g r n z O I L S H o` | at the queue head, not popping: a group rule; a redirect freeze; rename low; a serialising, CSR or CBO gate; no ROB row; its scheduler full; LQ full; SQ full; its lane's handoff op in flight; a head op in flight | `take`, `rule`, `crd` in the order the frontend's `room()` checks them |
+| `i` | the IR, dispatching | `s_v`, `d_take` |
+| `t` | a scheduler's dispatch stage | `stg_v` |
+| `w` / `s` / `p` | in a scheduler: an operand pending / ready, not picked / picked | the scheduler's `v`, `srdy`, `iss_ent` |
+| `a b c d` | executes in lane A..D | the lane's select register |
+| `u h v j F Y` | a multiply in flight; in its lane's handoff register; a divide in the MD stage; the FP port's select register; stage F or the FPU; a system op waiting in the SYSQ | `m1`/`m2`, `hv`, `md_v`, `j_v`, `f_valid`/`fq_v`, `sy_v` |
+| `m M k l y e` | an address waiting for M's fill; in M; a load filled, waiting to access; a load accessing; a store waiting for its data; a result in its landing buffer | `la_v`/`sa_v`, `m_valid`, the LQ's `av`/`sent`, the SQ's `dv`, `lb_*` |
+| `!` / `X` | a mispredicted CTI waiting for its restart / killed, waiting for the release | `lr_mis`, `fr_v`; `rob_kd` |
+| `=` | complete, waiting to retire | the ROB's `done` |
+
+A FETCH row (`~~ fetch: <cause>`) covers each run of cycles in which the bundle register could
+take a bundle and fetch has none: `redirect`, `freeze` (fence.i, an I$ invalidation, a mapping
+change, a rejected mark), `itlb`, `page` (the stream left the PC's page), `pq-full`, `ring-full`,
+`icache-busy` (the I$ refuses the request), `icache-wait` (requests out, no bytes back yet),
+`straddle`, `reject`, `bytes-late`, `align`. A STALL row (`** <cause>`) covers each run of
+non-producing cycles with the core's top-down cause above, so each stall appears in program
+order where it happened.
 
 `tools/pipeview` (Rust, `cargo build --release`) is the terminal viewer:
 `pipeview run.kanata [prog.elf]` is interactive (scroll, search by PC, mnemonic, symbol or cause,
 with IPC and the stall causes recomputed over the visible rows), `--text N` prints the first N
-rows, and `?` (or `--help`) shows the legend. One letter per cycle: `f q i d` fetch, queue, IR,
-dispatched; `a b M F c` the issue ports; `=` complete; `R`/`x` the cycle it retired or was
-flushed in. An ALU op commits in the cycle it computes when it is the ROB head (the ALU writes
-the ROB that cycle, and the ROB forwards the write to its head), and that cell is the unit's
-letter in upper case, `A B C`. With the ELF, labels are objdump's disassembly and
+rows, and `?` (or `--help`) shows the legend. Each cell is the row's code, coloured by class
+(executing, moving, waiting on data, held by a structure, complete); `R`/`x` mark the cycle it
+retired or was flushed in, and an op that executes and retires in one cycle shows its lane's
+letter in upper case. With the ELF, labels are objdump's disassembly and
 symbols; without it, `tools/rvdisasm` decodes the instruction word. `tools/kanata-disasm.py`
 does the same for Konata. For example, in `workloads/rvbench`, where `local/<name>.c` builds a
 program of your own:

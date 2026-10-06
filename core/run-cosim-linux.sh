@@ -97,11 +97,11 @@ STAMP="$OBJ/.config-stamp"
 # against a model none of them had been compiled into -- every log said "building simmerv
 # cosim lib" and none said "building obj_dir_smolrv64_clinux". A verdict from a binary that
 # does not contain the change is not a verdict. The hash is of every RTL file the model is
-# built from -- EVERY .v/.sv under core/ and src/, because Verilator pulls modules in by
+# built from -- EVERY .v/.sv/.vh under core/ and src/, because Verilator pulls modules in by
 # name from the -I paths and a list of the top-level files missed smolrv64_lq.v on the first
 # try (the hash did not move when the queue changed, 2026-09-04, the same afternoon).
 # Any edit forces the rebuild; BUILD=1 is only for a wiped or foreign tree.
-srchash=$(cat *.v ../src/*.v ../src/*.sv ../src/probe_cosim.cpp ../src/sd_dpi.cpp $(grep -v '^+\|^$' ../src/cvfpu_sources.f) 2>/dev/null | sha1sum | cut -c1-16)
+srchash=$(cat *.v *.vh ../src/*.v ../src/*.sv ../src/*.vh ../src/probe_cosim.cpp ../src/sd_dpi.cpp $(grep -v '^+\|^$' ../src/cvfpu_sources.f) 2>/dev/null | sha1sum | cut -c1-16)
 want="MEM_LG2=$MEM_LG2 VDEFS=${VDEFS:-} SRC=$srchash"
 echo "cosim config: MEM_LG2=$MEM_LG2 VDEFS=${VDEFS:-<none>} CYC=${CYC:-<default>} model-src=$srchash"
 need_build=0
@@ -124,7 +124,7 @@ if [ "$need_build" = 1 ]; then
    # upgrade to the exclusive lock (waits for every run of this config in flight), then re-check:
    # the run we waited for may have been the rebuild we needed.
    flock -n -x 9 || { echo "cosim: waiting for the runs of this config in flight before rebuilding $OBJ ..."; flock -x 9; }
-   [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ] && [ -x "$BIN" ] && ! [ "$SIMMERV_LIB" -nt "$BIN" ] && need_build=0
+   [ "${BUILD:-0}" != 1 ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ] && [ -x "$BIN" ] && ! [ "$SIMMERV_LIB" -nt "$BIN" ] && need_build=0
    # the wipe happens HERE, under the exclusive lock: never under a run of this config in flight
    [ "$need_build" = 1 ] && rm -rf "$OBJ"
 fi
