@@ -111,26 +111,46 @@
                       CRV_ROB1 = PT_FW + 4, CRV_POP = 2*PT_FW + 4, CRV_SER = 2*PT_FW + 5, CRV_CSR = 2*PT_FW + 6,
                       CRV_CBO = 2*PT_FW + 7, CRV_H = 2*PT_FW + 8;
 
-   // Why fetch hands the bundle register nothing in a cycle it could take a bundle.
-   function [8*12-1:0] fetch_why;
+   // Why fetch hands the bundle register nothing in a cycle it could take a bundle (FK_*), the
+   // fetch rows' and FETCH-SIM's one classifier.
+   localparam integer FK_N = 12;
+   function [3:0] fetch_k;
       input dummy;
       begin
-         if (dut.core.fe.redirect)                                 fetch_why = "redirect";
+         if (dut.core.fe.redirect)                                 fetch_k = 4'd0;
          else if (!dut.core.fe.u_fetch.imem_ok) begin
-            if (dut.core.fe.u_ring.freeze)                         fetch_why = "freeze";
-            else if (!dut.core.fe.u_ring.xlate_ok)                 fetch_why = "itlb";
-            else if (!dut.core.fe.u_ring.inpg)                     fetch_why = "page";
-            else if (!dut.core.fe.pq_room)                         fetch_why = "pq-full";
-            else if (!dut.core.fe.u_ring.ic_req)                   fetch_why = "ring-full";
-            else if (!dut.core.fe.u_ring.ic_ack)                   fetch_why = "icache-busy";
-            else                                                   fetch_why = "icache-wait";
+            if (dut.core.fe.u_ring.freeze)                         fetch_k = 4'd1;
+            else if (!dut.core.fe.u_ring.xlate_ok)                 fetch_k = 4'd2;
+            else if (!dut.core.fe.u_ring.inpg)                     fetch_k = 4'd3;
+            else if (!dut.core.fe.pq_room)                         fetch_k = 4'd4;
+            else if (!dut.core.fe.u_ring.ic_req)                   fetch_k = 4'd5;
+            else if (!dut.core.fe.u_ring.ic_ack)                   fetch_k = 4'd6;
+            else                                                   fetch_k = 4'd7;
          end
-         else if (dut.core.fe.u_fetch.strad)                       fetch_why = "straddle";
-         else if (dut.core.fe.u_fetch.reject)                      fetch_why = "reject";
-         else if (dut.core.fe.u_fetch.bytes_late)                  fetch_why = "bytes-late";
-         else                                                      fetch_why = "align";
+         else if (dut.core.fe.u_fetch.strad)                       fetch_k = 4'd8;
+         else if (dut.core.fe.u_fetch.reject)                      fetch_k = 4'd9;
+         else if (dut.core.fe.u_fetch.bytes_late)                  fetch_k = 4'd10;
+         else                                                      fetch_k = 4'd11;
       end
    endfunction
+   function [8*12-1:0] fetch_name;
+      input [3:0] k;
+      case (k)
+        4'd0: fetch_name = "redirect";    4'd1: fetch_name = "freeze";      4'd2: fetch_name = "itlb";
+        4'd3: fetch_name = "page";        4'd4: fetch_name = "pq-full";     4'd5: fetch_name = "ring-full";
+        4'd6: fetch_name = "icache-busy"; 4'd7: fetch_name = "icache-wait"; 4'd8: fetch_name = "straddle";
+        4'd9: fetch_name = "reject";      4'd10: fetch_name = "bytes-late"; default: fetch_name = "align";
+      endcase
+   endfunction
+   // FETCH-SIM: every cycle the bundle register takes a bundle, is held (the queue full), or could
+   // take one and fetch has none, by the reason; printed with TOPDOWN-SIM
+   reg [63:0] fs_take, fs_held, fs_cnt [0:FK_N-1];
+   initial begin fs_take = 0; fs_held = 0; for (kti = 0; kti < FK_N; kti = kti + 1) fs_cnt[kti] = 0; end
+   always @(posedge clk) if (!reset) begin
+      if (!dut.core.fe.pb_ready)      fs_held <= fs_held + 1;
+      else if (dut.core.fe.dq_valid)  fs_take <= fs_take + 1;
+      else                            fs_cnt[fetch_k(1'b0)] <= fs_cnt[fetch_k(1'b0)] + 1;
+   end
 
    // ---- each lane's state, flattened for the per-cycle loop (a generate index must be constant) ----
    localparam integer PT_NI = 10;                    // a lane scheduler's entries (smolrv64_core NI)
@@ -298,7 +318,7 @@
 
       // 4. the fetch row: one per run of cycles the bundle register could take a bundle and fetch
       // offers none, named by the reason
-      gk = (trace_on && dut.core.fe.pb_ready && !dut.core.fe.dq_valid) ? fetch_why(1'b0) : "";
+      gk = (trace_on && dut.core.fe.pb_ready && !dut.core.fe.dq_valid) ? fetch_name(fetch_k(1'b0)) : "";
       if (gk != kan_gk) begin
          if (kan_gopen) begin kan_close(kan_gid, "~", 1'b1); kan_gopen = 1'b0; end
          if (gk != "") begin
@@ -311,7 +331,7 @@
       // 5. the stall row: one per run of cycles with the same non-producing cause
       if (trace_on && td_k != kan_sk) begin
          if (kan_sopen) begin kan_close(kan_sid, "#", 1'b1); kan_sopen = 1'b0; end
-         if (td_k > 5'd2 && td_k != 5'd21) begin
+         if (td_k > 5'd2 && td_k < 5'd21) begin
             kan_sid = kan_next;  kan_next = kan_next + 64'd1;  kan_sopen = 1'b1;
             $sformat(lb, "** %0s", td_name(td_k));
             kan_open(kan_sid, lb, "#");

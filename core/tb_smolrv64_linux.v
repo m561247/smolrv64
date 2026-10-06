@@ -920,6 +920,9 @@ module tb;
          if (tsum != c) $display("TOPDOWN-SIM  NOT CLOSED: %0d counted vs %0d cycles", tsum, c);
          else           $display("TOPDOWN-SIM  closed: %0d cycles", tsum);
       end
+      $display("FETCH-SIM bundles=%0d held=%0d | none: redirect=%0d freeze=%0d itlb=%0d page=%0d pq-full=%0d ring-full=%0d icache-busy=%0d icache-wait=%0d straddle=%0d reject=%0d bytes-late=%0d align=%0d",
+               fs_take, fs_held, fs_cnt[0], fs_cnt[1], fs_cnt[2], fs_cnt[3], fs_cnt[4], fs_cnt[5], fs_cnt[6],
+               fs_cnt[7], fs_cnt[8], fs_cnt[9], fs_cnt[10], fs_cnt[11]);
       $display("FRING-SIM pairs=%0d halfwords=%0d taken=%0d not-taken=%0d dropped=%0d restart-fallthrough=%0d restart-inside=%0d pq-full=%0d ring-full=%0d",
                fr_req, fr_hw, fr_tk, fr_nt, fr_drop, fr_rft, fr_rmid, fr_pqfull, fr_rgfull);
       $display("FRING-EMPTY immu=%0d page=%0d icache-door=%0d in-flight=%0d other=%0d",
