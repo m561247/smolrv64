@@ -51,6 +51,12 @@
 `ifndef SMOLRV64_IW
  `define SMOLRV64_IW 3                 // pipeline width (instructions/cycle); 3 = shipping. Stage 3 width knob.
 `endif
+`ifndef SMOLRV64_FW
+ `define SMOLRV64_FW `SMOLRV64_IW      // fetch width: instructions into the decoupling queue per cycle (IW..8)
+`endif
+`ifndef SMOLRV64_QD
+ `define SMOLRV64_QD 8                 // the decoupling queue's depth (a power of two, at least 2*FW)
+`endif
 module smolrv64_core
   #(parameter PCW  = 64,
     parameter SEQW = 8,
@@ -274,8 +280,8 @@ module smolrv64_core
 
    localparam DCR_HIT = 2;   // BIMW-1: the BTB-hit bit inside the carried predict details
    localparam integer DCR_BACK = 1;   // static-taken for a BACKWARD conditional branch on a BTB miss (loop back-edge bet)
-   smolrv64_frontend #(.PCW(PCW), .SEQW(SEQW), .HW(HW), .IW(IW), .PDW(PDW), .RASB(RASB), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK),
-                  .RESET_PC(RESET_PC)) fe
+   smolrv64_frontend #(.PCW(PCW), .SEQW(SEQW), .HW(HW), .IW(IW), .FW(`SMOLRV64_FW), .PDW(PDW), .RASB(RASB), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK),
+                  .QDEPTH(`SMOLRV64_QD), .QAW($clog2(`SMOLRV64_QD)), .RESET_PC(RESET_PC)) fe
      (.clk(clk), .reset(reset), .accept(accept), .consume(fe_consume),
       .d_valid(fe_dv), .d_rec(fe_rec),
       .fs_off(fs_off), .crd(crd), .hd_v(fe_hd_v), .hd_take(fe_hd_take), .hd_gc(fe_hd_gc),

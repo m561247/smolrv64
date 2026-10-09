@@ -108,8 +108,10 @@ frontend-bound (§14) and only ALU ops reorder; the buckets it targets are `ST_M
 ### 2.2 Why the decoupling queue exists
 
 `accept` (X←F) is registered off M-stage state. The queue decouples fetch from the backend so
-a fetch bubble and a backend stall do not serialise. Depth 8 (`QDEPTH`), which bought ~3.9% on
-the Linux cosim over depth 4.
+a fetch bubble and a backend stall do not serialise. Fetch pushes a bundle of up to FW
+instructions a cycle (`SMOLRV64_FW`, IW unless set, up to 8) and dispatch pops a group of up to
+IW, so FW > IW refills the queue faster than dispatch drains it. Depth `SMOLRV64_QD` (8), at
+least 2 x FW: a bundle is pushed only with room for a whole one.
 
 ---
 
@@ -1688,8 +1690,7 @@ cycle, printed as `perf stat` would) run through `tools/perf-cpi-stack.py` repro
 speculation (`bs:redirect`, `bs:drain` = `rd_wait`) wins over frontend (`fe:immu`, `fe:icache`,
 `fe:align`, `fe:queue`), which wins over backend (`be:M-mem`, `be:M-other`, `be:rob-full`,
 `be:dep-load`, `be:dep-fp`, `be:iq-full`, `be:rename`, `be:sq-full`, `be:lq-full`,
-`be:serialize`, in `d_hold`'s order). Any other cycle is `ok:N`, where N is the number of
-instructions dispatched that cycle. The run prints the totals as `TOPDOWN-SIM` lines, and
+`be:serialize`, in `d_hold`'s order). Any other cycle is `ok:N`, where N is the number of instructions dispatched that cycle. The run prints the totals as `TOPDOWN-SIM` lines, and
 `closed: <cycles>` confirms the causes sum to the run's cycle count.
 
 `+kanata=<file>` writes the **pipe trace** (`core/tb_pipetrace.vh`) as a Konata pipe view

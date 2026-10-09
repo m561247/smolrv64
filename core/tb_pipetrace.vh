@@ -9,8 +9,9 @@
    // instruction words for disassembly from the ELF.
    integer    kf;  reg kan_on;  reg [63:0] kan_last, kan_next, kan_rid;
    reg [8*256-1:0] kan_path;
-   localparam integer PT_FW = `SMOLRV64_IW;          // slots, lanes and the frontend's width
-   localparam integer PT_QD = 8;                     // the decoupling queue's depth (QDEPTH)
+   localparam integer PT_IW = `SMOLRV64_IW;          // slots and lanes
+   localparam integer PT_FW = `SMOLRV64_FW;          // the bundle register's slots
+   localparam integer PT_QD = `SMOLRV64_QD;          // the decoupling queue's depth (QDEPTH)
    // rows by ROB index (after dispatch) and by sequence number (before)
    reg [63:0] pt_id [0:255];  reg pt_v [0:255];  reg [7:0] pt_c [0:255];
    reg [63:0] ps_id [0:255];  reg ps_v [0:255];  reg [7:0] ps_c [0:255];
@@ -107,9 +108,9 @@
       end
    endfunction
    // smolrv64_credits.vh's indices, at this width
-   localparam integer CRV_IA = 0, CRV_L = PT_FW, CRV_F = PT_FW + 1, CRV_LD = PT_FW + 2, CRV_ST = PT_FW + 3,
-                      CRV_ROB1 = PT_FW + 4, CRV_POP = 2*PT_FW + 4, CRV_SER = 2*PT_FW + 5, CRV_CSR = 2*PT_FW + 6,
-                      CRV_CBO = 2*PT_FW + 7, CRV_H = 2*PT_FW + 8;
+   localparam integer CRV_IA = 0, CRV_L = PT_IW, CRV_F = PT_IW + 1, CRV_LD = PT_IW + 2, CRV_ST = PT_IW + 3,
+                      CRV_ROB1 = PT_IW + 4, CRV_POP = 2*PT_IW + 4, CRV_SER = 2*PT_IW + 5, CRV_CSR = 2*PT_IW + 6,
+                      CRV_CBO = 2*PT_IW + 7, CRV_H = 2*PT_IW + 8;
 
    // Why fetch hands the bundle register nothing in a cycle it could take a bundle (FK_*), the
    // fetch rows' and FETCH-SIM's one classifier.
@@ -154,13 +155,13 @@
 
    // ---- each lane's state, flattened for the per-cycle loop (a generate index must be constant) ----
    localparam integer PT_NI = 10;                    // a lane scheduler's entries (smolrv64_core NI)
-   wire [PT_FW-1:0]        pl_stg_v, pl_iss_v, pl_x, pl_m1, pl_m2, pl_hv;
-   wire [7:0]              pl_stg_rob [0:PT_FW-1], pl_iss_ent [0:PT_FW-1], pl_rob [0:PT_FW-1];
-   wire [7:0]              pl_mrob1 [0:PT_FW-1], pl_mrob2 [0:PT_FW-1], pl_hrob [0:PT_FW-1];
-   wire [PT_FW*PT_NI-1:0]  pl_iq_v, pl_iq_rdy;
-   wire [7:0]              pl_iq_rob [0:PT_FW*PT_NI-1];
+   wire [PT_IW-1:0]        pl_stg_v, pl_iss_v, pl_x, pl_m1, pl_m2, pl_hv;
+   wire [7:0]              pl_stg_rob [0:PT_IW-1], pl_iss_ent [0:PT_IW-1], pl_rob [0:PT_IW-1];
+   wire [7:0]              pl_mrob1 [0:PT_IW-1], pl_mrob2 [0:PT_IW-1], pl_hrob [0:PT_IW-1];
+   wire [PT_IW*PT_NI-1:0]  pl_iq_v, pl_iq_rdy;
+   wire [7:0]              pl_iq_rob [0:PT_IW*PT_NI-1];
    genvar gpl, gpe;
-   generate for (gpl = 0; gpl < PT_FW; gpl = gpl + 1) begin: ptl
+   generate for (gpl = 0; gpl < PT_IW; gpl = gpl + 1) begin: ptl
       assign pl_stg_v[gpl]   = dut.core.ln[gpl].stg_v;
       assign pl_stg_rob[gpl] = 8'(dut.core.ln[gpl].stg_rob);
       assign pl_iss_v[gpl]   = dut.core.ln[gpl].iss_v;
@@ -190,7 +191,7 @@
          if (pt_v[pi]) nc[pi] = dut.core.u_rob.done[pi] ? "=" : "?";
       // the lanes: the dispatch stage (a cycle on the way to the scheduler), and the scheduler
       // (waiting for an operand, ready, picked)
-      for (pj = 0; pj < PT_FW; pj = pj + 1) begin
+      for (pj = 0; pj < PT_IW; pj = pj + 1) begin
          if (pl_stg_v[pj]) put(pl_stg_rob[pj], "t");
          for (pk = 0; pk < PT_NI; pk = pk + 1)
             if (pl_iq_v[pj*PT_NI + pk])
@@ -222,14 +223,14 @@
          else if (dut.core.u_sq.av[pj])                 put(ix, "=");
       end
       if (dut.core.m_valid) put(8'(dut.core.m_rob_idx), "M");
-      for (pj = 0; pj < PT_FW; pj = pj + 1)
+      for (pj = 0; pj < PT_IW; pj = pj + 1)
          for (pk = 0; pk < dut.core.LBN; pk = pk + 1)
             if (pk < dut.core.lb_n[pj])
                put(8'(dut.core.lb_rob[pj*dut.core.LBN + ((dut.core.lb_h[pj] + pk) % dut.core.LBN)]), "e");
       if (dut.core.sy_v)  put(8'(dut.core.sy_rob), "Y");
       if (dut.core.md_v)  put(8'(dut.core.md_rob), "v");
       // a lane's handoff register, its multiply in flight, and what it executes this cycle
-      for (pj = 0; pj < PT_FW; pj = pj + 1) begin
+      for (pj = 0; pj < PT_IW; pj = pj + 1) begin
          if (pl_hv[pj]) put(pl_hrob[pj], "h");
          if (pl_m1[pj]) put(pl_mrob1[pj], "u");
          if (pl_m2[pj]) put(pl_mrob2[pj], "u");
@@ -237,7 +238,7 @@
       end
       // a mispredicted CTI waiting for its restart (it completes at the squash or the release), and
       // the entries the kill marked dead, waiting for the release that drops them
-      for (pj = 0; pj < PT_FW; pj = pj + 1)
+      for (pj = 0; pj < PT_IW; pj = pj + 1)
          if (dut.core.lr_v[pj] & dut.core.lr_mis[pj]) put(8'(dut.core.lr_rob[pj]), "!");
       if (dut.core.fr_v) put(8'(dut.core.fr_rob), "!");
       if (dut.core.rob_kd_v)
@@ -256,10 +257,10 @@
          end
       for (pj = 0; pj < qm_n; pj = pj + 1)
          if (ps_v[qm_seq[pj]]) begin
-            kan_code(ps_id[qm_seq[pj]], ps_c[qm_seq[pj]], (pj < PT_FW) ? head_why(pj) : "q");
-            ps_c[qm_seq[pj]] = (pj < PT_FW) ? head_why(pj) : "q";
+            kan_code(ps_id[qm_seq[pj]], ps_c[qm_seq[pj]], (pj < PT_IW) ? head_why(pj) : "q");
+            ps_c[qm_seq[pj]] = (pj < PT_IW) ? head_why(pj) : "q";
          end
-      for (pj = 0; pj < PT_FW; pj = pj + 1)
+      for (pj = 0; pj < PT_IW; pj = pj + 1)
          if (dut.core.s_v[pj] && ps_v[dut.core.s_seq[pj]]) begin
             kan_code(ps_id[dut.core.s_seq[pj]], ps_c[dut.core.s_seq[pj]], dut.core.d_take ? "i" : "r");
             ps_c[dut.core.s_seq[pj]] = dut.core.d_take ? "i" : "r";
@@ -267,7 +268,7 @@
 
       // 3. the ends of this cycle: retire, the squashes, dispatch binding a ROB index, the IR's
       // dropped group, a frontend redirect
-      for (pj = 0; pj < PT_FW; pj = pj + 1)
+      for (pj = 0; pj < PT_IW; pj = pj + 1)
          if (dut.core.rc_v[pj] && pt_v[dut.core.rc_idx[pj]]) begin
             kan_close(pt_id[dut.core.rc_idx[pj]], pt_c[dut.core.rc_idx[pj]], 1'b0);  pt_v[dut.core.rc_idx[pj]] = 1'b0;
          end
@@ -276,7 +277,7 @@
       if (dut.core.fr_rel)
          for (pi = 0; pi < dut.core.ROB_DEPTH; pi = pi + 1)
             if (dut.core.rob_kd[pi] && pt_v[pi]) begin kan_close(pt_id[pi], pt_c[pi], 1'b1); pt_v[pi] = 1'b0; end
-      for (pj = 0; pj < PT_FW; pj = pj + 1)
+      for (pj = 0; pj < PT_IW; pj = pj + 1)
          if (dut.core.s_v[pj] && ps_v[dut.core.s_seq[pj]]) begin
             if (dut.core.s_takev[pj]) begin
                ix = 8'(dut.core.s_rob[pj]);

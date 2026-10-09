@@ -17,6 +17,12 @@
 `ifndef SMOLRV64_IW
  `define SMOLRV64_IW 3
 `endif
+`ifndef SMOLRV64_FW
+ `define SMOLRV64_FW `SMOLRV64_IW
+`endif
+`ifndef SMOLRV64_QD
+ `define SMOLRV64_QD 8
+`endif
 module tb;
    localparam [63:0] BASE = 64'h8000_0000;
 `ifdef SMOLRV64_MEM_SIZE_LG2

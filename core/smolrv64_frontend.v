@@ -20,7 +20,8 @@ module smolrv64_frontend
   #(parameter PCW   = 64,
     parameter SEQW  = 8,
     parameter HW    = 2,             // fetch window halfwords (one 32-bit instruction)
-    parameter IW    = 2,             // pipeline width (instructions/cycle); threaded from SMOLRV64_IW (Stage 3)
+    parameter IW    = 2,             // pipeline width: the dispatch group's slots
+    parameter FW    = IW,            // fetch width: the bundle's slots, pushed into the queue in one cycle
     parameter RASB  = 3,             // log2 RAS entries (smolrv64_predictor)
     parameter GHL   = 11,            // the predictor's history length
     parameter PDW   = 31,            // smolrv64_predictor's predict-detail width
@@ -100,16 +101,14 @@ module smolrv64_frontend
     output wire [15:0]             fe_err);
 
    // ---------------------------------------------------------------- fetch
-   // TWO-WIDE FETCH (2026-09-05, plan item 10a): the aligner emits up to two instructions per
-   // cycle and both enter the queue in one cycle; decode still pops one. The queue then runs
-   // ahead of dispatch and absorbs every fetch gap (a redirect's refill, a taken target's
-   // arrival) instead of exposing it two cycles later as FE_QUE -- and it is the frontend a
-   // two-wide dispatch (10b) needs. A bundle ends at its first CTI, so slot 1 is never
-   // followed by anything and slot 0 is never a CTI when slot 1 is valid: the bundle's
-   // prediction (pnpc_kind, target, details) belongs to its LAST valid slot and slot 0
-   // falls through.
-   localparam FW = IW;              // the width knob: the queue, decode and the group rules
-   initial if (FW < 2 || FW > 4) $fatal(1, "smolrv64_frontend: IW=%0d: the width is 2..4", FW);
+   // The aligner emits a bundle of up to FW instructions a cycle, and the whole bundle enters the
+   // queue in one cycle; dispatch takes groups of up to IW from the queue's head. FW > IW lets the
+   // queue refill faster than dispatch drains it, so it rides out the cycles fetch delivers short
+   // bundles or nothing. A bundle's prediction (pnpc_kind, target) belongs to its LAST valid slot;
+   // each slot carries its own predict details.
+   initial if (IW < 2 || IW > 4 || FW < IW || FW > 8 || QDEPTH < 2*FW || (1 << QAW) != QDEPTH)
+      $fatal(1, "smolrv64_frontend: IW=%0d FW=%0d QDEPTH=%0d QAW=%0d: IW is 2..4, FW is IW..8, QDEPTH = 2**QAW >= 2*FW",
+             IW, FW, QDEPTH, QAW);
    wire               dq_valid;
    wire [FW-1:0]      dq_sv;                      // per-slot valid
    wire [FW*32-1:0]   dq_inst;
@@ -275,6 +274,10 @@ module smolrv64_frontend
       integer i;
       begin cnt = {CW{1'b0}}; for (i = 0; i < FW; i = i + 1) cnt = cnt + {{(CW-1){1'b0}}, v[i]}; end
    endfunction
+   function automatic [CW-1:0] cnt_iw(input [IW-1:0] v);
+      integer i;
+      begin cnt_iw = {CW{1'b0}}; for (i = 0; i < IW; i = i + 1) cnt_iw = cnt_iw + {{(CW-1){1'b0}}, v[i]}; end
+   endfunction
    // Slot k's queue record: slot 0 is the fetch-fault pseudo-op when fetch has nothing; a slot
    // falls through when a later one follows, and the bundle's last valid slot carries its
    // prediction (pnpc_kind and the target belong to it). Each slot's details are its own: m is
@@ -331,9 +334,9 @@ module smolrv64_frontend
       assign q_bank_rd[qgb] = mem[rpos[QAW-1:QLB]];
    end endgenerate
    // the heads: decoded records at q_rp + k, and each one's dispatch class (the record's last field)
-   wire [IRW-1:0] qh [0:FW-1];
-   wire [15:0]    g  [0:FW-1];
-   generate for (gk = 0; gk < FW; gk = gk + 1) begin: hd
+   wire [IRW-1:0] qh [0:IW-1];
+   wire [15:0]    g  [0:IW-1];
+   generate for (gk = 0; gk < IW; gk = gk + 1) begin: hd
       localparam [QAW-1:0] K = gk;
       wire [QAW-1:0] pos = q_rp + K;
       assign qh[gk] = q_bank_rd[pos[QLB-1:0]];
@@ -368,7 +371,7 @@ module smolrv64_frontend
    end endgenerate
 
    // ------------------------------------------------------- the IR registers: one dispatch group
-   // The queue head forms the group. Up to FW heads go together when the dispatch class allows
+   // The queue head forms the group. Up to IW heads go together when the dispatch class allows
    // it (smolrv64_gclass, evaluated at decode): every member plain (a head op is not), at most
    // one of the FP/MD/SYS pipe's, one load and one store (the queues' single allocation ports),
    // and nothing behind a CTI that redirects fetch at decode. The IR takes the group when it is
@@ -384,7 +387,7 @@ module smolrv64_frontend
    endfunction
    // the rules: which heads may go together (cumulative classes of the slots before)
    // slot k reads slot k-1: per-bit variables, so the chain is not a loop to the simulator
-   wire [FW-1:0] rule /*verilator split_var*/, take /*verilator split_var*/, c_fc /*verilator split_var*/,
+   wire [IW-1:0] rule /*verilator split_var*/, take /*verilator split_var*/, c_fc /*verilator split_var*/,
                  c_ld /*verilator split_var*/, c_st /*verilator split_var*/;
    // a CBO is the one head op that does not serialise (an AMO or LR/SC does)
    wire g0_cbo  = g[0][G_L] & ~g[0][G_PLAIN] & ~g[0][G_SER];
@@ -393,7 +396,7 @@ module smolrv64_frontend
    assign take[0] = rule[0] & crd[CR_POP] & head_go & crd[CR_ROB1]
                   & room(g[0], crd[CR_IA], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F]);
    assign c_fc[0] = g[0][G_FC];  assign c_ld[0] = g[0][G_LD];  assign c_st[0] = g[0][G_ST];
-   generate for (gk = 1; gk < FW; gk = gk + 1) begin: rl
+   generate for (gk = 1; gk < IW; gk = gk + 1) begin: rl
       localparam [QAW:0] K = gk;
       assign rule[gk] = rule[gk-1] & (q_cnt > K) & g[0][G_PLAIN] & g[gk][G_PLAIN] & ~g[gk-1][G_DCR]
                       & ~(g[gk][G_FC] & c_fc[gk-1]) & ~(g[gk][G_LD] & c_ld[gk-1]) & ~(g[gk][G_ST] & c_st[gk-1]);
@@ -405,20 +408,20 @@ module smolrv64_frontend
    end endgenerate
    // The IR loads every cycle: what it holds dispatches the next, or is dropped by a freeze
    // (a redirect, an early restart, a decode resteer), in which case it is the wrong path.
-   assign q_pop = cnt(take);
+   assign q_pop = cnt_iw(take);
    assign hd_v = rule[0];  assign hd_take = take[0];  assign hd_gc = g[0];
    // a group dispatches whole: a prefix of the slots, all of the IR's
-   wire e_order = ~reset & ((|(consume[FW-1:1] & ~consume[FW-2:0])) | (consume[0] & (consume != d_valid)));
+   wire e_order = ~reset & ((|(consume[IW-1:1] & ~consume[IW-2:0])) | (consume[0] & (consume != d_valid)));
    always @(posedge clk)
       if (e_order) $fatal(1, "smolrv64_frontend: a group dispatched in part (consume %b, valid %b)", consume, d_valid);
    reg  [1:0] fe_err_q;
    always @(posedge clk) fe_err_q <= reset ? 2'd0 : {e_order, e_bundle};
    assign fe_err = {3'd0, fe_err_q, f_err, bp_err, ring_err};
    always @(posedge clk) begin
-      if (reset | redirect) d_valid <= {FW{1'b0}};
+      if (reset | redirect) d_valid <= {IW{1'b0}};
       else begin
          d_valid <= take;
-         for (k = 0; k < FW; k = k + 1) d_rec[k*IRW +: IRW] <= qh[k];
+         for (k = 0; k < IW; k = k + 1) d_rec[k*IRW +: IRW] <= qh[k];
       end
    end
 endmodule
