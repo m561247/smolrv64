@@ -517,7 +517,7 @@ keeps. The ROB is sized by the *window*; the scheduler that needs execute detail
   `minstret` must not count an instruction that architecturally does not exist.
 
 **The irrevocable pointer (`irr`, 2026-09-04).** A second pointer walks forward from the
-head, one entry per cycle, over entries that are done (or completing on the SQ's port) and
+head, a ROB row per cycle, over entries that are done (or completing on the SQ's port) and
 stops at the first that is not. In this core every op that can restart the machine -- a
 mispredicted branch, a trap, a system op, `fence.i`, the interrupt pseudo-op -- waits in M
 for the ROB head and is done only once it has completed there, so an entry that is done can

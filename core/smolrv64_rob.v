@@ -150,17 +150,31 @@ module smolrv64_rob
    wire [IDXB-1:0] iidx = irr[IDXB-1:0];
    assign irr_idx = iidx;
    assign irr_v   = (irr != tail);
-   // one entry per cycle, over entries already done or completing on an IRR_FWD port
-   function automatic irr_hits;
-      input [IDXB-1:0] ix;
-      integer q;
-      begin
-         irr_hits = 1'b0;
+   // A row per cycle: the pointer crosses every column of its row, from its own on, that is done
+   // or completing on an IRR_FWD port (a column with no op is skipped), and stops at the first that
+   // is not; past the row's last it goes to the next row.
+   wire [IDXB-CB-1:0] irow = irr[IDXB-1:CB];
+   wire [NCOL-1:0]    ir_wait;                 // the column's op is not done
+   genvar gic;
+   generate for (gic = 0; gic < NCOL; gic = gic + 1) begin: irc
+      wire [IDXB-1:0] ix = {irow, gic[CB-1:0]};
+      reg             fw;
+      integer         q;
+      always @* begin
+         fw = 1'b0;
          for (q = 0; q < NW; q = q + 1)
-            if (IRR_FWD[q] && w_v[q] && (w_ix[q*IDXB +: IDXB] == ix)) irr_hits = 1'b1;
+            if (IRR_FWD[q] && w_v[q] && (w_ix[q*IDXB +: IDXB] == ix)) fw = 1'b1;
       end
-   endfunction
-   wire irr_done = (irr != tail) & v[iidx] & (done[iidx] | irr_hits(iidx));
+      assign ir_wait[gic] = v[ix] & ~done[ix] & ~fw & (gic >= irr[CB-1:0]);
+   end endgenerate
+   reg  [IDXB:0] irr_step;
+   integer       ick;
+   always @* begin
+      irr_step = {irr[IDXB:CB] + 1'b1, {CB{1'b0}}};
+      for (ick = NCOL - 1; ick >= 0; ick = ick - 1)
+         if (ir_wait[ick]) irr_step = {irr[IDXB:CB], ick[CB-1:0]};
+      if (irr == tail) irr_step = irr;
+   end
    // the entry after a position: the next column of its row while that is valid, else the next row
    function automatic [IDXB:0] next_pos(input [IDXB:0] p);
       begin
@@ -267,8 +281,7 @@ module smolrv64_rob
       for (hk = 0; hk < IW; hk = hk + 1)
          if (cvv[hk]) head_n = next_pos({head[IDXB:CB], hk[CB-1:0]});
    end
-   // the irrevocable pointer steps one entry and never falls behind the head
-   wire [IDXB:0] irr_step = irr_done ? next_pos(irr) : irr;
+   // the irrevocable pointer never falls behind the head
    wire [IDXB:0] irr_lag  = head_n - irr_step;            // > 0 and < half the space: behind
    wire [IDXB:0] irr_n    = ((irr_lag != 0) & ~irr_lag[IDXB]) ? head_n : irr_step;
    // a flush empties the ROB at a row boundary: the head's row if nothing of it has committed
