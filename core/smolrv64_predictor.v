@@ -154,7 +154,11 @@ module smolrv64_predictor
    // ------------------------------------------------------------ the queue
    // {tk, target, rsp_pre, ghr_pre, yhit, yctr, yidx, ctr}
    localparam QEW = 1 + PCW + RASB + GHL + 1 + 2 + YBITS + 2;
-   reg [QEW-1:0]  pq [0:PQD-1];
+   // TWO BANKS ON THE POSITION'S PARITY: a pair pushes up to M = 2 entries a cycle, to consecutive
+   // positions and so to different banks, and each bank has one muxed write (one write statement
+   // per LUTRAM bank: a second write site turns the array into flops).
+   reg [QEW-1:0]  pq0 [0:PQD/2-1];
+   reg [QEW-1:0]  pq1 [0:PQD/2-1];
    reg [PQB-1:0]  pq_rp, pq_wp;
    reg [PQB:0]    pq_n;
    initial begin pq_rp = 0; pq_wp = 0; pq_n = 0; end
@@ -163,7 +167,8 @@ module smolrv64_predictor
    wire [GHL-1:0]  en_ghr [0:IW-1];
    genvar gj;
    generate for (gj = 0; gj < IW; gj = gj + 1) begin : ent
-      wire [QEW-1:0] q  = pq[pq_rp + gj[PQB-1:0]];
+      wire [PQB-1:0] ps = pq_rp + gj[PQB-1:0];
+      wire [QEW-1:0] q  = ps[0] ? pq1[ps[PQB-1:1]] : pq0[ps[PQB-1:1]];
       wire           in = pq_n > gj;
       assign en_rsp[gj] = in ? q[QEW-1-1-PCW -: RASB] : ras_ptr;
       assign en_ghr[gj] = in ? q[QEW-1-1-PCW-RASB -: GHL] : ghr;
@@ -248,6 +253,26 @@ module smolrv64_predictor
                           sa_q[YB+3:4] ^ yh_q, gm[2:0], me_e[TGTW +: 2]};
    end endgenerate
 
+   // the pair's entries in mark order (nmk <= M = 2), and the bank each lands in
+   reg  [QEW-1:0]  pw_e0, pw_e1;
+   integer         pwk;
+   always @* begin
+      pw_e0 = pq_e8[0];  pw_e1 = pq_e8[0];
+      for (pwk = 7; pwk >= 0; pwk = pwk - 1)
+         if (mkv[pwk]) begin pw_e1 = pw_e0;  pw_e0 = pq_e8[pwk]; end
+   end
+   wire [PQB-1:0]  pw_p1 = pq_wp + 1'b1;
+   wire            pw_two = (nmk == 4'd2);
+   // bank b takes the entry whose position has parity b: entry 0 at pq_wp, entry 1 at pq_wp + 1
+   wire            b0_we = push & (~pq_wp[0] | pw_two);
+   wire            b1_we = push & ( pq_wp[0] | pw_two);
+   wire [PQB-2:0]  b0_ix = pq_wp[0] ? pw_p1[PQB-1:1] : pq_wp[PQB-1:1];
+   wire [PQB-2:0]  b1_ix = pq_wp[0] ? pq_wp[PQB-1:1] : pw_p1[PQB-1:1];
+   wire [QEW-1:0]  b0_d  = pq_wp[0] ? pw_e1 : pw_e0;
+   wire [QEW-1:0]  b1_d  = pq_wp[0] ? pw_e0 : pw_e1;
+   always @(posedge clk) if (b0_we) pq0[b0_ix] <= b0_d;
+   always @(posedge clk) if (b1_we) pq1[b1_ix] <= b1_d;
+
    // ------------------------------------------------------------------ training
    // One BTB write per resolved CTI (oldest per cycle), into the bank of its last halfword.
    // Bimodal: nudge the carried counter toward the outcome; uncond: record the class (call/return
@@ -322,14 +347,7 @@ module smolrv64_predictor
          if (flush) begin
             pq_rp <= 0;  pq_wp <= 0;  pq_n <= 0;
          end else begin
-            if (push) begin : wr
-               reg [PQB-1:0] w;
-               integer       wk;
-               w = pq_wp;
-               for (wk = 0; wk < 8; wk = wk + 1)
-                  if (mkv[wk]) begin pq[w] <= pq_e8[wk];  w = w + 1'b1; end
-               pq_wp <= w;
-            end
+            if (push) pq_wp <= pq_wp + nmk[PQB-1:0];
             pq_rp <= pq_rp + popw[PQB-1:0];
             pq_n <= pq_n + (push ? {{(PQB+1-4){1'b0}}, nmk} : {(PQB+1){1'b0}}) - popw;
          end
