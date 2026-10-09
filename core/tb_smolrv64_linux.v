@@ -18,10 +18,10 @@
  `define SMOLRV64_IW 3
 `endif
 `ifndef SMOLRV64_FW
- `define SMOLRV64_FW `SMOLRV64_IW
+ `define SMOLRV64_FW (2*`SMOLRV64_IW)
 `endif
 `ifndef SMOLRV64_QD
- `define SMOLRV64_QD 8
+ `define SMOLRV64_QD 16
 `endif
 module tb;
    localparam [63:0] BASE = 64'h8000_0000;

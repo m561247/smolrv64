@@ -109,9 +109,9 @@ frontend-bound (§14) and only ALU ops reorder; the buckets it targets are `ST_M
 
 `accept` (X←F) is registered off M-stage state. The queue decouples fetch from the backend so
 a fetch bubble and a backend stall do not serialise. Fetch pushes a bundle of up to FW
-instructions a cycle (`SMOLRV64_FW`, IW unless set, up to 8) and dispatch pops a group of up to
-IW, so FW > IW refills the queue faster than dispatch drains it. Depth `SMOLRV64_QD` (8), at
-least 2 x FW: a bundle is pushed only with room for a whole one.
+instructions a cycle (`SMOLRV64_FW`, 2 x IW unless set, up to 8: 6 at IW=3) and dispatch pops a
+group of up to IW, so the queue refills faster than dispatch drains it. Depth `SMOLRV64_QD` (16),
+at least 2 x FW: a bundle is pushed only with room for a whole one.
 
 ---
 

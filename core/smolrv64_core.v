@@ -52,10 +52,10 @@
  `define SMOLRV64_IW 3                 // pipeline width (instructions/cycle); 3 = shipping. Stage 3 width knob.
 `endif
 `ifndef SMOLRV64_FW
- `define SMOLRV64_FW `SMOLRV64_IW      // fetch width: instructions into the decoupling queue per cycle (IW..8)
+ `define SMOLRV64_FW (2*`SMOLRV64_IW)  // fetch width: instructions into the decoupling queue per cycle (IW..8)
 `endif
 `ifndef SMOLRV64_QD
- `define SMOLRV64_QD 8                 // the decoupling queue's depth (a power of two, at least 2*FW)
+ `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif
 module smolrv64_core
   #(parameter PCW  = 64,
