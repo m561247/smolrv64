@@ -925,7 +925,8 @@ set in the stage register.
   cycle; the rest of the op is a record written at dispatch (`spl_ld`, `spl_st`: the payload and
   the ROB slot). **M fills in program order**: it takes the oldest load or store whose address
   has not arrived (`uf_idx`/`uf_seq` from each queue, a sequence compare between the two) once
-  its VA is in, or the head op when nothing is unfilled, which the credits make always. Everything M did for a load or store it still does: the dTLB lookup, the
+  its VA is in, or the head op when nothing is unfilled, which the credits make always. The
+  op M holds is not a candidate (the queues' `mf_*`), so M takes a load or store every cycle. Everything M did for a load or store it still does: the dTLB lookup, the
   LQ/SQ fill, a load's early start.
 - **A store's data comes from the store queue (5.2d-b step 2).** A value already in a register
   file at allocation (`d_rdy`) is fetched by the SQ's data read: it registers its oldest entry
@@ -1005,9 +1006,10 @@ set in the stage register.
   `{01,00}`/`{10,00}`), and the response is claimed by that tag -- never by "only one in
   flight" (rule B1). The formatting state lives per tag in the LSU (`o_nb/o_sgn/o_fp/o_boff`,
   `o_v` = a response is still coming), the landing is `ld_land_fast` by `pt_rtag` into the
-  load queue's entry, the ROB, the lane's landing (above) and the retire record. A start needs the read buffer free
-  (`port_free = ~mem_rbusy & ~mem_ren`) and the tag not outstanding (`~o_v[tag]`); a store
-  needs neither. A redirect kills every fast load in flight, INCLUDING one starting in that
+  load queue's entry, the ROB, the lane's landing (above) and the retire record. A start needs no earlier read
+  waiting for the D$'s accept (`port_free = ~mem_rbusy`, a register: the SoC's read door holds
+  up to two waiting reads, the one presented and the one behind it, so a read starts every
+  cycle the D$ takes one) and the tag not outstanding (`~o_v[tag]`); a store needs neither. A redirect kills every fast load in flight, INCLUDING one starting in that
   cycle (`o_kill`; the slow path's `ld_sq` does the same) -- the response still comes and is
   dropped. Straddles, uncached and device loads, AMOs and LR/SC keep the FSM path and its one
   slow landing (`ld_inflight_idx`), which yields its cycle to a fast landing (one PRF and one

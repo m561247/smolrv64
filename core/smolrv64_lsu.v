@@ -140,7 +140,7 @@ module smolrv64_lsu
     input  wire            mem_rvalid_c,   // a fast-tagged cache response, ONE cycle
     input  wire [LDTW-1:0] mem_rtag_resp,
     input  wire [63:0]     mem_rdata_c,
-    input  wire            mem_rbusy,      // the last read is not yet accepted by the cache
+    input  wire            mem_rbusy,      // a read before this cycle's is not yet accepted by the cache
     output wire            mem_wen,
     output wire [AW-1:0]   mem_waddr,
     output wire [AW-1:0]   mem_wabase,   // the access base PA (pa_q), NOT the per-beat address
@@ -272,10 +272,11 @@ module smolrv64_lsu
    assign dtlb_walking  = mmu_walking;
    assign dtlb_walk_beg = mmu_walking & ~mmu_walking_q;
    wire        xl_want  = req_valid & (st == S_IDLE);
-   // A read may start only when the read request buffer (mem_raddr/mem_ren, one deep) is free:
-   // not presenting a request this cycle and not still waiting for the cache's accept. And a
-   // fast load may not reuse a tag whose response is still on its way (C4a).
-   wire        port_free = ~mem_rbusy & ~mem_ren;
+   // A read may start only when no earlier read still waits for the cache's accept (mem_rbusy, a
+   // register: the SoC holds up to two waiting reads, so the read presented this cycle and the
+   // next one fit whatever the cache does). And a fast load may not reuse a tag whose response is
+   // still on its way (C4a).
+   wire        port_free = ~mem_rbusy;
    reg [(1<<LDTW)-1:0] o_v;                      // per tag: a response is still coming
    // ...and only M's walk needs that: the queue walker's request does not depend on the FSM,
    // so a queued access may start while it walks. Whose walk it is: the port's requester last

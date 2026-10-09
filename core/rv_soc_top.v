@@ -509,12 +509,12 @@ module rv_soc_top #(
    assign       dmem_rvalid_c  = dc_rv_fast;
    assign       dmem_rtag_resp = dc_rd_resp_tag[LQ_IB-1:0];
    assign       dmem_rdata_c   = dc_rd_data;
-   assign       dmem_rbusy     = c_rd_want;
+   assign       dmem_rbusy     = rq_hv;
 `ifdef LSUDBG
    reg [63:0] soc_dbg_line; initial if (!$value$plusargs("dbg_line=%h", soc_dbg_line)) soc_dbg_line = 64'hFFFF_FFFF_FFFF_FFFF;
    always @(posedge clk) if (!reset) begin
       if (dcr_req && (dcr_addr[55:6] == soc_dbg_line[55:6]))
-         $display("[soc t=%0t DOOR req addr=%h tag=%h ack=%b want=%b ren=%b fast=%b]", $time, dcr_addr, dcr_tag, dc_rd_ack, c_rd_want, dmem_ren, dmem_rfast);
+         $display("[soc t=%0t DOOR req addr=%h tag=%h ack=%b waiting=%0d ren=%b fast=%b]", $time, dcr_addr, dcr_tag, dc_rd_ack, rq_n, dmem_ren, dmem_rfast);
       if (dc_rd_valid && (dc_rd_resp_addr[55:6] == soc_dbg_line[55:6]))
          $display("[soc t=%0t RESP addr=%h tag=%h data=%h]", $time, dc_rd_resp_addr, dc_rd_resp_tag, dc_rd_data);
    end
@@ -529,7 +529,7 @@ module rv_soc_top #(
    // and the select carries no information -- each term is gated by its own device class at
    // its source, so at most one is ever asserted:
    //   dev_rvalid  <= dmem_ren & is_dev_r & ~is_virtio_r
-   //   c_rd_req     = (dmem_ren | c_rd_pend) & ~dc_rv_ok & ~is_dev_r  (no cache req for a device)
+   //   c_rd_req     = a waiting read, or dmem_ren & ~is_dev_r  (no cache req for a device)
    //   vio_pending <= set only by dmem_ren & is_virtio_r
    wire         vio_rack   = virtio_rvalid & vio_pending;   // not a write's completion
    wire         raw_rvalid = vio_rack | dev_rvalid_q | dc_rv_ok;
@@ -552,21 +552,38 @@ module rv_soc_top #(
    wire [63:0]  raw_rdata  = vio_rack     ? {virtio_rdata, virtio_rdata}  // 32b reg, valid at virtio_rvalid
                            : dev_rvalid_q ? dev_rdata_q
                            :                dc_rd_data;
-   // TWO QUESTIONS, and the one pending bit used to answer both. c_rd_want is "the cache
-   // still owes us an accept"; c_rd_pend is "a response is still coming". They coincide only
-   // while the cache serves one request at a time. With a pipelined port they do not: rd_valid
-   // is REGISTERED, so during the cycle a response is being produced the old request is still
-   // asserted, and a cache that can accept in that cycle takes it twice. Dropping on the ack
-   // is what makes the request unambiguous (docs/rtl-rules.md D5).
-   reg          c_rd_want;
-   wire         c_rd_req = (dmem_ren | c_rd_want) & ~is_dev_r;
-   wire         lsu_rd_ack;                       // this cycle's accept belonged to the LSU
-   always @(posedge clk) if (reset) c_rd_want<=1'b0;
-      // A CACHE read only: a device read never asks the cache and is never acked by it, so a
-      // want set on it would stand until the next cache read cleared it; the LSU reads the
-      // bit as "the read port is busy" and a stuck want stops every load (UART LSR, 2026-09-04).
-      else if (dmem_ren & ~is_dev_r & ~lsu_rd_ack) c_rd_want<=1'b1;
-      else if (lsu_rd_ack)                         c_rd_want<=1'b0;
+   // THE READ DOOR. The LSU presents a read for one cycle (dmem_ren) and may present the next one
+   // the cycle after, so the reads the cache has not yet accepted wait here, oldest first: up to
+   // two, the one presented while the LSU saw the door clear and the one behind it. The LSU starts
+   // a read only while none waits (dmem_rbusy, this register). A waiting read is presented from
+   // its own copy of the address, tag and NC bit, never from the LSU's port, which has moved on.
+   // A device read never asks the cache, so it never waits here (a want set on it would stand
+   // until the next cache read cleared it and stop every load).
+   reg  [1:0]      rq_n;                       // reads waiting for the accept
+   reg  [63:0]     rq_a0, rq_a1;
+   reg  [DRTW-1:0] rq_t0, rq_t1;
+   reg             rq_u0, rq_u1;
+   initial rq_n = 2'd0;
+   wire            l_cr      = dmem_ren & ~is_dev_r;       // the LSU presents a cache read now
+   wire            rq_hv     = (rq_n != 2'd0);
+   wire            c_rd_req  = rq_hv | l_cr;
+   wire [63:0]     c_rd_addr = rq_hv ? rq_a0 : dmem_raddr;
+   wire [DRTW-1:0] c_rd_tag  = rq_hv ? rq_t0 : lsu_tag_req;
+   wire            c_rd_unc  = rq_hv ? rq_u0 : dmem_runcached;
+   wire            lsu_rd_ack;                       // this cycle's accept belonged to the LSU
+   wire            rq_pop    = rq_hv & lsu_rd_ack;
+   wire            rq_push   = l_cr & (rq_hv | ~lsu_rd_ack);   // the live read waits unless it was taken
+   wire [1:0]      rq_left   = rq_n - {1'b0, rq_pop};
+   always @(posedge clk) begin
+      if (rq_pop) begin rq_a0 <= rq_a1;  rq_t0 <= rq_t1;  rq_u0 <= rq_u1; end
+      if (rq_push & (rq_left == 2'd0)) begin rq_a0 <= dmem_raddr;  rq_t0 <= lsu_tag_req;  rq_u0 <= dmem_runcached; end
+      if (rq_push & (rq_left == 2'd1)) begin rq_a1 <= dmem_raddr;  rq_t1 <= lsu_tag_req;  rq_u1 <= dmem_runcached; end
+      if (reset) rq_n <= 2'd0;
+      else       rq_n <= rq_left + {1'b0, rq_push};
+      if (!reset & rq_push & (rq_left == 2'd2))
+         $fatal(1, "rv_soc_top: a third D$ read waits for its accept (addr %h tag %h): the LSU started past dmem_rbusy",
+                dmem_raddr, lsu_tag_req);
+   end
    // ...for the FSM's slow reads only: a fast read's response is a one-cycle strobe the LSU
    // claims by tag, and it must not set a pending bit no slow response will ever clear.
    wire         dmem_ren_slow = dmem_ren & ~dmem_rfast;
@@ -579,12 +596,6 @@ module rv_soc_top #(
    // the cache samples address and tag on the accept, not when the LSU first presented them.
    always @(posedge clk) if (!reset & dc_rv_ok & ~c_rd_pend)
       $fatal(1, "rv_soc_top: D$ slow response with no slow read outstanding");
-   reg [DRTW-1:0] want_tag;  reg [63:0] want_addr;
-   always @(posedge clk) if (dmem_ren) begin want_tag <= lsu_tag_req; want_addr <= dmem_raddr; end
-   always @(posedge clk)
-      if (!reset & c_rd_want & ((lsu_tag_req != want_tag) | (dmem_raddr != want_addr)))
-         $fatal(1, "rv_soc_top: D$ read changed under its own accept wait: tag %h->%h addr %h->%h",
-                want_tag, lsu_tag_req, want_addr, dmem_raddr);
    reg          c_rdv_st;  reg [63:0] c_rdd_st;
    always @(posedge clk) if (reset) c_rdv_st<=1'b0;
       else if (dmem_ren_slow) c_rdv_st<=1'b0;
@@ -653,7 +664,7 @@ module rv_soc_top #(
       .rd_req(dcr_req), .rd_va(dcr_addr), .rd_pa(dcr_addr), .rd_tag(dcr_tag), .rd_ack(dc_rd_ack),
       // Svpbmt: only a LSU load read can be NC (PTW reads share dcr but are always cacheable -> 0
       // when c_rd_req is low). The store's NC bit qualifies the write port.
-      .rd_phys(1'b1), .rd_nc(c_rd_req & dmem_runcached),
+      .rd_phys(1'b1), .rd_nc(c_rd_req & c_rd_unc),
       .rd_valid(dc_rd_valid), .rd_data(dc_rd_data), .rd_resp_tag(dc_rd_resp_tag), .rd_resp_addr(dc_rd_resp_addr),
       // ~dc_wr_cpl: a CBO or uncached write holds its request through the cycle its completion
       // is registered, and the D$ is idle again in that cycle -- without this it is taken twice.
@@ -797,7 +808,7 @@ module rv_soc_top #(
    wire [1:0]   pw_read   = {dptw_read, ptw_read};
    wire [2*56-1:0] pw_addr = {dptw_addr, ptw_addr};
    reg  [1:0]   pw_busy;
-   reg  [1:0]   pw_sent;      // ...and this walk's request has been accepted (see c_rd_want)
+   reg  [1:0]   pw_sent;      // ...and this walk's request has been accepted (see the read door)
    reg  [1:0]   pw_rvalid;
    wire [1:0]   pw_rq = pw_busy & ~pw_sent;    // still asking for the port
    wire [1:0]   pw_ack;
@@ -836,11 +847,11 @@ module rv_soc_top #(
    wire            dc_rd_ack;
    assign lsu_rd_ack = dc_rd_ack & c_rd_req;
    assign dcr_req  = c_rd_req | (|pw_rq);
-   assign dcr_addr = c_rd_req  ? dmem_raddr
+   assign dcr_addr = c_rd_req  ? c_rd_addr
                    : pw_rq[0]  ? {8'd0, pw_addr[0*56 +: 56]}
                    :             {8'd0, pw_addr[1*56 +: 56]};
    // ...and the tag that names the requester, selected by the SAME priority.
-   wire [DRTW-1:0] dcr_tag = c_rd_req ? lsu_tag_req
+   wire [DRTW-1:0] dcr_tag = c_rd_req ? c_rd_tag
                            : pw_rq[0] ? {2'd1, {LQ_IB{1'b0}}}
                            :            {2'd2, {LQ_IB{1'b0}}};
 
