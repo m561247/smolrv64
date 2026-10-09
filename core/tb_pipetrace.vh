@@ -169,7 +169,7 @@
       assign pl_rob[gpl]     = 8'(dut.core.ln[gpl].rob);
       assign pl_m1[gpl]      = dut.core.ln[gpl].m1;   assign pl_mrob1[gpl] = 8'(dut.core.ln[gpl].mrob1);
       assign pl_m2[gpl]      = dut.core.ln[gpl].m2;   assign pl_mrob2[gpl] = 8'(dut.core.ln[gpl].mrob2);
-      assign pl_hv[gpl]      = dut.core.ln[gpl].hv;   assign pl_hrob[gpl]  = 8'(dut.core.ln[gpl].hrob);
+      assign pl_hv[gpl]      = 1'b0;                  assign pl_hrob[gpl]  = 8'd0;   // the lanes have no handoff register
       for (gpe = 0; gpe < PT_NI; gpe = gpe + 1) begin: e
          assign pl_iq_v[gpl*PT_NI + gpe]   = dut.core.ln[gpl].u_iq.v[gpe];
          assign pl_iq_rdy[gpl*PT_NI + gpe] = &dut.core.ln[gpl].u_iq.srdy[gpe*2 +: 2];
