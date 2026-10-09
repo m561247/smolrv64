@@ -17,11 +17,13 @@
 // or the stream restarts (flush), both load the next address and the banks read its rows, so a
 // pair's prediction starts from registers and the row address is the next address alone.
 //
-// A PAIR ENDS AT ITS FIRST KNOWN CTI. The first entry at or after the stream's address ends the
-// pair there, taken or not: p_end is that halfword, and the stream continues at the predicted
-// target, or at the halfword after the CTI. So a pair holds at most one prediction, the history
-// shifts at most once per pair, and a pair's corrector reads share the history they were read with.
-// The ring marks the pair's last halfword, and the prediction goes into the queue.
+// A PAIR ENDS AT ITS FIRST PREDICTED-TAKEN TRANSFER. Every known CTI from the stream's address on
+// is marked, up to the first one predicted taken, or to the M-th: p_end is that halfword, and the
+// stream continues at the predicted target, at the halfword after the M-th, or at the next pair.
+// A not-taken mark does not end the pair, so the aligner reads on past it. The history steps at
+// most once per pair, at its end, so every mark of a pair has the same pre-state and its corrector
+// reads share the history they were read with. The ring marks each marked halfword (p_mk), and
+// each mark's prediction goes into the queue, in order.
 //
 // THE QUEUE. One entry per marked halfword, in order: taken, the target, the corrector details
 // training needs, and the RAS pointer and history as they stand BEFORE the CTI. Between two marks
@@ -66,8 +68,9 @@ module smolrv64_predictor
     input  wire                 adv,        // the ring took this cycle's pair
     output wire [PCW-1:0]       sa,         // this cycle's pair: its first byte
     output wire [2:0]           sk,         // ...and the halfwords of it before the stream's address
-    output wire                 p_cut,      // the pair ends at a known CTI...
+    output wire                 p_cut,      // the pair ends at a mark...
     output wire [2:0]           p_end,      // ...at this halfword (7 when it does not)
+    output wire [7:0]           p_mk,       // the pair's marked halfwords
     output wire                 pq_room,
     output wire [PQB:0]         pq_cnt,
     // ---- the aligner: the first IW entries, entry j at [j] ----
@@ -174,7 +177,7 @@ module smolrv64_predictor
    wire [GHL-1:0]  sn_ghr  = en_ghr[0];
    assign pq_cnt  = pq_n;
    wire [PQB:0]    popw    = {{(PQB+1-$clog2(IW+1)){1'b0}}, pop};   // the pop count, at the queue's width
-   assign pq_room = ~pq_n[PQB];
+   assign pq_room = pq_n <= PQD - M;                                // room for a pair's marks
 
    // A restart puts the stream back to the aligner's state, or to the redirect's; every name here
    // is a register or the queue head, so nothing of the aligner reaches the tables' read address.
@@ -188,18 +191,18 @@ module smolrv64_predictor
    initial yh_q = {YB{1'b0}};
 
    // ------------------------------------------------------------ this pair's prediction
-   // bq[k]/yq[k] are bank k's rows read for sa_q: halfword k of the pair.
-   // The first halfword, in pair order, at or after the stream's address whose entry is its own
-   // cuts the pair. Every position evaluates its own hit, corrector hit and direction from
-   // registers at once, and the one-hot first hit selects among finished results: nothing waits
-   // on the pick but the select.
+   // bq[k]/yq[k] are bank k's rows read for sa_q: halfword k of the pair. Every position evaluates
+   // its own hit, corrector hit and direction from registers at once; the marks are the hits in
+   // order up to the first taken one, or the M-th.
+   localparam integer M = 2;                 // marks per pair (the queue's pushes per cycle)
    wire [EW-1:0]   bq [0:7];
    wire [YEW-1:0]  yq [0:7];
    reg  [7:0]      hv, hy, hd1;              // per position: hit, corrector hit, direction taken
-   reg  [7:0]      h1;                       // the first hit, one-hot
-   reg  [2:0]      hk;                       // ...its position
-   reg  [EW-1:0]   e;                        // ...its entry
-   reg  [YEW-1:0]  ce;                       // ...its corrector row
+   reg  [7:0]      mkv;                      // the marks
+   reg  [3:0]      nmk;                      // ...how many
+   reg  [2:0]      hk;                       // where the pair ends (7: at its own end)
+   reg             cut;                      // ...at a mark
+   reg  [EW-1:0]   e;                        // the ending mark's entry
    reg  [PCW-1:0]  ek;
    reg  [YEW-1:0]  ck;
    integer         k;
@@ -212,28 +215,38 @@ module smolrv64_predictor
          hy[k]  = ~ek[TGTW+2] & (ck[YEW-1 -: YTAGW] == ytagf(sa_q + 2*k));
          hd1[k] = ek[TGTW+2] | (hy[k] ? ck[1] : ek[TGTW+1]);
       end
-      h1 = hv & ~(hv << 1) & ~(hv << 2) & ~(hv << 3) & ~(hv << 4) & ~(hv << 5) & ~(hv << 6) & ~(hv << 7);
-      hk = 3'd7;  e = {EW{1'b0}};  ce = {YEW{1'b0}};
+      mkv = 8'd0;  nmk = 4'd0;  hk = 3'd7;  cut = 1'b0;  e = {EW{1'b0}};
       for (k = 0; k < 8; k = k + 1)
-         if (h1[k]) begin hk = k[2:0];  e = bq[k];  ce = yq[k]; end
+         if (hv[k] & ~cut) begin
+            mkv[k] = 1'b1;  nmk = nmk + 4'd1;
+            if (hd1[k] | (nmk == M)) begin cut = 1'b1;  hk = k[2:0];  e = bq[k]; end
+         end
    end
    wire [PCW-1:0]  h    = sa_q + {60'd0, hk, 1'b0};             // its address
    wire [2:0]      ety  = e[TGTW +: 3];
    wire [TGTW-1:0] etg  = e[TGTW-1:0];
-   wire            yhit = |(h1 & hy);
-   wire            dir  = |(h1 & hd1);
+   wire            dir  = cut & hd1[hk];
    wire            call = (ety == TY_CALL), ret = (ety == TY_RET);
-   assign p_cut = |hv;
+   assign p_cut = cut;
    assign p_end = hk;
-   wire            tk   = |(h1 & hd1);
+   assign p_mk  = mkv;
+   wire            tk   = dir;                                     // the pair ends at a taken mark
    wire [PCW-1:0]  ftc  = h + 64'd2;                               // the halfword after the CTI
    wire [PCW-1:0]  tgt  = ret ? ras[ras_ptr] : {{(PCW-TGTW-1){etg[TGTW-1]}}, etg, 1'b0};
-   wire [PCW-1:0]  p_nx = tk ? tgt : p_cut ? ftc : sa_q + 64'd16;
+   wire [PCW-1:0]  p_nx = tk ? tgt : cut ? ftc : sa_q + 64'd16;
    wire [RASB-1:0] rsp_post = (tk & call) ? ras_ptr + 1'b1 : (tk & ret) ? ras_ptr - 1'b1 : ras_ptr;
    wire [GHL-1:0]  ghr_post = tk ? phist_step(ghr, h) : ghr;
-   wire [YBITS-1:0] p_yidx  = {h[YB+3:4] ^ yh_q, h[3:1]};
-   wire            push     = adv & p_cut & ~flush;
-   wire [QEW-1:0]  pq_in    = {tk, tgt, ras_ptr, ghr, yhit, yhit ? ce[1:0] : 2'b01, p_yidx, ety[1:0]};
+   // each mark's entry: the ending one's prediction, a not-taken one's details, the pair's pre-state
+   wire            push     = adv & (|mkv) & ~flush;
+   wire [QEW-1:0]  pq_e8 [0:7];
+   genvar gm;
+   generate for (gm = 0; gm < 8; gm = gm + 1) begin : me
+      wire [EW-1:0]  me_e = bq[gm];
+      wire [YEW-1:0] me_c = yq[gm];
+      wire           me_y = ~me_e[TGTW+2] & hy[gm];
+      assign pq_e8[gm] = {cut & (hk == gm) & dir, tgt, ras_ptr, ghr, me_y, me_y ? me_c[1:0] : 2'b01,
+                          sa_q[YB+3:4] ^ yh_q, gm[2:0], me_e[TGTW +: 2]};
+   end endgenerate
 
    // ------------------------------------------------------------------ training
    // One BTB write per resolved CTI (oldest per cycle), into the bank of its last halfword.
@@ -309,13 +322,21 @@ module smolrv64_predictor
          if (flush) begin
             pq_rp <= 0;  pq_wp <= 0;  pq_n <= 0;
          end else begin
-            if (push) begin pq[pq_wp] <= pq_in;  pq_wp <= pq_wp + 1'b1; end
+            if (push) begin : wr
+               reg [PQB-1:0] w;
+               integer       wk;
+               w = pq_wp;
+               for (wk = 0; wk < 8; wk = wk + 1)
+                  if (mkv[wk]) begin pq[w] <= pq_e8[wk];  w = w + 1'b1; end
+               pq_wp <= w;
+            end
             pq_rp <= pq_rp + popw[PQB-1:0];
-            pq_n <= pq_n + {{PQB{1'b0}}, push} - popw;
+            pq_n <= pq_n + (push ? {{(PQB+1-4){1'b0}}, nmk} : {(PQB+1){1'b0}}) - popw;
          end
       end
    end
    wire e_full = ~reset & push & ~pq_room;
+   wire e_many = ~reset & push & (nmk > M);
    wire e_empt = ~reset & (popw > pq_n) & ~flush;
    wire e_end  = ~reset & p_cut & (hk < sk_q);
    reg  [2:0] err_q;
@@ -323,6 +344,7 @@ module smolrv64_predictor
    assign err = err_q;
    always @(posedge clk) begin
       if (e_full) $fatal(1, "smolrv64_predictor: a prediction pushed into a full queue");
+      if (e_many) $fatal(1, "smolrv64_predictor: %0d marks in a pair, more than %0d", nmk, M);
       if (e_empt) $fatal(1, "smolrv64_predictor: the aligner popped %0d of %0d predictions", pop, pq_n);
       if (e_end)  $fatal(1, "smolrv64_predictor: a pair ends (%0d) before the stream's address (%0d)", hk, sk_q);
    end
@@ -338,9 +360,9 @@ module smolrv64_predictor
    wire bpt_on = (bpt_cyc >= bpt_from) & (bpt_cyc <= bpt_to);
    always @(posedge clk) begin
       bpt_cyc <= bpt_cyc + 64'd1;
-      if (bpt_on & adv & p_cut)
+      if (bpt_on & adv & (|mkv))
          $display("[BP] c=%0d PRED pair=%h skip=%0d end=%0d type=%b yhit=%b dir=%b tk=%b nx=%h ghr=%h rsp=%0d",
-                  bpt_cyc, sa_q, sk_q, p_end, ety, yhit, dir, tk, p_nx, ghr, ras_ptr);
+                  bpt_cyc, sa_q, sk_q, p_end, ety, hy[hk], dir, tk, p_nx, ghr, ras_ptr);
       if (bpt_on & res_v)
          $display("[BP] c=%0d RES pc=%h rvc=%b cbr=%b call=%b ret=%b taken=%b tgt=%h | carried hit=%b ctr=%0d yhit=%b yctr=%0d yidx=%0d | ywr=%b",
                   bpt_cyc, res_pc, res_rvc, res_cbr, res_call, res_ret, res_taken, res_tgt,

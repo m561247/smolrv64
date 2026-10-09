@@ -1,3 +1,4 @@
+`include "smolrv64_ictag.vh"
 `default_nettype none
 
 // The fetch ring: RS halfword slots holding the instruction stream from the PC on, filled from
@@ -50,8 +51,8 @@ module smolrv64_fring
     // the predictor: the stream's pair, where it ends, and the ring taking it
     input  wire [63:0]             sa,      // the pair's first byte
     input  wire [2:0]              sk,      // the halfwords of it before the stream's address
-    input  wire                    p_cut,
-    input  wire [2:0]              p_end,
+    input  wire [7:0]              p_mk,       // the pair's marked halfwords...
+    input  wire [2:0]              p_end,      // ...and where it ends
     output wire                    pr_adv,
     input  wire                    pq_room,
     input  wire [PQB:0]            pq_cnt,
@@ -59,11 +60,11 @@ module smolrv64_fring
     output wire                    ic_req,
     output wire [63:0]             ic_va,
     output wire [63:0]             ic_pa,
-    output wire [9:0]              ic_tag,
+    output wire [`SMOLRV64_ICTAG_W-1:0] ic_tag,
     input  wire                    ic_ack,
     input  wire                    ic_valid,
     input  wire [127:0]            ic_data,
-    input  wire [9:0]              ic_rtag,
+    input  wire [`SMOLRV64_ICTAG_W-1:0] ic_rtag,
     output wire [5:0]              err);      // its invariants, registered (the integrity log)
 
    localparam integer RS  = 32;                            // ring slots (halfwords): 64 bytes
@@ -78,7 +79,7 @@ module smolrv64_fring
    reg  [1:0]      rg_lvl;                                 // page size of the bytes held
    reg  [63:0]     rg_hva;                                 // the head's VA (checked, never used)
    reg  [2:0]      rg_infl, rg_drop;                       // requests in flight; of them, stale
-   reg  [PQB:0]    rg_mfl;                                 // marked pairs in flight (checked)
+   reg  [PQB:0]    rg_mfl;                                 // marks in flight (checked)
    initial begin rg_head = 0; rg_cnt = 0; rg_resv = 0; rg_gen = 0;
                  rg_lvl = 2'd0; rg_infl = 0; rg_drop = 0; rg_mfl = 0; rmk = 0; end
    wire            flush  = restart | freeze;
@@ -98,15 +99,21 @@ module smolrv64_fring
    assign ic_req = ~freeze & xlate_ok & inpg & pq_room & (rg_resv <= RS[RSB:0] - 5'd8);
    assign ic_va  = {25'b0, sa[38:0]};                      // VIRTUAL: canonical Sv39 VA (sign ext masked)
    assign ic_pa  = big_pg ? {pc_pa[63:21], sa[20:0]} : {pc_pa[63:12], sa[11:0]};
-   assign ic_tag = {p_cut, p_end, sk, rg_gen};
+   assign ic_tag = {p_mk, p_end, sk, rg_gen};
+   initial if (`SMOLRV64_ICTAG_W != 8 + 3 + 3 + GW)
+      $fatal(1, "smolrv64_fring: SMOLRV64_ICTAG_W is %0d, the tag's fields are %0d bits", `SMOLRV64_ICTAG_W, 8 + 3 + 3 + GW);
+   function [3:0] ones8(input [7:0] x);
+      integer i;
+      begin ones8 = 4'd0; for (i = 0; i < 8; i = i + 1) ones8 = ones8 + {3'd0, x[i]}; end
+   endfunction
    wire   rq_acc = ic_req & ic_ack;
    assign pr_adv = rq_acc;
 
-   // the answer: its halfwords from the skip to the end, appended at the tail, the last marked
-   // when its pair ended at a known CTI. An answer landing in a restart's cycle is written and then
+   // the answer: its halfwords from the skip to the end, appended at the tail, each marked as the
+   // pair's prediction marked it. An answer landing in a restart's cycle is written and then
    // emptied by the flush's reset of the count: the write enable does not wait for the restart.
    wire         rp_ok   = ic_valid & (rg_drop == 3'd0);
-   wire         rp_mk   = ic_rtag[GW+6];
+   wire [7:0]   rp_mk   = ic_rtag[GW+6 +: 8];              // the answer's marked halfwords
    wire [2:0]   rp_end  = ic_rtag[GW+3 +: 3];
    wire [2:0]   rp_skip = ic_rtag[GW +: 3];
    wire [3:0]   rp_n    = rp_ok ? ({1'b0, rp_end} - {1'b0, rp_skip} + 4'd1) : 4'd0;
@@ -139,14 +146,15 @@ module smolrv64_fring
          rg_head <= rg_head + adv_w[RSB-1:0];
          rg_cnt  <= rg_cnt + {{(RSB-3){1'b0}}, rp_n} - adv_w;
          rg_resv <= rg_resv + (rq_acc ? {{(RSB-3){1'b0}}, rq_n} : {(RSB+1){1'b0}}) - adv_w;
-         rg_mfl  <= rg_mfl + {{PQB{1'b0}}, rq_acc & p_cut} - {{PQB{1'b0}}, rp_ok & rp_mk};
+         rg_mfl  <= rg_mfl + (rq_acc ? {{(PQB+1-4){1'b0}}, ones8(p_mk)} : {(PQB+1){1'b0}})
+                           - (rp_ok ? {{(PQB+1-4){1'b0}}, ones8(rp_mk)} : {(PQB+1){1'b0}});
          rg_hva  <= take ? take_tgt : rg_hva + {{(63-AVW){1'b0}}, adv_hw, 1'b0};
          if (rq_acc) rg_lvl <= pc_lvl;
          if (drop) rmk[rg_head] <= 1'b0;
          for (j = 0; j < 8; j = j + 1)
             if (rp_ok && j >= rp_skip && j <= rp_end) begin
                ring[tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= ic_data[j*16 +: 16];
-               rmk [tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= rp_mk & (j == rp_end);
+               rmk [tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= rp_mk[j];
             end
       end
    end

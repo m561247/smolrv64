@@ -288,7 +288,7 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
 - **Two-wide fetch** (2026-09-05, plan item 10a): the aligner emits up to two instructions per
   cycle (`IW=2`) and both enter the decoupling queue in one cycle; the queue is two LUTRAM banks on
   entry parity, so each bank takes one write per cycle and the head is a 2:1 mux. Decode still
-  pops one. A bundle ends at its first CTI or SYSTEM op or at the page boundary; when a later
+  pops one. A bundle ends at a jump, a SYSTEM op or the page boundary; when a later
   slot's bytes are not in the window yet but are coming (the shortfall is fetch's, not
   the page's: `bytes_late`) the bundle WAITS rather than cutting (item 10e; until then slot 1
   could not cross a 16-byte chunk boundary, which made 338 of the sha256 kernel's 934 bundles
@@ -299,8 +299,8 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
   a chunk whose successor had not landed, the pair register's stale bytes could end the
   bundle after slot 0 -- a shape the code did not determine, and a third bundle base for the
   loop back edge in `workloads/brbench`, 15 lost predictions in 300 iterations; 2 after.) A
-  bundle also ends at the first mark in the window (the aligner sees the window only up to it),
-  so a bundle holds at most one prediction, belonging to its last slot. `PDW` = 31:
+  bundle also ends at a mark predicted taken and carries on through one predicted not taken, so
+  a bundle holds up to `IW` predictions, one for each slot that ends on a mark. `PDW` = 31:
   {RAS-pointer snapshot 3, history snapshot 11, yhit, yctr 2, yidx 11, hit, ctr 2}.
 ### 4.2 Branch prediction
 
@@ -311,19 +311,20 @@ pair. A BTB entry belongs to its CTI's last halfword; a pair covers eight halfwo
 the corrector are each eight banks, one per halfword position, and all eight read the same row,
 the next pair's address above its 16 bytes, whenever the stream moves. No two CTIs share an entry
 (rule B10). Every position evaluates its own hit, corrector hit and direction from registers, and
-the one-hot first hit selects. **A pair ends at its first known CTI**, taken or not: the first
-entry at or after the stream's address cuts it at its halfword, and the stream goes on at the
-target (the RAS top for a return) or at the halfword after the CTI; a predicted call pushes its
-last halfword + 2. A pair therefore holds at most one prediction and the history shifts at most
-once per pair. The corrector is read with the history before the current pair's own shift (a
+the hits in order mark the known CTIs. **A pair ends at its first known CTI predicted taken, or
+at its second known CTI** (`M`=2): the stream goes on at the target (the RAS top for a return) or
+at the halfword after the last mark; a predicted call pushes its last halfword + 2. A pair
+therefore holds at most two predictions, both read with the history from before the pair, and the
+history shifts at most once per pair. The corrector is read with the history before the current pair's own shift (a
 pair of lag), and the index read is the one carried for training. Training recomputes the key
 from the resolving CTI's PC and length.
 
-The ring marks the pair's last halfword, and the prediction enters an 8-entry queue: taken, the
-target, the corrector details training needs, and the RAS pointer and history as they stand
-before the CTI. The aligner ends a bundle at an instruction that ends on a marked halfword, like
-at a CTI; a bundle ending there pops the head and, when its last instruction is a real branch or
-jump and the prediction is taken, takes it. A mark that does not fit the code is rejected and
+The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue in
+order (a pair pushes up to two; the stream moves only with two entries free): taken, the target,
+the corrector details training needs, and the RAS pointer and history as they stand before the
+CTI. The aligner reads the queue's first `IW` entries; an instruction ending on a marked halfword
+takes the next one, and a taken one ends the bundle. A bundle pops one entry per mark it holds
+and, when its last instruction is a real branch or jump predicted taken, takes it. A mark that does not fit the code is rejected and
 costs a restart a cycle later, as a one-cycle freeze: taken on anything but a branch or jump (a
 page straddler included), the bundle falls through and the stream restarts at its fall-through;
 taken inside a 32-bit instruction, the stream restarts at the PC predicting nothing in its first
@@ -332,10 +333,10 @@ Between marks the stream's state does not change, so the queue head's pre-state 
 stream's own registers, when the queue is empty -- is the state as of fetch: every instruction's
 snapshot, and what every restart of the stream (a rejected mark, a freeze) goes back to.
 
-**The history** is the directions of the conditionals the BTB knew, in program order, as
-predicted and then corrected. Every instruction carries the history from before it; a redirect
-restores the redirecting instruction's snapshot, plus its outcome when it is such a conditional,
-and a redirect at the head (a trap, an xret, a serializing op) restarts it at zero. Nothing is
+**The history** is a path history (`smolrv64_phist.vh`): a taken control transfer shifts it one
+place and folds in bits [11:1] of its last halfword's address; a not-taken branch leaves it alone.
+Every instruction carries the history from before it; a redirect restores the redirecting
+instruction's snapshot, stepped with its own address when it was taken, and a redirect at the head (a trap, an xret, a serializing op) restarts it at zero. Nothing is
 rebuilt from resolves, which arrive out of order and include wrong-path branches (rule D14).
 
 The 60 M boot (IW=3): 17,784,535 retires (+3.04% over the ring alone), 59,797 redirects
@@ -346,7 +347,7 @@ frontend reaches 214.6 MHz (196.5 with the ring alone).
 |---|---|---|---|
 | BTB | **2048 entries** (`BTBB`=11), 8 halfword banks of 256 | 12-bit tag + 3-bit type + 38-bit target | block RAM, read as the stream moves |
 | YAGS corrector | 2048 entries (`YBITS`=11), 8 halfword banks | 8-bit tag + 2-bit counter | distributed RAM, read as the stream moves |
-| GHR | 11 bits (`GHL`) | global history | flops |
+| GHR | 11 bits (`GHL`) | path history | flops |
 | RAS | 8 entries (`RASB`=3) | call/return stack | flops |
 | prediction queue | 8 entries (`PQB`=3) | one per mark, in order | LUTRAM or flops |
 

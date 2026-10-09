@@ -35,8 +35,9 @@ module aligner
     input  wire                    solo_all, // force one instruction per bundle (fault replay)
     input  wire                    bytes_late, // the window is short of the page end: more is coming
     input  wire [HW-1:0]           mk,       // halfwords that end a CTI the predictor knows (smolrv64_fring):
-                                             // an instruction ending on one ends the bundle, and one
-                                             // whose FIRST halfword is marked does not fit
+                                             // an instruction ending on one predicted taken ends the
+                                             // bundle, and one whose FIRST halfword is marked does not fit
+    input  wire [IW-1:0]           mk_tk,    // the window's marks' predictions in order: taken
     output wire [IW-1:0]           valid,
     output wire [IW*32-1:0]        inst,
     output wire [IW*PCW-1:0]       pc,
@@ -61,14 +62,13 @@ module aligner
       mkr = (idx < HW) ? mk[idx[$clog2(HW)-1:0]] : 1'b0;
    endfunction
 
-   // End-of-bundle predecode (opcode bits only -- no full RVC expansion). A control
-   // transfer OR a serializing op (SYSTEM / FENCE) *terminates* the bundle: it is
-   // included as the last valid slot, so every such op is the youngest instruction
-   // in its checkpoint. Mid-bundle branch/CSR recovery then folds into the already-
-   // exact "last in bundle" case -- no sub-bundle MAP snapshot, freelist, or
-   // commit-count machinery, and a SYSTEM op's commit-time redirect can squash the
-   // (younger) fall-through. The straggling tail simply reappears as slot 0 of the
-   // next window (consumed stops at the terminator, like the straddle case).
+   // End-of-bundle predecode (opcode bits only -- no full RVC expansion). A jump, or a
+   // serializing op (SYSTEM / AMO / FENCE), *terminates* the bundle: it is the last valid slot,
+   // and the rest reappears as slot 0 of the next window (consumed stops at it, like the
+   // straddle case). A conditional branch does not, unless it ends on a mark predicted taken:
+   // one the predictor calls not taken, or does not know, is predicted to fall through, and the
+   // bundle reads on. A branch with younger instructions in its own group is what the core
+   // recovers from by its ROB row's columns (smolrv64_rob's kill and walk).
    function is_cti(input [15:0] h0);
       if (h0[1:0] == 2'b11)                 // base 32-bit op (h0[1:0]==11 IS the old `is32` input)
          is_cti = (h0[6:0] == 7'b1100011)   // BRANCH
@@ -92,6 +92,12 @@ module aligner
    // these: a prediction on any other bundle shape (a stale BTB entry over
    // changed code, a SYSTEM/AMO/FENCE terminator, C.EBREAK) would have NO
    // corrective compare at execute and the wrong path would retire.
+   // A conditional branch (BRANCH, C.BEQZ, C.BNEZ).
+   function is_cond(input [15:0] h0);
+      if (h0[1:0] == 2'b11) is_cond = (h0[6:0] == 7'b1100011);
+      else                  is_cond = (h0[1:0] == 2'b01) & ((h0[15:13] == 3'b110) | (h0[15:13] == 3'b111));
+   endfunction
+
    function is_br(input [15:0] h0);
       if (h0[1:0] == 2'b11)
          is_br = (h0[6:0] == 7'b1100011)    // BRANCH
@@ -116,6 +122,7 @@ module aligner
    reg  [PBW-1:0]   cons;
    reg              bt, mt;
    reg  [IW-1:0]    smv, sbv;
+   reg  [$clog2(IW+1)-1:0] mi;            // the marks read so far: the next one's prediction is mk_tk[mi]
 
    integer k;
    reg [PBW-1:0] pos;
@@ -137,7 +144,7 @@ module aligner
    // runs two chunks ahead now (rv_soc_top), so the wait is rare; at the page end the
    // window is cut as before, deterministic because the page boundary is the code's too.
    reg wt;
-   always @(hwin or avail or base_pc or base_seq or solo_all or bytes_late or mk) begin
+   always @(hwin or avail or base_pc or base_seq or solo_all or bytes_late or mk or mk_tk) begin
       pos = 0;
       run = 1'b1;
       bt  = 1'b0;
@@ -145,6 +152,7 @@ module aligner
       wt  = 1'b0;
       smv = {IW{1'b0}};
       sbv = {IW{1'b0}};
+      mi  = 0;
       for (k = 0; k < IW; k = k + 1) begin
          h0   = hwr(pos);
          is32 = (h0[1:0] == 2'b11);
@@ -178,9 +186,13 @@ module aligner
             v[k] = run & have;
             if (v[k]) begin
                pos = pos + (is32 ? 2'd2 : 2'd1);
-               if (is_cti(h0)) run = 1'b0;  // CTI / SYSTEM / FENCE ends the bundle (youngest)
+               if (is_cti(h0) & ~is_cond(h0)) run = 1'b0;   // a jump, SYSTEM, AMO or FENCE ends the bundle
                if (is_br(h0))  begin bt = 1'b1; sbv[k] = 1'b1; end   // ... a real branch/jump (is_br implies is_cti)
-               if (mkr(pos - 1'b1)) begin run = 1'b0; mt = 1'b1; smv[k] = 1'b1; end   // it ends on a mark
+               if (mkr(pos - 1'b1)) begin                  // it ends on a mark: the mi-th
+                  smv[k] = 1'b1;
+                  if (mk_tk[mi[$clog2(IW)-1:0]]) begin run = 1'b0; mt = 1'b1; end   // ...predicted taken: the bundle ends
+                  mi = mi + 1'b1;
+               end
             end else begin                     // prefix: stop at the first that doesn't fit...
                if ((k != 0) && run && bytes_late) wt = 1'b1;   // ...or wait, when it is coming
                run = 1'b0;

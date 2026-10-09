@@ -1,3 +1,4 @@
+`include "smolrv64_ictag.vh"
 `default_nettype none
 `ifndef PROBE_CLK_DIV8
  `define PROBE_CLK_DIV8 48        // 166.67 MHz -- THE shipping clock, not a suggestion
@@ -131,7 +132,7 @@ module rv_soc_top #(
    wire                imem_hold, imem_cancel;   // the I$'s miss hold and its cancel (smolrv64_core)
    wire                ic_rd_req, ic_rd_ack, ic_rd_valid, ic_inv_busy, fi_stall;
    wire [63:0]         ic_rd_addr, ic_rd_pa;
-   wire [9:0]          ic_tag, ic_rsp_tag;
+   wire [`SMOLRV64_ICTAG_W-1:0] ic_tag, ic_rsp_tag;
    wire [127:0]        ic_rd_data;
    wire [63:0]         imem_satp_q;  wire [1:0] imem_priv_q;
    wire                fe_redirect;
@@ -774,7 +775,7 @@ module rv_soc_top #(
    wire ic_inv_req = fi_inv;   // fence.i AND mapping changes go through fi (after the D$ clean-flush)
 
    // The read-only VHPR I$ (core/rv_icache.v): a pair per cycle, hit on the virtual tag alone.
-   rv_icache #(.SIZE_KB(SIZE_KB), .HW(8), .RTW(10)) u_icache
+   rv_icache #(.SIZE_KB(SIZE_KB), .HW(8), .RTW(`SMOLRV64_ICTAG_W)) u_icache
      (.clk(clk), .reset(reset),
       .rd_req(ic_rd_req), .rd_addr(ic_rd_addr), .rd_pa(ic_rd_pa), .rd_tag(ic_tag),
       .rd_ack(ic_rd_ack), .rd_data(ic_rd_data), .rd_valid(ic_rd_valid),

@@ -1,3 +1,4 @@
+`include "smolrv64_ictag.vh"
 `default_nettype none
 `include "smolrv64_irec.vh"
 
@@ -71,11 +72,11 @@ module smolrv64_frontend
     output wire                    ic_req,
     output wire [63:0]             ic_va,
     output wire [63:0]             ic_pa,
-    output wire [9:0]              ic_tag,
+    output wire [`SMOLRV64_ICTAG_W-1:0] ic_tag,
     input  wire                    ic_ack,
     input  wire                    ic_valid,
     input  wire [127:0]            ic_data,
-    input  wire [9:0]              ic_rtag,
+    input  wire [`SMOLRV64_ICTAG_W-1:0] ic_rtag,
     input  wire                    imem_fault,        // iMMU fault on this fetch (qualified ready)
     input  wire [3:0]              imem_cause,
 
@@ -141,7 +142,8 @@ module smolrv64_frontend
    wire [5:0]          ring_err;
    wire [2:0]          bp_err;
    wire [1:0]          f_err;
-   wire                pr_adv, p_cut, pq_room;
+   wire                pr_adv, pq_room;
+   wire [7:0]          p_mk;
    wire [63:0]         st_sa;
    wire [2:0]          st_sk, p_end;
    localparam integer  PQB = 3;
@@ -156,7 +158,7 @@ module smolrv64_frontend
       .adv_hw(f_adv_hw), .take(f_take), .drop(f_drop), .take_tgt(bp_tgt),
       .pc_va(imem_addr), .rst_a(st_rst_a), .pc_pa(imem_pa), .pc_lvl(imem_xlvl), .xlate_ok(imem_xlate_ok),
       .win(imem_data), .mk(imem_mk), .avail(imem_avail), .ok(imem_ok), .lvl(imem_lvl),
-      .sa(st_sa), .sk(st_sk), .p_cut(p_cut), .p_end(p_end), .pr_adv(pr_adv),
+      .sa(st_sa), .sk(st_sk), .p_mk(p_mk), .p_end(p_end), .pr_adv(pr_adv),
       .pq_room(pq_room), .pq_cnt(pq_cnt),
       .ic_req(ic_req), .ic_va(ic_va), .ic_pa(ic_pa), .ic_tag(ic_tag),
       .ic_ack(ic_ack), .ic_valid(ic_valid), .ic_data(ic_data), .ic_rtag(ic_rtag), .err(ring_err));
@@ -219,7 +221,7 @@ module smolrv64_frontend
    smolrv64_predictor #(.PCW(PCW), .PDW(PDW), .RASB(RASB), .GHL(GHL), .PQB(PQB), .IW(FW)) u_bp
      (.clk(clk), .reset(reset),
       .flush(st_flush), .rst_a(st_rst_a), .rst_np(rej_np_q & ~redirect), .adv(pr_adv),
-      .sa(st_sa), .sk(st_sk), .p_cut(p_cut), .p_end(p_end), .pq_room(pq_room), .pq_cnt(pq_cnt),
+      .sa(st_sa), .sk(st_sk), .p_cut(), .p_end(p_end), .p_mk(p_mk), .pq_room(pq_room), .pq_cnt(pq_cnt),
       .pq_tk(bp_tk), .pq_tgt(bp_tgts), .pd_mk(pd_mk), .pd_no(pd_no), .pop(f_pop),
       .rollback(redirect), .rb_rsp(redirect_rsp), .rb_ghr(redirect_ghr),
       .res_v(res_v), .res_cbr(res_cbr), .res_call(res_call), .res_ret(res_ret),

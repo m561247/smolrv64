@@ -8,10 +8,11 @@
 //
 // PREDICTION. The fetch ring (smolrv64_fring) marks each halfword that ends a pair at a CTI the
 // predictor knows, and the predictor's queue holds the marks' predictions in order: entry j is
-// the window's (j+1)-th mark's. A bundle ends at the first mark: the aligner ends it at an
-// instruction ending on one. Fetch consumes the bundle's marks (pop counts them) and, when its
-// LAST instruction ends on a mark predicted taken and is a real branch or jump, takes the
-// prediction: the ring already holds the target's halfwords after the mark. A mark that does not fit the code is rejected (`reject`), and the frontend
+// the window's (j+1)-th mark's. A bundle ends at a mark predicted taken: the aligner reads on
+// past a not-taken one, and ends the bundle at an instruction ending on a taken one. Fetch
+// consumes the bundle's marks (pop counts them) and, when its LAST instruction ends on a mark
+// predicted taken and is a real branch or jump, takes the prediction: the ring already holds the
+// target's halfwords after the mark. A mark that does not fit the code is rejected (`reject`), and the frontend
 // restarts the stream a cycle later, withholding the window meanwhile:
 //   - taken, on an instruction that is not a branch or jump (a straddler included): the bundle
 //     goes on falling through, and the ring, which holds the target's halfwords after it, restarts
@@ -182,7 +183,7 @@ module fetch
    wire [IW-1:0] al_smk, al_sbr;
    aligner #(.IW(IW), .HW(HW), .PCW(PCW), .SEQW(SEQW)) u_al
      (.hwin(imem_data), .avail(eff_avail), .base_pc(pc_q), .base_seq(seq_q),
-      .solo_all(solo_all), .bytes_late(bytes_late), .mk(imem_mk),
+      .solo_all(solo_all), .bytes_late(bytes_late), .mk(imem_mk), .mk_tk(pq_tk),
       .valid(al_valid), .inst(al_inst), .pc(al_pc), .offs(al_offs), .seq(al_seq), .consumed(al_consumed),
       .br_term(al_br_term), .mk_term(al_mk_term), .smk(al_smk), .sbr(al_sbr));
    // THE FALL-THROUGH AND THE SLOT PCs ARE MUXES, NOT ADDERS (2026-09-05). Gate U, the first

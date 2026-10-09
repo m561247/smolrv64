@@ -1,3 +1,4 @@
+`include "smolrv64_ictag.vh"
 `include "va_codec.vh"
 `include "smolrv64_irec.vh"
 // An issued op's payload, as dispatch packs it (pl_in) and an issue port unpacks it.
@@ -74,11 +75,11 @@ module smolrv64_core
     output wire                    ic_req,
     output wire [63:0]             ic_va,           // the pair's first byte, 8-byte aligned
     output wire [63:0]             ic_pa,
-    output wire [9:0]              ic_tag,
+    output wire [`SMOLRV64_ICTAG_W-1:0] ic_tag,
     input  wire                    ic_ack,
     input  wire                    ic_valid,
     input  wire [127:0]            ic_data,
-    input  wire [9:0]              ic_rtag,
+    input  wire [`SMOLRV64_ICTAG_W-1:0] ic_rtag,
     // Diagnostic only (FBDIAG_BASE readout).  These are the REGISTERED copies the VA tag
     // already maintains, so exporting them adds a fanout and nothing else.
     output wire [63:0]             imem_satp_q,
