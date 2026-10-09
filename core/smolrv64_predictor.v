@@ -280,7 +280,13 @@ module smolrv64_predictor
    wire [PCW-1:0]  t_last  = res_pc + (res_rvc ? 64'd0 : 64'd2);
    wire            t_hit   = res_pdet[2];
    wire [1:0]      t_ctr   = res_pdet[1:0];
-   wire [1:0]      t_base  = t_hit ? t_ctr : (res_taken ? 2'b10 : 2'b01);  // miss -> install weak
+   // READ-MODIFY-WRITE: the counters a training nudges are the tables' CURRENT ones (bc_tr, yc_tr,
+   // read at the CTI's own row), never the snapshot it carried from fetch: training waits for the
+   // CTI to be non-speculative, and every instance of a loop's branch in flight carries the same
+   // stale snapshot, so blind writes of it lose the updates in between.
+   wire [1:0]      bc_tr;                    // the bimodal counter at the CTI's halfword, now
+   wire [YEW-1:0]  yc_tr;                    // the corrector entry at its index, now
+   wire [1:0]      t_base  = t_hit ? bc_tr : (res_taken ? 2'b10 : 2'b01);  // miss -> install weak
    wire [1:0]      t_nudge = res_taken ? ((t_base == 2'b11) ? 2'b11 : t_base + 1'b1)
                                        : ((t_base == 2'b00) ? 2'b00 : t_base - 1'b1);
    wire [2:0]      t_type  = res_cbr  ? {1'b0, t_nudge}
@@ -292,10 +298,11 @@ module smolrv64_predictor
    wire            yc_hit  = res_pdet[3+YBITS+2];
    wire [1:0]      yc_ctr  = res_pdet[3+YBITS+1 -: 2];
    wire [YBITS-1:0] yc_idx = res_pdet[3 +: YBITS];
-   wire [1:0]      y_base  = yc_hit ? yc_ctr : (res_taken ? 2'b10 : 2'b01);
+   wire            yc_cur  = yc_hit & (yc_tr[YEW-1 -: YTAGW] == ytagf(t_last));   // still this CTI's
+   wire [1:0]      y_base  = yc_cur ? yc_tr[1:0] : (res_taken ? 2'b10 : 2'b01);
    wire [1:0]      y_nudge = res_taken ? ((y_base == 2'b11) ? 2'b11 : y_base + 1'b1)
                                        : ((y_base == 2'b00) ? 2'b00 : y_base - 1'b1);
-   wire            bim_pred = t_ctr[1];
+   wire            bim_pred = t_ctr[1];         // the bimodal guess fetch made
    wire            y_wr    = res_v & res_cbr & t_hit & (yc_hit | (bim_pred != res_taken));
    wire [YEW-1:0]  y_ent   = {ytagf(t_last), y_nudge};
 
@@ -309,23 +316,34 @@ module smolrv64_predictor
    wire [RB-1:0]   rr    = ra[RB+3:4];
    wire [YB-1:0]   yr    = ra[YB+3:4];
    genvar gb;
+   wire [1:0]      bc_rd [0:7];
+   wire [YEW-1:0]  yc_rd [0:7];
    generate for (gb = 0; gb < 8; gb = gb + 1) begin : bank
       reg [EW-1:0]  btb [0:NB-1];
+      reg [1:0]     bc  [0:NB-1];             // a conditional's bimodal counter (the entry's type
+                                              // field carries only conditional-or-not for it)
       reg [YEW-1:0] yc  [0:NY-1];
       reg [EW-1:0]  q;
+      reg [1:0]     cq;
       reg [YEW-1:0] yqr;
       integer bi;
       initial for (bi = 0; bi < NB; bi = bi + 1) btb[bi] = {EW{1'b0}};
+      initial for (bi = 0; bi < NB; bi = bi + 1) bc[bi]  = 2'b00;
       initial for (bi = 0; bi < NY; bi = bi + 1) yc[bi]  = {YEW{1'b0}};
-      initial begin q = {EW{1'b0}}; yqr = {YEW{1'b0}}; end
-      assign bq[gb] = q;
+      initial begin q = {EW{1'b0}}; cq = 2'b00; yqr = {YEW{1'b0}}; end
+      assign bq[gb] = {q[EW-1:TGTW+2], q[TGTW+2] ? q[TGTW+1:TGTW] : cq, q[TGTW-1:0]};
       assign yq[gb] = yqr;
+      assign bc_rd[gb] = bc[t_last[RB+3:4]];
+      assign yc_rd[gb] = yc[yc_idx[YBITS-1:3]];
       always @(posedge clk) begin
-         if (reset | mv) begin q <= btb[rr];  yqr <= yc[yr ^ yh]; end
+         if (reset | mv) begin q <= btb[rr];  cq <= bc[rr];  yqr <= yc[yr ^ yh]; end
          if (res_v & (t_last[3:1] == gb))         btb[t_last[RB+3:4]]   <= t_ent;
+         if (res_v & res_cbr & (t_last[3:1] == gb)) bc[t_last[RB+3:4]]  <= t_nudge;
          if (y_wr  & (yc_idx[2:0] == gb))         yc[yc_idx[YBITS-1:3]] <= y_ent;
       end
    end endgenerate
+   assign bc_tr = bc_rd[t_last[3:1]];
+   assign yc_tr = yc_rd[yc_idx[2:0]];
 
    always @(posedge clk) begin
       if (reset | mv) begin

@@ -61,6 +61,14 @@ bank[4].btb : branch target buffer, halfword bank 4 of 8, 256 x 53 -- read as th
 bank[5].btb : branch target buffer, halfword bank 5 of 8, 256 x 53 -- read as the fetch stream moves
 bank[6].btb : branch target buffer, halfword bank 6 of 8, 256 x 53 -- read as the fetch stream moves
 bank[7].btb : branch target buffer, halfword bank 7 of 8, 256 x 53 -- read as the fetch stream moves
+bank[0].bc  : bimodal counters, halfword bank 0 of 8, 256 x 2 -- read as the stream moves and by training
+bank[1].bc  : bimodal counters, halfword bank 1 of 8, 256 x 2 -- read as the stream moves and by training
+bank[2].bc  : bimodal counters, halfword bank 2 of 8, 256 x 2 -- read as the stream moves and by training
+bank[3].bc  : bimodal counters, halfword bank 3 of 8, 256 x 2 -- read as the stream moves and by training
+bank[4].bc  : bimodal counters, halfword bank 4 of 8, 256 x 2 -- read as the stream moves and by training
+bank[5].bc  : bimodal counters, halfword bank 5 of 8, 256 x 2 -- read as the stream moves and by training
+bank[6].bc  : bimodal counters, halfword bank 6 of 8, 256 x 2 -- read as the stream moves and by training
+bank[7].bc  : bimodal counters, halfword bank 7 of 8, 256 x 2 -- read as the stream moves and by training
 bank[0].yc  : YAGS corrector, halfword bank 0 of 8, 256 x 10 -- read as the fetch stream moves
 bank[1].yc  : YAGS corrector, halfword bank 1 of 8, 256 x 10 -- read as the fetch stream moves
 bank[2].yc  : YAGS corrector, halfword bank 2 of 8, 256 x 10 -- read as the fetch stream moves
