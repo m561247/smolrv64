@@ -10,4 +10,7 @@
 `ifndef SMOLRV64_LQB
  `define SMOLRV64_LQB 4
 `endif
+`ifndef SMOLRV64_SQB
+ `define SMOLRV64_SQB 3                 // the store queue's index width (1 << it entries)
+`endif
 `endif

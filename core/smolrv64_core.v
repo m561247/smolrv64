@@ -699,7 +699,7 @@ module smolrv64_core
                                            // the two-wide core closed at exactly 0.000 ns and did not boot; FP gives first
    localparam integer RS_IDXB = 4;         // widest per-class entry index (IBI)
    localparam integer NWB_C   = NL + 2;    // writeback broadcasts: the lanes' ports and the two streams'
-   localparam integer SQ_N = 8, SQ_IB = 3;      // store buffer: entries, index width
+   localparam integer SQ_N = 1 << `SMOLRV64_SQB, SQ_IB = `SMOLRV64_SQB;   // store buffer: entries, index width
    localparam integer SQ_TB = SQ_IB + 1;         // ...and its seqno: the index plus a wrap bit
                                                  // (smolrv64_sq's head/tail counters), so that a load
                                                  // dispatched against a FULL queue counts NENT
