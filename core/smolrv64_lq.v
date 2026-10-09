@@ -74,8 +74,8 @@ module smolrv64_lq
 
     // ---- fill: the address is translated; M lets go here ----
     // a_sent says the SAME cycle also handed the access to memory (see the header). The
-    // entry skips straight past `acc` -- it never becomes a candidate, because it has
-    // already been what a candidate is for.
+    // entry goes straight to `sent` -- it never becomes a candidate, because it has already
+    // been what a candidate is for.
     input  wire                  a_v,
     input  wire                  a_sent,
     input  wire [IDXB-1:0]       a_idx,
@@ -92,7 +92,7 @@ module smolrv64_lq
 
     // ---- disambiguation: a BIT PER ENTRY, maintained by smolrv64_sq -----------------------
     // The entries are exported so smolrv64_sq can run the alias test where an ADDRESS ARRIVES
-    // and hand back a flop. Asking it at issue instead put `acc` at the head of a 36-level,
+    // and hand back a flop. Asking it at issue instead put the candidate at the head of a 36-level,
     // 12x CARRY8 cone ending at the frontend's redirect register: WNS -1.698 ns at
     // 166.67 MHz, 18 670 failing endpoints, all five worst paths sourced here. Moving the
     // address off the TRANSLATE path -- this module's original purpose -- left the compare
@@ -109,11 +109,10 @@ module smolrv64_lq
     output wire [SQIB-1:0]       q_tag,
 
     // ---- early start: may the core collapse fill and access for the entry M holds? ----
-    // Only for the CANDIDATE: every entry older than acc has already been sent, so a load
-    // starting from here is still the oldest load that has not reached memory, and loads
-    // keep reaching memory in program order -- the property cand_v exists to hold.
+    // A load with no older live store has nothing to be ordered against (loads reach memory in
+    // the order they are ready, see the candidate below), so it may start in its own fill pass.
     input  wire [IDXB-1:0]       b_idx,       // the entry M's load owns
-    output wire                  b_ok,        // ...and it is the untranslated candidate
+    output wire                  b_ok,        // ...and it is live and not yet filled
 
     // ---- access: hand the D$ the oldest entry that is clear ----
     output wire                  x_v,
@@ -157,6 +156,7 @@ module smolrv64_lq
     input  wire [3:0]            w_fc,
     // ---- a translation that faulted, at the candidate: it traps at the ROB head ----
     output wire                  f_v,
+    output wire [IDXB-1:0]       f_idx,       // the entry it is: the oldest one whose translation faulted
     output wire [ROBB-1:0]       f_rob,
     output wire [3:0]            f_fc,
     output wire [VAW-1:0]        f_pc,
@@ -165,10 +165,13 @@ module smolrv64_lq
     output wire [IDXB:0]         occupancy,
     output wire                  av_any,      // an entry with a known address: a load older than M's op, not landed (rule C5)
     output wire [NENT*PBITS-1:0] e_dprd,      // each live entry's destination, 0 when free (the stall counters)
-    output wire                  uf_any,      // an entry whose address has not arrived
-    output wire [IDXB-1:0]       uf_idx,      // ...the oldest such, and its sequence number
-    output wire [SEQW-1:0]       uf_seq,
-    input  wire                  uf_take,     // M takes the oldest unfilled entry (it fills in order)
+    output wire                  uf_any,      // an entry that is not filled yet (live, no address in)
+    // M's pick: the oldest live entry whose address has ARRIVED (ar: the core holds it for M) but
+    // that M has not filled yet. M fills in arrival order, not program order.
+    input  wire [NENT-1:0]       ar,
+    output wire                  pk_v,
+    output wire [IDXB-1:0]       pk_idx,
+    output wire [SEQW-1:0]       pk_seq,
     input  wire [ROBB-1:0]       rob_head,    // head-gate an uncached (device) load's access (non-speculative)
     input  wire                  flush,
     // the kill (smolrv64_rob kd): the entries of ops younger than a mispredicted branch die.
@@ -179,8 +182,8 @@ module smolrv64_lq
     input  wire [(1 << ROBB)-1:0] kd,
     output wire [NENT-1:0]       kmask);
 
-   // Two pointers and a per-entry `sent` bit. acc..tail are waiting to go to memory; what
-   // is behind acc is outstanding or already landed. Pointers are what make flush a reset.
+   // A tail pointer and a per-entry `sent` bit. Entries wait to go to memory in any order they
+   // become ready; what is sent is outstanding or already landed. Pointers are what make flush a reset.
    reg [NENT-1:0]        v, av;              // live / address known
    reg [PAW-1:0]         pa   [0:NENT-1];
    reg [VAW-1:0]         va   [0:NENT-1];
@@ -208,15 +211,24 @@ module smolrv64_lq
    // the candidate (a_sent). Per entry it is exact, and it is what the landing assertion
    // below actually wants to know.
    reg [NENT-1:0]        sent;                // handed to memory, data not back yet
-   reg [IDXB-1:0]        acc, tail;
-   // THE UNFILLED ENTRIES ARE [fpc, tlc): M fills in program order, so the oldest unfilled entry is
-   // a pointer that steps as M takes one, never a scan. Counters with a wrap bit (tlc follows tail).
-   reg [IDXB:0]          tlc, fpc;
+   reg [IDXB-1:0]        tail;
    reg [IDXB:0]          cnt;
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; sent = {NENT{1'b0}};
-                 acc = {IDXB{1'b0}}; tail = {IDXB{1'b0}}; tlc = {(IDXB+1){1'b0}}; fpc = {(IDXB+1){1'b0}};
-                 cnt = {(IDXB+1){1'b0}}; end
+                 tail = {IDXB{1'b0}}; cnt = {(IDXB+1){1'b0}}; end
+
+   // PROGRAM ORDER IS THE RING READ FROM THE TAIL: the slot at the tail is the oldest position,
+   // the one before it the youngest. Every "oldest of these" below is the first set bit of the
+   // vector rotated to start at the tail -- a rotate and a priority encoder, with no pointer to
+   // keep in step with entries that land and free out of order.
+   function [IDXB-1:0] oldest(input [NENT-1:0] m);
+      reg [2*NENT-1:0] d;  reg [NENT-1:0] r;  integer i;
+      begin
+         d = {m, m} >> tail;  r = d[NENT-1:0];
+         oldest = tail;
+         for (i = NENT - 1; i >= 0; i = i - 1) if (r[i]) oldest = tail + i[IDXB-1:0];
+      end
+   endfunction
 
    // THE SLOT AT THE TAIL MUST BE FREE, not merely "the queue is not full". Loads land out of
    // order once they are pipelined (the tagged fast path; the random bench lands them in any
@@ -236,37 +248,50 @@ module smolrv64_lq
          assign e_dprd[gd*PBITS +: PBITS] = v[gd] ? prd[gd] : {PBITS{1'b0}};
       end
    endgenerate
-   assign uf_any    = (fpc != tlc);
-   assign uf_idx    = fpc[IDXB-1:0];
-   assign uf_seq    = sqn[fpc[IDXB-1:0]];
+   assign uf_any    = |(v & ~av);
+   wire [NENT-1:0] pk_m = v & ~av & ar;
+   assign pk_v      = |pk_m;
+   assign pk_idx    = oldest(pk_m);
+   assign pk_seq    = sqn[pk_idx];
 
-   // The candidate: the oldest entry not yet sent to memory. Its address must be known --
-   // an entry still waiting for translation cannot be tested and must not be skipped, or
-   // loads would access out of program order with respect to each other with nothing
-   // ordering them.
-   // ...and NOT already sent: with every entry taken and none landed, acc wraps round to the
-   // head, which is live, translated and IN FLIGHT, and `v & av` offered it a second time.
-   // Unreachable while one load is in flight at a time (the FSM parks), which is why nothing
-   // saw it; the random bench (tb_smolrv64_lqsq_rand, seed 1, cycle 358) found it in its first
-   // run, and the tagged fast path can hold NENT in flight.
-   wire cand_v = v[acc] & av[acc] & ~sent[acc] & tv[acc] & ~flt[acc];
-   // THE WALKER AND THE TRAP READ THE CANDIDATE. Loads reach memory in queue order, so an
-   // untranslated load anywhere else waits behind this one anyway, and a load whose translation
-   // faulted is never sent: it is the candidate when its op reaches the ROB head.
-   wire cand_a = v[acc] & av[acc] & ~sent[acc];
-   assign k_v   = cand_a & ~tv[acc];
-   assign k_idx = acc;
-   assign k_va  = va[acc];
-   assign f_v   = cand_a & tv[acc] & flt[acc];
-   assign f_rob = rob[acc];
-   assign f_fc  = fc[acc];
-   assign f_pc  = pc[acc];
-   assign f_seq = sqn[acc];
-   // The mirror of cand_v: the candidate is live and its address is NOT yet known, which is
-   // exactly a load still in M. q_tag is sqt[acc], so this is also what licenses the core to
-   // read smolrv64_sq's ld_older as an answer about the load M is holding.
-   assign b_ok = (b_idx == acc) & v[acc] & ~av[acc];
-   assign q_tag   = sqt[acc];
+   // THE ACCESS CANDIDATE is the oldest entry that may go to memory now: filled and translated,
+   // not faulting, not yet sent, no older store aliasing it (e_block, a register per entry; an
+   // older store whose address is unknown counts), and either idempotent memory or, for a device
+   // load, its op at the ROB head. Loads reach memory in the order they become ready, not in
+   // program order: a single hart sees no difference between two loads in either order, a store
+   // never commits ahead of an older load that has not landed (the irrevocable pointer), and
+   // device loads wait for the head, which orders them against everything older.
+   // ...and NOT already sent: with every entry taken and none landed the ring wraps round to a
+   // live, translated entry IN FLIGHT, and `v & av` would offer it a second time.
+   wire [NENT-1:0] cand_m;
+   wire [NENT-1:0] head_m;
+   genvar gc;
+   generate for (gc = 0; gc < NENT; gc = gc + 1) begin : g_cand
+      assign cand_m[gc] = v[gc] & av[gc] & ~sent[gc] & tv[gc] & ~flt[gc];
+      assign head_m[gc] = (rob[gc] == rob_head);
+   end endgenerate
+   wire [NENT-1:0] rdy_m = cand_m & ~e_block & (mem | head_m);
+   // THE WALKER AND THE TRAP READ THE OLDEST ENTRY THAT NEEDS THEM: an untranslated filled load
+   // is walked oldest first, and a load whose translation faulted is never sent: it traps when
+   // its op reaches the ROB head.
+   wire [NENT-1:0] wlk_m = v & av & ~sent & ~tv;
+   wire [NENT-1:0] flt_m = v & av & ~sent & tv & flt;
+   assign k_v   = |wlk_m;
+   assign k_idx = oldest(wlk_m);
+   assign k_va  = va[k_idx];
+   wire [IDXB-1:0] fi = oldest(flt_m);
+   assign f_v   = |flt_m;
+   assign f_idx = fi;
+   assign f_rob = rob[fi];
+   assign f_fc  = fc[fi];
+   assign f_pc  = pc[fi];
+   assign f_seq = sqn[fi];
+   // M's load can start its access in its fill pass whenever the entry is live and unfilled
+   assign b_ok = v[b_idx] & ~av[b_idx];
+   // the older-store query is about M's load when it holds an unfilled one, else the oldest filled
+   // entry still waiting to go to memory
+   wire [IDXB-1:0] qi = b_ok ? b_idx : oldest(v & av & ~sent);
+   assign q_tag   = sqt[qi];
    genvar ge;
    generate
       for (ge = 0; ge < NENT; ge = ge + 1) begin : g_exp
@@ -276,19 +301,17 @@ module smolrv64_lq
       end
    endgenerate
    assign e_av = av;
-   // ONE 4:1 mux from acc, into a flop-sourced bit. That is the whole point.
-   // An UNCACHED (device/MMIO) load must not access speculatively -- its read has side effects.
-   // Hold it until its op is the ROB head (non-speculative); DRAM/cached loads issue freely (MLP).
-   assign x_head  = (rob[acc] == rob_head);
-   assign x_v     = cand_v & ~e_block[acc] & (mem[acc] | x_head);
-   assign x_block = cand_v &  e_block[acc];   // instrumentation only
-   assign x_devwait = cand_v & ~e_block[acc] & ~mem[acc] & ~x_head;   // instrumentation only
-   assign x_idx   = acc;
-   assign x_pa    = pa[acc];
-   assign x_size  = sz[acc];
-   assign x_signed= sgn[acc];
-   assign x_fp    = isfp[acc];
-   assign x_unc   = unc[acc];
+   wire [IDXB-1:0] xi = oldest(rdy_m);
+   assign x_head  = head_m[xi];
+   assign x_v     = |rdy_m;
+   assign x_block = |(cand_m & e_block);   // instrumentation only
+   assign x_devwait = |(cand_m & ~e_block & ~mem & ~head_m) & ~x_v;   // instrumentation only
+   assign x_idx   = xi;
+   assign x_pa    = pa[xi];
+   assign x_size  = sz[xi];
+   assign x_signed= sgn[xi];
+   assign x_fp    = isfp[xi];
+   assign x_unc   = unc[xi];
 
    // The landing entry's payload, selected by the tag the response carried.
    assign l_prd  = prd[l_idx];
@@ -335,21 +358,19 @@ module smolrv64_lq
    always @(posedge clk) begin
       if (reset) begin
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
-         acc <= {IDXB{1'b0}}; tail <= {IDXB{1'b0}}; tlc <= {(IDXB+1){1'b0}}; fpc <= {(IDXB+1){1'b0}};
+         tail <= {IDXB{1'b0}};
          cnt <= {(IDXB+1){1'b0}};
       end else begin
          // Retiring the entry frees its slot; slot REUSE is governed by cnt and tail, so an
          // out-of-order response simply leaves the slot dead until tail comes round to it.
          if (l_v) begin v[l_idx] <= 1'b0; av[l_idx] <= 1'b0; sent[l_idx] <= 1'b0; end
-         if (x_v & x_take) begin acc <= acc + 1'b1; sent[acc] <= 1'b1; end
+         if (x_v & x_take) sent[x_idx] <= 1'b1;
          if (d_alloc & d_ready) begin
             v[tail] <= 1'b1; av[tail] <= 1'b0; sent[tail] <= 1'b0;
             rob[tail] <= d_rob; prd[tail] <= d_prd; rdn[tail] <= d_rd;
             rdv[tail] <= d_rd_v; sqt[tail] <= d_sqtag;  pc[tail] <= d_pc;  sqn[tail] <= d_seq;
             tail <= tail + 1'b1;
-            tlc  <= tlc + 1'b1;
          end
-         if (uf_take) fpc <= fpc + 1'b1;
          if ((d_alloc & d_ready) & ~l_v)      cnt <= cnt + 1'b1;
          else if (~(d_alloc & d_ready) & l_v) cnt <= cnt - 1'b1;
 
@@ -363,9 +384,9 @@ module smolrv64_lq
             pa[w_idx] <= w_pa;  unc[w_idx] <= w_unc;  mem[w_idx] <= w_mem;  flt[w_idx] <= w_flt;  fc[w_idx] <= w_fc;
             tv[w_idx] <= 1'b1;
          end
-         // Filled AND already gone. It cannot collide with x_take above: that one needs
-         // av[acc], and a_sent is asserted only while b_ok says ~av[acc].
-         if (a_v & a_sent) begin sent[a_idx] <= 1'b1; acc <= acc + 1'b1; end
+         // Filled AND already gone. It cannot collide with x_take above: that one needs a filled
+         // entry, and a_sent is asserted only for one that is not filled yet (b_ok).
+         if (a_v & a_sent) sent[a_idx] <= 1'b1;
          // The kill, after every other arm (a dead entry landing, filled or sent now dies all the
          // same; a dead entry landing now is counted once) and before the flush. Nothing
          // allocates while it holds (asserted).
@@ -373,12 +394,6 @@ module smolrv64_lq
             for (kw = 0; kw < NENT; kw = kw + 1)
                if (kmk[kw]) begin v[kw] <= 1'b0;  av[kw] <= 1'b0;  sent[kw] <= 1'b0; end
             tail <= kd0;
-            // the slots from kd0 to the tail go (NENT - k_off of them); the fill pointer follows
-            // when they reach it
-            tlc  <= tlc + {1'b0, k_off} - NENT[IDXB:0];
-            if ((NENT[IDXB:0] - {1'b0, k_off}) >= (tlc - fpc - {{IDXB{1'b0}}, uf_take}))
-               fpc <= tlc + {1'b0, k_off} - NENT[IDXB:0];
-            if (~(v[acc] & ~sent[acc]) | kmk[acc]) acc <= kd0;
             cnt <= cnt - k_n - {{IDXB{1'b0}}, l_v};
          end
          // The flush, ordered LAST: it wins over an allocation made in its cycle (dispatch
@@ -386,7 +401,7 @@ module smolrv64_lq
          // redirecting op is in flight, so every entry is younger and dies.
          if (flush) begin
             v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
-            acc <= {IDXB{1'b0}}; tail <= {IDXB{1'b0}}; tlc <= {(IDXB+1){1'b0}}; fpc <= {(IDXB+1){1'b0}};
+            tail <= {IDXB{1'b0}};
             cnt <= {(IDXB+1){1'b0}};
          end
       end
@@ -417,15 +432,6 @@ module smolrv64_lq
          $fatal(1, "smolrv64_lq: allocate into a full queue");
       if (d_alloc & kd_v & ~flush)
          $fatal(1, "smolrv64_lq: an allocation while the kill holds");
-      // every live entry not yet sent waits in acc..tail: the candidate pointer never passes one
-      for (ia = 0; ia < NENT; ia = ia + 1)
-         if (v[ia] & ~sent[ia] & ~(((ia[IDXB-1:0] - acc) < (tail - acc)) | ((tail == acc) & (cnt == NENT[IDXB:0]))))
-            $fatal(1, "smolrv64_lq: entry %0d waits outside acc..tail (acc %0d tail %0d)", ia, acc, tail);
-      if (uf_take & (~uf_any | ~v[uf_idx] | av[uf_idx]))
-         $fatal(1, "smolrv64_lq: M takes the fill pointer's entry %0d, which is not unfilled (any %b v %b av %b)",
-                uf_idx, uf_any, v[uf_idx], av[uf_idx]);
-      if (tlc[IDXB-1:0] != tail)
-         $fatal(1, "smolrv64_lq: the tail counter %0d disagrees with the tail %0d", tlc, tail);
       if (d_alloc & d_ready & v[tail])
          $fatal(1, "smolrv64_lq: allocate into slot %0d while its load is in flight", tail);
       if (a_v & ~v[a_idx])
@@ -436,19 +442,18 @@ module smolrv64_lq
          $fatal(1, "smolrv64_lq: data landed for a slot with no live entry (idx %0d)", l_idx);
       if (l_v & ~sent[l_idx])
          $fatal(1, "smolrv64_lq: data landed for an entry that was never sent to memory (idx %0d)", l_idx);
-      if (x_v & x_take & ~av[acc])
-         $fatal(1, "smolrv64_lq: started an access with no translated address");
+      if (x_v & x_take & (~av[x_idx] | sent[x_idx]))
+         $fatal(1, "smolrv64_lq: started an access for entry %0d with no address or already sent", x_idx);
       if (a_v & a_sent & ~b_ok)
-         $fatal(1, "smolrv64_lq: entry %0d started early but is not the untranslated candidate (acc %0d)",
-                a_idx, acc);
+         $fatal(1, "smolrv64_lq: entry %0d started early but is not a live unfilled entry", a_idx);
       if (a_v & a_sent & x_v & x_take)
          $fatal(1, "smolrv64_lq: an early start and a candidate start in the same cycle");
       if (a_v & a_sent & ~a_tv)
          $fatal(1, "smolrv64_lq: entry %0d started early without a translation", a_idx);
-      if (x_v & x_take & ~tv[acc])
+      if (x_v & x_take & ~tv[x_idx])
          $fatal(1, "smolrv64_lq: the candidate started without a translation");
-      if (w_v & ~(k_v & (w_idx == acc)))
-         $fatal(1, "smolrv64_lq: the walker's answer for entry %0d is not for the untranslated candidate", w_idx);
+      if (w_v & ~(v[w_idx] & av[w_idx] & ~tv[w_idx]))
+         $fatal(1, "smolrv64_lq: the walker's answer for entry %0d is not for a live untranslated entry", w_idx);
       if (w_v & a_v & (a_idx == w_idx))
          $fatal(1, "smolrv64_lq: entry %0d filled and translated in one cycle", w_idx);
    end

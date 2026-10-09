@@ -36,8 +36,9 @@ module tb;
    wire             lq_d_ready2, sq_d_ready2;
    wire             lq_uf_any, sq_uf_any;
    wire [NENT*PBITS-1:0] lq_e_dprd;
-   wire [IDXB-1:0]  lq_uf_idx, sq_uf_idx;
-   wire [7:0]       lq_uf_seq, sq_uf_seq;
+   wire             lq_pk_v, sq_pk_v;
+   wire [IDXB-1:0]  lq_pk_idx, sq_pk_idx;
+   wire [7:0]       lq_pk_seq, sq_pk_seq;
    wire             lq_d_ready, lq_x_v, lq_x_block, lq_b_ok, lq_x_signed, lq_x_fp, lq_x_unc, lq_l_rd_v;
    wire [IDXB-1:0]  lq_d_idx, lq_x_idx;  wire [IDXB:0] lq_q_tag;
    wire [PAW-1:0]   lq_x_pa, lq_l_pa;  wire [1:0] lq_x_size;
@@ -45,6 +46,7 @@ module tb;
    wire [NENT*12-1:0] e_off;
    // the walker and trap ports: every fill here is translated, so they stay quiet
    wire             lk_v, sk_v, lf_v, sf_v;
+   wire [IDXB-1:0]  lf_idx;
    wire [IDXB-1:0]  lk_idx, sk_idx;
    wire [38:0]      lk_va, sk_va, lf_pc, sf_pc;
    wire [ROBB-1:0]  lf_rob, sf_rob;
@@ -84,7 +86,7 @@ module tb;
       .x_v(lq_x_v),.x_idx(lq_x_idx),.x_pa(lq_x_pa),.x_size(lq_x_size),.x_signed(lq_x_signed),
       .x_fp(lq_x_fp),.x_unc(lq_x_unc), .x_head(lq_x_head),.x_devwait(lq_x_devwait),.x_take(lq_x_take),
       .l_v(lq_l_v),.l_idx(lq_l_idx),.l_prd(lq_l_prd),.l_rd(lq_l_rd),.l_rd_v(lq_l_rd_v),.l_rob(lq_l_rob),
-      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.uf_idx(lq_uf_idx),.uf_seq(lq_uf_seq),.uf_take(lq_a_v & lq_uf_any & (lq_a_idx == lq_uf_idx)),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(lq_kmask_nc),
+      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_idx(lf_idx),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(lq_kmask_nc),
       // every bench address is DRAM (speculates freely), so the device head-gate is never taken
       .a_mem(1'b1),.rob_head({ROBB{1'b0}}));
 
@@ -92,7 +94,7 @@ module tb;
    // fills the load queue -- exactly smolrv64_core's m_lq_fill wiring
    smolrv64_sq #(.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.NWB(NWB),.LQN(NENT),.LQIB(IDXB)) u_sq
      (.clk(clk),.reset(reset),
-      .d_alloc(sq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(sq_d_rob),.d_dpreg(sq_d_dpreg),.d_rdy(sq_d_rdy),.d_ready(sq_d_ready),.d_ready2(sq_d_ready2),.d_idx(sq_d_idx),.d_tag(sq_d_tag), .av_any(sq_av_any),.uf_any(sq_uf_any),.uf_idx(sq_uf_idx),.uf_seq(sq_uf_seq),.uf_take(sq_a_v & sq_uf_any & (sq_a_idx == sq_uf_idx)),
+      .d_alloc(sq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(sq_d_rob),.d_dpreg(sq_d_dpreg),.d_rdy(sq_d_rdy),.d_ready(sq_d_ready),.d_ready2(sq_d_ready2),.d_idx(sq_d_idx),.d_tag(sq_d_tag), .av_any(sq_av_any),.uf_any(sq_uf_any),.ar({NENT{1'b1}}),.pk_v(sq_pk_v),.pk_idx(sq_pk_idx),.pk_seq(sq_pk_seq),
       .a_v(sq_a_v),.a_idx(sq_a_idx),.a_addr(sq_a_addr),.a_va(39'(sq_a_addr)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(sq_a_size),.a_unc(sq_a_unc),
       .r_v(sq_r_v),.r_preg(sq_r_preg),.r_data(rfv[sq_r_preg]),
       .wb_v(wb_v),.wb_preg(wb_preg),.wb_data(wb_data),
@@ -277,20 +279,19 @@ module tb;
       // ---- 8. the load queue's ordering ----
       disp_load(9'd41, 4'd1, L0); disp_load(9'd42, 4'd2, L1);
       load_addr(L1, 56'h6000, 2);                    // the YOUNGER one only
-      chk("8 no overtake of an unfilled older entry", lq_x_v, 1'b0);
-      load_addr(L0, 56'h7000, 2);
-      chk("8 the older goes first", lq_x_v && lq_x_pa==56'h7000, 1'b1);
+      chk("8 a ready younger load is not held up by an unfilled older one", lq_x_v && lq_x_pa==56'h6000, 1'b1);
       take;
-      chk("8 the second offered while the first is in flight", lq_x_v && lq_x_pa==56'h6000, 1'b1);
+      load_addr(L0, 56'h7000, 2);
+      chk("8 the older goes when its address is in", lq_x_v && lq_x_pa==56'h7000, 1'b1);
       take;
       chk("8 both in flight", lq_occ==2 && !lq_x_v, 1'b1);
-      lq_l_idx=L0; #1; chk("8 lands the first", lq_l_prd==9'd41, 1'b1);
+      lq_l_idx=L0; #1; chk("8 lands the older", lq_l_prd==9'd41, 1'b1);
       land(L0); lq_l_idx=L1; #1; chk("8 then the second", lq_l_prd==9'd42, 1'b1);
       land(L1); chk("8 drained", lq_occ==0, 1'b1);
       // the early start: M's translate pass also STARTS the access (a_sent), so the entry
-      // is never a candidate and the queue's pointer moves past it
+      // is never a candidate
       disp_load(9'd43, 4'd3, L0);
-      lq_b_idx=L0; #1; chk("8 b_ok: M's load is the untranslated candidate", lq_b_ok, 1'b1);
+      lq_b_idx=L0; #1; chk("8 b_ok: M's load is live and unfilled", lq_b_ok, 1'b1);
       lq_a_v=1; lq_a_sent=1; lq_a_idx=L0; lq_a_pa=56'h8000; lq_a_size=2; step; lq_a_v=0; lq_a_sent=0; #1;
       chk("8 early-started entry is not offered", !lq_x_v && lq_occ==1, 1'b1);
       land(L0); chk("8 and lands", lq_occ==0, 1'b1);
@@ -389,7 +390,7 @@ module tb;
       // without an address; waiting for it to leave is the deadlock that hung build L. ----
       disp_store(9'd7, 4'd2, S0);
       chk("13 an entry without an address is no older store", sq_occ==1 && !sq_av_any, 1'b1);
-      chk("13 ...and it is the oldest unfilled one", sq_uf_any && sq_uf_idx == S0, 1'b1);
+      chk("13 ...and it is the oldest unfilled one", sq_uf_any && sq_pk_v && sq_pk_idx == S0, 1'b1);
       store_addr(S0, 56'hE000, 2, 1'b1, 64'hEE);
       chk("13 with an address it is one", sq_av_any && !sq_uf_any, 1'b1);
       commit;

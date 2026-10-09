@@ -942,6 +942,8 @@ module tb;
       for (pe = 0; pe < 47; pe = pe + 1) $display("%0d r%04h", pev[pe], pcode(pe));
       $display("perf-stat-sim: end");
 
+      $display("MEMDEP loads blocked only by unknown older store addresses: resolved clear=%0d (waited %0d cycles), resolved aliased=%0d (waited %0d cycles)",
+               dut.core.u_sq.sp_clear, dut.core.u_sq.sp_clear_cyc, dut.core.u_sq.sp_alias, dut.core.u_sq.sp_alias_cyc);
       $display("SQ  loads=%0d reordered=%0d (%0d.%0d%%)  ld_block cycles=%0d (%0d.%0d%%)  mean occ=%0d.%02d  full=%0d",
                n_ldstart, n_ldreord,
                n_ldstart ? (100*n_ldreord)/n_ldstart : 0,

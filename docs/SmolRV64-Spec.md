@@ -936,11 +936,11 @@ set in the stage register.
   cycle; the rest of the op is a record written at dispatch (`spl_ld`, `spl_st`: the payload and
   the ROB slot). **M fills in program order**: it takes the oldest load or store whose address
   has not arrived (`uf_idx`/`uf_seq` from each queue, a sequence compare between the two) once
-  its VA is in, or the head op when nothing is unfilled, which the credits make always. The
-  oldest unfilled entry of each queue is a pointer, not a scan: M fills in program order, so the
-  unfilled entries are those from the pointer to the tail; it steps when M takes its entry
-  (`uf_take`), and a kill that reaches it moves it to the new tail. M takes a load or store every
-  cycle. Everything M did for a load or store it still does: the dTLB lookup, the
+  its VA is in, or the head op when nothing is unfilled, which the credits make always. M fills
+  in the order addresses arrive, oldest first among those waiting (each queue's `pk_*`: the first
+  arrived-and-unfilled entry in program order, read from the tail or head), so a load whose address
+  is ready is not held up by an older op whose address is not. An address in a lane's adder goes
+  straight into M when none is waiting. M takes a load or store every cycle. Everything M did for a load or store it still does: the dTLB lookup, the
   LQ/SQ fill, a load's early start.
 - **A store's data comes from the store queue (5.2d-b step 2).** A value already in a register
   file at allocation (`d_rdy`) is fetched by the SQ's data read: it registers its oldest entry
@@ -1130,11 +1130,10 @@ set in the stage register.
   - **The walker** (`mmu`'s walking port) serves M's FSM-starting op first (an AMO, LR/SC or CBO,
     at the ROB head; the port's requester is a register, `pm_q`, so it takes the port the cycle
     after it asks and M's control never reaches the TLB's read address), else the store queue's
-    first uncommitted entry, else the load queue's
-    candidate, whichever is untranslated: stores commit and loads reach memory in queue order, so
-    no other entry is waited on first. It keeps the entry it was asked for until it answers
-    (`wk_lk`) or a redirect ends the walk with the entry. Its answer writes the entry's PA,
-    classes and `tv`, or its fault and cause.
+    first uncommitted entry (stores commit in order, so no other store is waited on first), else
+    the load queue's oldest untranslated entry. It keeps the entry it was asked for until it
+    answers (`wk_lk`, with the load's index `wk_lk_li`) or a redirect ends the walk with the entry.
+    Its answer writes the entry's PA, classes and `tv`, or its fault and cause.
   - **What waits for `tv`:** a load's access (the candidate needs it) and a store's commit
     (`kc_v`). A queued access may start while the queue's walk runs; only M's own walk keeps the
     LSU's FSM idle (`wk_m_q`).
@@ -1147,7 +1146,12 @@ set in the stage register.
     other; and the test runs the cycle the VA arrives, whatever the walker does.
 - **A queued load's access is one cycle after its fill, unless nothing is ordering it.**
   `smolrv64_lq` registers the address, then selects the oldest entry no older store can alias,
-  then accesses; the SELECT cycle is what pays for the alias test. When no store older than
+  then accesses -- the oldest *ready* entry, in any order the loads become ready: filled and
+  translated, not faulting, no older store aliasing it (an older store with no address counts),
+  and, for a device load, its op at the ROB head. The SELECT cycle is what pays for the alias
+  test. Loads reach memory out of program order: a single hart cannot tell, a store never commits
+  ahead of an older load that has not landed (the irrevocable pointer), and a device load waits
+  for the head, which orders it against everything older. When no store older than
   the load is live -- `smolrv64_sq`'s `ld_older`, which reads `v[]`/`head`/`ld_tag` and never an
   address -- `req_early` collapses fill and access into that one pass, with `mem_raddr` taken
   straight off `t_paddr`. Fill, M's early release and the landing path are all unchanged;
@@ -1444,8 +1448,8 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `u_iq_i` entry | `smolrv64_iq` | 10 | 2+2×9 = 20 | 200 | flops | integer, slot A's, `NSRC`=2 (§6.1) |
 | `u_iq_i2`, `u_iq_i3` entry | `smolrv64_iq` | 10 each | 2+2×10 = 22 | 220 each | flops | integer, slot B's and slot C's, `NSRC`=2 (§6.1) |
 | `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/418/1 | 547 | flops | the head-op register (§8) |
-| `spl_ld`, `spl_st` | `smolrv64_core` | 8 each | 5+413 = 418 | 6 688 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at the oldest unfilled entry (§8) |
-| `la_va`, `sa_va`, `la_v`, `sa_v` | `smolrv64_core` | 8 each | 64/64/1/1 | 1 040 | flops | the lanes' arrivals: 3W (one per lane), read at the oldest unfilled entry (§8) |
+| `spl_ld`, `spl_st` | `smolrv64_core` | 16, 8 | 5+413 = 418 | 10 032 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at M's pick (§8) |
+| `la_va`, `sa_va`, `la_v`, `sa_v` | `smolrv64_core` | 16, 8 | 64/64/1/1 | 1 560 | flops | the lanes' arrivals: 3W (one per lane), read at M's pick (§8) |
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 413 | 15 694 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each |
 | `pend` | `smolrv64_pending` | 512 | 1 | 512 | flops | 3R, 1 set + 3 clear, bulk-clear |

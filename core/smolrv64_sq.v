@@ -58,10 +58,13 @@ module smolrv64_sq
     // the occupancy: waiting for the occupancy is a deadlock, found on the board 2026-09-04
     // (Ubuntu's clear_page is cbo.zero; the tiny128 kernel never issues one). Rule C5.
     output wire                  av_any,
-    output wire                  uf_any,      // an entry whose address has not arrived
-    output wire [IDXB-1:0]       uf_idx,      // ...the oldest such, and its sequence number
-    output wire [SEQW-1:0]       uf_seq,
-    input  wire                  uf_take,     // M takes the oldest unfilled entry (it fills in order)
+    output wire                  uf_any,      // an entry that is not filled yet (live, no address in)
+    // M's pick: the oldest live entry whose address has ARRIVED (ar: the core holds it for M) but
+    // that M has not filled yet. M fills in arrival order, not program order.
+    input  wire [NENT-1:0]       ar,
+    output wire                  pk_v,
+    output wire [IDXB-1:0]       pk_idx,
+    output wire [SEQW-1:0]       pk_seq,
     output wire [IDXB:0]         d_tag,       // the STORE-SEQNO a load captures at dispatch: the
                                               // tail COUNTER, one bit wider than the index (below)
 
@@ -182,7 +185,6 @@ module smolrv64_sq
    reg [ROBB-1:0]        rob  [0:NENT-1];
    reg [NENT-1:0]        cmt;                // committed (released by the ROB), draining
    reg [IDXB:0]          kcc;                // the first uncommitted entry; head <= kc <= tail
-   reg [IDXB:0]          fpc;                // the first unfilled entry; kc <= fp <= tail (M fills in order)
    wire [IDXB-1:0]       kc = kcc[IDXB-1:0];
    // THE SEQNO IS ONE BIT WIDER THAN THE INDEX. A load captures the tail at dispatch and
    // "older" is (slot - head) < (tag - head). With tag and head both IDXB bits, a FULL queue
@@ -240,7 +242,7 @@ module smolrv64_sq
    assign d_idx     = tail;
    assign d_tag     = tailc;
    assign av_any    = |(v & av);
-   assign uf_any    = (fpc != tailc);
+   assign uf_any    = |(v & ~av);
    // the data read's pick, from flops: the oldest entry with its address whose value is in a
    // register file and not yet read (every committed entry has its data, so it is at or after
    // the first uncommitted; the data is needed only to commit, which the address precedes)
@@ -256,8 +258,19 @@ module smolrv64_sq
    initial rq_v = 1'b0;
    assign r_v    = rq_v;
    assign r_preg = rq_preg;
-   assign uf_idx    = fpc[IDXB-1:0];
-   assign uf_seq    = sqn[fpc[IDXB-1:0]];
+   // the oldest arrived-and-unfilled entry: the live region runs from the head, so it is the first
+   // set bit of the mask rotated to start there
+   wire [NENT-1:0]   pk_m = v & ~av & ar;
+   wire [2*NENT-1:0] pk_d = {pk_m, pk_m} >> head;
+   wire [NENT-1:0]   pk_r = pk_d[NENT-1:0];
+   reg  [IDXB-1:0]   pk_o;  integer pkf;
+   always @* begin
+      pk_o = {IDXB{1'b0}};
+      for (pkf = NENT - 1; pkf >= 0; pkf = pkf - 1) if (pk_r[pkf]) pk_o = pkf[IDXB-1:0];
+   end
+   assign pk_v      = |pk_m;
+   assign pk_idx    = head + pk_o;
+   assign pk_seq    = sqn[pk_idx];
    assign occupancy = cnt;
    // THE WALKER AND THE TRAP READ THE FIRST UNCOMMITTED ENTRY. Stores commit in order, so an
    // untranslated store anywhere else waits behind this one anyway, and a store that faulted
@@ -348,6 +361,16 @@ module smolrv64_sq
 
    wire [IDXB:0] ld_dist = ld_tag - headc;
    genvar gl, gs;
+`ifndef SYNTHESIS
+   wire [LQN-1:0] dep_rc, dep_ra;  wire [LQN*16-1:0] dep_cy;
+   reg  [63:0]    sp_clear, sp_alias, sp_clear_cyc, sp_alias_cyc;
+   integer        dpi;
+   initial begin sp_clear = 0; sp_alias = 0; sp_clear_cyc = 0; sp_alias_cyc = 0; end
+   always @(posedge clk) for (dpi = 0; dpi < LQN; dpi = dpi + 1) begin
+      if (dep_rc[dpi]) begin sp_clear = sp_clear + 1; sp_clear_cyc = sp_clear_cyc + dep_cy[dpi*16 +: 16]; end
+      if (dep_ra[dpi]) begin sp_alias = sp_alias + 1; sp_alias_cyc = sp_alias_cyc + dep_cy[dpi*16 +: 16]; end
+   end
+`endif
    generate
       for (gl = 0; gl < LQN; gl = gl + 1) begin : g_lblk
          wire [IDXB:0]   l_dist = l_tag[gl*(IDXB+1) +: IDXB+1] - headc;
@@ -378,6 +401,26 @@ module smolrv64_sq
          reg unk_q;  initial unk_q = 1'b0;      // MEM_ALIAS_UNK: the unknown-address arm alone, a cycle old
          always @(posedge clk) unk_q <= l_av[gl] & (|(oldm & ~av));
          assign l_block_unk_q[gl] = unk_q;
+`ifndef SYNTHESIS
+         // MEMORY-DEPENDENCE CENSUS: a load blocked by older stores whose addresses are unknown, at
+         // the cycle the last of them is known: did it alias one of its older stores? (a load that
+         // had gone ahead would have been right, or wrong)
+         wire unk_now = l_av[gl] & (|(oldm & ~av));
+         reg  was_unk;  reg [15:0] ubc;  reg r_c, r_a;  reg [15:0] r_cy;
+         initial begin was_unk = 1'b0; ubc = 16'd0; r_c = 1'b0; r_a = 1'b0; r_cy = 16'd0; end
+         always @(posedge clk) begin
+            r_c <= 1'b0;  r_a <= 1'b0;
+            if (!l_av[gl] || reset) begin was_unk <= 1'b0;  ubc <= 16'd0; end
+            else begin
+               was_unk <= unk_now;
+               if (unk_now) ubc <= ubc + 16'd1;
+               else if (was_unk) begin
+                  r_c <= ~(|(oldm & conf[gl]));  r_a <= |(oldm & conf[gl]);  r_cy <= ubc;  ubc <= 16'd0;
+               end
+            end
+         end
+         assign dep_rc[gl] = r_c;  assign dep_ra[gl] = r_a;  assign dep_cy[gl*16 +: 16] = r_cy;
+`endif
          // THE OLDER-STORE ANSWER IS A REGISTER, PER LOAD (plan item T1 (L), 2026-09-07).
          // The query port below (ld_tag -> ld_older) reads sqt[acc] from the load queue's
          // LUTRAM, subtracts headc and compares NENT distances, and its answer licensed M's
@@ -415,7 +458,7 @@ module smolrv64_sq
       if (reset) begin
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; dv <= {NENT{1'b0}}; cmt <= {NENT{1'b0}};
          ld_v <= {NENT{1'b0}};          // a landing noted for a flushed entry is nobody's
-         headc <= {(IDXB+1){1'b0}}; tailc <= {(IDXB+1){1'b0}}; kcc <= {(IDXB+1){1'b0}}; fpc <= {(IDXB+1){1'b0}};
+         headc <= {(IDXB+1){1'b0}}; tailc <= {(IDXB+1){1'b0}}; kcc <= {(IDXB+1){1'b0}};
          cnt <= {(IDXB+1){1'b0}};
          for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
       end else begin
@@ -447,7 +490,6 @@ module smolrv64_sq
             rd[tail] <= d_rdy;
             tailc <= tailc + 1'b1;
          end
-         if (uf_take) fpc <= fpc + 1'b1;
          if ((d_alloc & d_ready) & ~(c_v & c_take)) cnt <= cnt + 1'b1;
          else if (~(d_alloc & d_ready) & (c_v & c_take)) cnt <= cnt - 1'b1;
          // A FLUSH KEEPS THE COMMITTED ENTRIES. They are the oldest, so the queue is cut at
@@ -459,7 +501,6 @@ module smolrv64_sq
                if (~cmt[k]) begin v[k] <= 1'b0; av[k] <= 1'b0; dv[k] <= 1'b0; end
             ld_v  <= {NENT{1'b0}};
             tailc <= kcc;
-            fpc   <= kcc;                    // every committed entry was filled
             cnt   <= (kcc - headc) - {{IDXB{1'b0}}, (c_v & c_take)};
             for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
          end
@@ -526,7 +567,6 @@ module smolrv64_sq
             for (k = 0; k < NENT; k = k + 1) if (kmk[k]) conf[li][k] <= 1'b0;
          if (rq_v & kmk[rq_idx]) rq_v <= 1'b0;
          tailc <= tailc - k_n;
-         if (k_n >= (tailc - fpc - {{IDXB{1'b0}}, uf_take})) fpc <= tailc - k_n;   // the kill reached the fill pointer
          cnt   <= cnt - k_n - {{IDXB{1'b0}}, (c_v & c_take)};
       end
    end
@@ -535,9 +575,6 @@ module smolrv64_sq
    always @(posedge clk) if (!reset) begin
       if (d_alloc & ~d_ready)
          $fatal(1, "smolrv64_sq: allocate into a full buffer");
-      if (uf_take & (~uf_any | ~v[uf_idx] | av[uf_idx]))
-         $fatal(1, "smolrv64_sq: M takes the fill pointer's entry %0d, which is not unfilled (any %b v %b av %b)",
-                uf_idx, uf_any, v[uf_idx], av[uf_idx]);
       if (a_v & ~v[a_idx])
          $fatal(1, "smolrv64_sq: address written to a slot with no live entry (idx %0d)", a_idx);
       if (a_v & av[a_idx])
