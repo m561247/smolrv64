@@ -935,7 +935,10 @@ set in the stage register.
   the ROB slot). **M fills in program order**: it takes the oldest load or store whose address
   has not arrived (`uf_idx`/`uf_seq` from each queue, a sequence compare between the two) once
   its VA is in, or the head op when nothing is unfilled, which the credits make always. The
-  op M holds is not a candidate (the queues' `mf_*`), so M takes a load or store every cycle. Everything M did for a load or store it still does: the dTLB lookup, the
+  oldest unfilled entry of each queue is a pointer, not a scan: M fills in program order, so the
+  unfilled entries are those from the pointer to the tail; it steps when M takes its entry
+  (`uf_take`), and a kill that reaches it moves it to the new tail. M takes a load or store every
+  cycle. Everything M did for a load or store it still does: the dTLB lookup, the
   LQ/SQ fill, a load's early start.
 - **A store's data comes from the store queue (5.2d-b step 2).** A value already in a register
   file at allocation (`d_rdy`) is fetched by the SQ's data read: it registers its oldest entry

@@ -168,8 +168,7 @@ module smolrv64_lq
     output wire                  uf_any,      // an entry whose address has not arrived
     output wire [IDXB-1:0]       uf_idx,      // ...the oldest such, and its sequence number
     output wire [SEQW-1:0]       uf_seq,
-    input  wire                  mf_v,        // M holds this entry's op: its fill is M's, so the next
-    input  wire [IDXB-1:0]       mf_idx,      // ...unfilled entry is the one after it
+    input  wire                  uf_take,     // M takes the oldest unfilled entry (it fills in order)
     input  wire [ROBB-1:0]       rob_head,    // head-gate an uncached (device) load's access (non-speculative)
     input  wire                  flush,
     // the kill (smolrv64_rob kd): the entries of ops younger than a mispredicted branch die.
@@ -210,10 +209,13 @@ module smolrv64_lq
    // below actually wants to know.
    reg [NENT-1:0]        sent;                // handed to memory, data not back yet
    reg [IDXB-1:0]        acc, tail;
+   // THE UNFILLED ENTRIES ARE [fpc, tlc): M fills in program order, so the oldest unfilled entry is
+   // a pointer that steps as M takes one, never a scan. Counters with a wrap bit (tlc follows tail).
+   reg [IDXB:0]          tlc, fpc;
    reg [IDXB:0]          cnt;
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; sent = {NENT{1'b0}};
-                 acc = {IDXB{1'b0}}; tail = {IDXB{1'b0}};
+                 acc = {IDXB{1'b0}}; tail = {IDXB{1'b0}}; tlc = {(IDXB+1){1'b0}}; fpc = {(IDXB+1){1'b0}};
                  cnt = {(IDXB+1){1'b0}}; end
 
    // THE SLOT AT THE TAIL MUST BE FREE, not merely "the queue is not full". Loads land out of
@@ -234,18 +236,9 @@ module smolrv64_lq
          assign e_dprd[gd*PBITS +: PBITS] = v[gd] ? prd[gd] : {PBITS{1'b0}};
       end
    endgenerate
-   wire [NENT-1:0] ufv = v & ~av & ~({{(NENT-1){1'b0}}, mf_v} << mf_idx);   // unfilled, and not M's
-   assign uf_any    = |ufv;
-   // every entry before the access candidate has its address, so the oldest unfilled entry is
-   // the first one at or after it
-   reg [IDXB-1:0] uf_i;  integer ui;
-   always @* begin
-      uf_i = acc;
-      for (ui = NENT - 1; ui >= 0; ui = ui - 1)
-         if (ufv[acc + ui[IDXB-1:0]]) uf_i = acc + ui[IDXB-1:0];
-   end
-   assign uf_idx    = uf_i;
-   assign uf_seq    = sqn[uf_i];
+   assign uf_any    = (fpc != tlc);
+   assign uf_idx    = fpc[IDXB-1:0];
+   assign uf_seq    = sqn[fpc[IDXB-1:0]];
 
    // The candidate: the oldest entry not yet sent to memory. Its address must be known --
    // an entry still waiting for translation cannot be tested and must not be skipped, or
@@ -342,7 +335,7 @@ module smolrv64_lq
    always @(posedge clk) begin
       if (reset) begin
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
-         acc <= {IDXB{1'b0}}; tail <= {IDXB{1'b0}};
+         acc <= {IDXB{1'b0}}; tail <= {IDXB{1'b0}}; tlc <= {(IDXB+1){1'b0}}; fpc <= {(IDXB+1){1'b0}};
          cnt <= {(IDXB+1){1'b0}};
       end else begin
          // Retiring the entry frees its slot; slot REUSE is governed by cnt and tail, so an
@@ -354,7 +347,9 @@ module smolrv64_lq
             rob[tail] <= d_rob; prd[tail] <= d_prd; rdn[tail] <= d_rd;
             rdv[tail] <= d_rd_v; sqt[tail] <= d_sqtag;  pc[tail] <= d_pc;  sqn[tail] <= d_seq;
             tail <= tail + 1'b1;
+            tlc  <= tlc + 1'b1;
          end
+         if (uf_take) fpc <= fpc + 1'b1;
          if ((d_alloc & d_ready) & ~l_v)      cnt <= cnt + 1'b1;
          else if (~(d_alloc & d_ready) & l_v) cnt <= cnt - 1'b1;
 
@@ -378,6 +373,11 @@ module smolrv64_lq
             for (kw = 0; kw < NENT; kw = kw + 1)
                if (kmk[kw]) begin v[kw] <= 1'b0;  av[kw] <= 1'b0;  sent[kw] <= 1'b0; end
             tail <= kd0;
+            // the slots from kd0 to the tail go (NENT - k_off of them); the fill pointer follows
+            // when they reach it
+            tlc  <= tlc + {1'b0, k_off} - NENT[IDXB:0];
+            if ((NENT[IDXB:0] - {1'b0, k_off}) >= (tlc - fpc - {{IDXB{1'b0}}, uf_take}))
+               fpc <= tlc + {1'b0, k_off} - NENT[IDXB:0];
             if (~(v[acc] & ~sent[acc]) | kmk[acc]) acc <= kd0;
             cnt <= cnt - k_n - {{IDXB{1'b0}}, l_v};
          end
@@ -386,7 +386,7 @@ module smolrv64_lq
          // redirecting op is in flight, so every entry is younger and dies.
          if (flush) begin
             v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
-            acc <= {IDXB{1'b0}}; tail <= {IDXB{1'b0}};
+            acc <= {IDXB{1'b0}}; tail <= {IDXB{1'b0}}; tlc <= {(IDXB+1){1'b0}}; fpc <= {(IDXB+1){1'b0}};
             cnt <= {(IDXB+1){1'b0}};
          end
       end
@@ -421,6 +421,11 @@ module smolrv64_lq
       for (ia = 0; ia < NENT; ia = ia + 1)
          if (v[ia] & ~sent[ia] & ~(((ia[IDXB-1:0] - acc) < (tail - acc)) | ((tail == acc) & (cnt == NENT[IDXB:0]))))
             $fatal(1, "smolrv64_lq: entry %0d waits outside acc..tail (acc %0d tail %0d)", ia, acc, tail);
+      if (uf_take & (~uf_any | ~v[uf_idx] | av[uf_idx]))
+         $fatal(1, "smolrv64_lq: M takes the fill pointer's entry %0d, which is not unfilled (any %b v %b av %b)",
+                uf_idx, uf_any, v[uf_idx], av[uf_idx]);
+      if (tlc[IDXB-1:0] != tail)
+         $fatal(1, "smolrv64_lq: the tail counter %0d disagrees with the tail %0d", tlc, tail);
       if (d_alloc & d_ready & v[tail])
          $fatal(1, "smolrv64_lq: allocate into slot %0d while its load is in flight", tail);
       if (a_v & ~v[a_idx])

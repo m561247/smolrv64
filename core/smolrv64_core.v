@@ -1490,7 +1490,7 @@ module smolrv64_core
       .d_alloc(d_st_alloc), .d_rob(gst_rob), .d_dpreg(gst_dpreg), .d_rdy(rdy_st),
       .d_pc(gst_pc), .d_seq(gst_seq),
       .d_ready(sq_d_ready), .d_ready2(sq_d_ready2), .d_idx(sq_d_idx), .d_tag(sq_d_tag), .av_any(sq_av_any),
-      .uf_any(sq_uf_any), .uf_idx(sq_uf_idx), .uf_seq(sq_uf_seq), .mf_v(m_valid & m_st_nb), .mf_idx(m_sq_tag),
+      .uf_any(sq_uf_any), .uf_idx(sq_uf_idx), .uf_seq(sq_uf_seq), .uf_take(s_go & ~u_ld),
       .a_v(m_sq_fill), .a_idx(m_sq_tag), .a_addr(lsu_xo_pa), .a_va(m_addr[38:0]), .a_tv(lsu_xo_tv | lsu_xo_flt),
       .a_flt(lsu_xo_flt), .a_fc(lsu_xo_fc), .a_size(m_mem_size),
       .a_unc(lsu_xo_unc), .r_v(sq_r_v), .r_preg(sq_r_preg), .r_data(prf_sq),
@@ -1561,7 +1561,7 @@ module smolrv64_core
       .w_v(lsu_wk_done & ~wk_st), .w_idx(lq_k_idx), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
       .f_v(lq_f_v), .f_rob(lq_f_rob), .f_fc(lq_f_fc), .f_pc(lq_f_pc), .f_seq(lq_f_seq),
-      .x_devwait(lq_x_devwait), .occupancy(lq_occ), .av_any(lq_av_any), .e_dprd(lq_e_dprd), .uf_any(lq_uf_any), .uf_idx(lq_uf_idx), .uf_seq(lq_uf_seq), .mf_v(m_valid & m_ld_nb), .mf_idx(m_lq_idx), .rob_head(rob_head_idx), .flush(redirect),
+      .x_devwait(lq_x_devwait), .occupancy(lq_occ), .av_any(lq_av_any), .e_dprd(lq_e_dprd), .uf_any(lq_uf_any), .uf_idx(lq_uf_idx), .uf_seq(lq_uf_seq), .uf_take(s_go & u_ld), .rob_head(rob_head_idx), .flush(redirect),
       .kd_v(rob_kd_v), .kd(rob_kd), .kmask(lq_kmask));
 
    // ------------------------------------------------- COLLAPSING FILL AND ACCESS
@@ -1792,8 +1792,8 @@ module smolrv64_core
    // the LQ/SQ fill, a load's early start and the address-only faults are M's, unchanged. M fills
    // in program order: it takes the oldest load or store whose address has not arrived, once it
    // has, so an op M holds (a fault waits for the ROB head) never has an older one behind it. The
-   // op M holds is not a candidate (the queues' mf_*), so M takes the next one in the cycle it
-   // fills the last. The rest of the op rides in a record written at dispatch.
+   // queues keep the oldest unfilled entry as a pointer that steps when M takes it (uf_take), so M
+   // takes the next one in the cycle it fills the last. The rest of the op rides in a record written at dispatch.
    localparam integer SPW = ROB_IDXB + PLW;        // {ROB slot, payload}
    reg  [SPW-1:0] spl_ld [0:LQ_N-1];
    reg  [SPW-1:0] spl_st [0:SQ_N-1];
@@ -3111,7 +3111,8 @@ module smolrv64_core
    // predictor never learns from a path that is later squashed, and a mispredict trains as soon as
    // it is the oldest op not yet done, not at its squash. Retirement is seen through registered copies
    // of the ROB's retire ports (rt_v_q, rt_idx_q), which keeps the retire cone out of this logic. A CTI younger than a
-   // pending restart is on the wrong path and queues nothing; an entry the kill marks dead, or one
+   // pending restart is on the wrong path and queues nothing (one queued in a redirect's cycle is
+   // born dead); an entry the kill marks dead, or one
    // past the pending restart, is discarded at the head. A redirect discards every entry that has
    // not retired, except the restart's own CTI at its squash: it is the ROB head, so nothing older
    // is left and it is architecturally done. One entry trains per cycle; a CTI arriving at a full
@@ -3122,7 +3123,7 @@ module smolrv64_core
    reg  [RKB-1:0] rk [0:NL-1];                  // each enqueuing lane's rank among this cycle's: the older ones
    integer tqi, tqj;
    always @* for (tqi = 0; tqi < NL; tqi = tqi + 1) begin
-      tr_ok[tqi] = lr_v[tqi] & (lr_br[tqi] | lr_jmp[tqi]) & ~(fr_v & older(fr_seq, lr_seq[tqi])) & ~redirect;
+      tr_ok[tqi] = lr_v[tqi] & (lr_br[tqi] | lr_jmp[tqi]) & ~(fr_v & older(fr_seq, lr_seq[tqi]));
    end
    always @* for (tqi = 0; tqi < NL; tqi = tqi + 1) begin
       rk[tqi] = {RKB{1'b0}};
@@ -3202,7 +3203,7 @@ module smolrv64_core
             tq_seq[a] <= lr_seq[tk];  tq_rob[a] <= lr_rob[tk];  tq_rvc[a] <= lr_rvc[tk];
             tq_cbr[a] <= lr_br[tk];  tq_call[a] <= l_call[tk];  tq_ret[a] <= l_ret[tk];
             tq_taken[a] <= lr_taken[tk];
-            tq_dk[a] <= 1'b0;
+            tq_dk[a] <= redirect;              // a redirect's: younger than it (never an enable, rule I11)
             tq_rt[a] <= 1'b0;
          end
          tq_t <= tq_t + tq_wn[TQB-1:0];

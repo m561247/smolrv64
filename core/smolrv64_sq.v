@@ -61,8 +61,7 @@ module smolrv64_sq
     output wire                  uf_any,      // an entry whose address has not arrived
     output wire [IDXB-1:0]       uf_idx,      // ...the oldest such, and its sequence number
     output wire [SEQW-1:0]       uf_seq,
-    input  wire                  mf_v,        // M holds this entry's op: its fill is M's, so the next
-    input  wire [IDXB-1:0]       mf_idx,      // ...unfilled entry is the one after it
+    input  wire                  uf_take,     // M takes the oldest unfilled entry (it fills in order)
     output wire [IDXB:0]         d_tag,       // the STORE-SEQNO a load captures at dispatch: the
                                               // tail COUNTER, one bit wider than the index (below)
 
@@ -183,6 +182,7 @@ module smolrv64_sq
    reg [ROBB-1:0]        rob  [0:NENT-1];
    reg [NENT-1:0]        cmt;                // committed (released by the ROB), draining
    reg [IDXB:0]          kcc;                // the first uncommitted entry; head <= kc <= tail
+   reg [IDXB:0]          fpc;                // the first unfilled entry; kc <= fp <= tail (M fills in order)
    wire [IDXB-1:0]       kc = kcc[IDXB-1:0];
    // THE SEQNO IS ONE BIT WIDER THAN THE INDEX. A load captures the tail at dispatch and
    // "older" is (slot - head) < (tag - head). With tag and head both IDXB bits, a FULL queue
@@ -240,8 +240,7 @@ module smolrv64_sq
    assign d_idx     = tail;
    assign d_tag     = tailc;
    assign av_any    = |(v & av);
-   wire [NENT-1:0] ufv = v & ~av & ~({{(NENT-1){1'b0}}, mf_v} << mf_idx);   // unfilled, and not M's
-   assign uf_any    = |ufv;
+   assign uf_any    = (fpc != tailc);
    // the data read's pick, from flops: the oldest entry with its address whose value is in a
    // register file and not yet read (every committed entry has its data, so it is at or after
    // the first uncommitted; the data is needed only to commit, which the address precedes)
@@ -257,16 +256,8 @@ module smolrv64_sq
    initial rq_v = 1'b0;
    assign r_v    = rq_v;
    assign r_preg = rq_preg;
-   // a committed entry has its address, so the oldest unfilled entry is the first one at or
-   // after the first uncommitted
-   reg [IDXB-1:0] uf_i;  integer ui;
-   always @* begin
-      uf_i = kc;
-      for (ui = NENT - 1; ui >= 0; ui = ui - 1)
-         if (ufv[kc + ui[IDXB-1:0]]) uf_i = kc + ui[IDXB-1:0];
-   end
-   assign uf_idx    = uf_i;
-   assign uf_seq    = sqn[uf_i];
+   assign uf_idx    = fpc[IDXB-1:0];
+   assign uf_seq    = sqn[fpc[IDXB-1:0]];
    assign occupancy = cnt;
    // THE WALKER AND THE TRAP READ THE FIRST UNCOMMITTED ENTRY. Stores commit in order, so an
    // untranslated store anywhere else waits behind this one anyway, and a store that faulted
@@ -424,7 +415,7 @@ module smolrv64_sq
       if (reset) begin
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; dv <= {NENT{1'b0}}; cmt <= {NENT{1'b0}};
          ld_v <= {NENT{1'b0}};          // a landing noted for a flushed entry is nobody's
-         headc <= {(IDXB+1){1'b0}}; tailc <= {(IDXB+1){1'b0}}; kcc <= {(IDXB+1){1'b0}};
+         headc <= {(IDXB+1){1'b0}}; tailc <= {(IDXB+1){1'b0}}; kcc <= {(IDXB+1){1'b0}}; fpc <= {(IDXB+1){1'b0}};
          cnt <= {(IDXB+1){1'b0}};
          for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
       end else begin
@@ -456,6 +447,7 @@ module smolrv64_sq
             rd[tail] <= d_rdy;
             tailc <= tailc + 1'b1;
          end
+         if (uf_take) fpc <= fpc + 1'b1;
          if ((d_alloc & d_ready) & ~(c_v & c_take)) cnt <= cnt + 1'b1;
          else if (~(d_alloc & d_ready) & (c_v & c_take)) cnt <= cnt - 1'b1;
          // A FLUSH KEEPS THE COMMITTED ENTRIES. They are the oldest, so the queue is cut at
@@ -467,6 +459,7 @@ module smolrv64_sq
                if (~cmt[k]) begin v[k] <= 1'b0; av[k] <= 1'b0; dv[k] <= 1'b0; end
             ld_v  <= {NENT{1'b0}};
             tailc <= kcc;
+            fpc   <= kcc;                    // every committed entry was filled
             cnt   <= (kcc - headc) - {{IDXB{1'b0}}, (c_v & c_take)};
             for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
          end
@@ -533,6 +526,7 @@ module smolrv64_sq
             for (k = 0; k < NENT; k = k + 1) if (kmk[k]) conf[li][k] <= 1'b0;
          if (rq_v & kmk[rq_idx]) rq_v <= 1'b0;
          tailc <= tailc - k_n;
+         if (k_n >= (tailc - fpc - {{IDXB{1'b0}}, uf_take})) fpc <= tailc - k_n;   // the kill reached the fill pointer
          cnt   <= cnt - k_n - {{IDXB{1'b0}}, (c_v & c_take)};
       end
    end
@@ -541,6 +535,9 @@ module smolrv64_sq
    always @(posedge clk) if (!reset) begin
       if (d_alloc & ~d_ready)
          $fatal(1, "smolrv64_sq: allocate into a full buffer");
+      if (uf_take & (~uf_any | ~v[uf_idx] | av[uf_idx]))
+         $fatal(1, "smolrv64_sq: M takes the fill pointer's entry %0d, which is not unfilled (any %b v %b av %b)",
+                uf_idx, uf_any, v[uf_idx], av[uf_idx]);
       if (a_v & ~v[a_idx])
          $fatal(1, "smolrv64_sq: address written to a slot with no live entry (idx %0d)", a_idx);
       if (a_v & av[a_idx])
