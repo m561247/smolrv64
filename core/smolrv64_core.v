@@ -3915,11 +3915,16 @@ module smolrv64_core
    reg  [SEQW-1:0] dr_seq;
    reg  [PDW-1:0]  dr_pdet;
    reg  [1:0]      dr_ccls;
+   reg  [PCW-1:0]  dr_pc;
+   reg             dr_rvc;
    integer         drk;
    always @* begin
-      dr_tgt = s_tgt[0];  dr_seq = s_seq[0];  dr_pdet = s_pdet[0];  dr_ccls = s_ccls[0];
+      dr_tgt = s_tgt[0];  dr_seq = s_seq[0];  dr_pdet = s_pdet[0];  dr_ccls = s_ccls[0];  dr_pc = s_pc[0];  dr_rvc = s_insn[0][1:0] != 2'b11;
       for (drk = IW - 1; drk >= 0; drk = drk - 1)
-         if (s_dr[drk]) begin dr_tgt = s_tgt[drk];  dr_seq = s_seq[drk];  dr_pdet = s_pdet[drk];  dr_ccls = s_ccls[drk]; end
+         if (s_dr[drk]) begin
+            dr_tgt = s_tgt[drk];  dr_seq = s_seq[drk];  dr_pdet = s_pdet[drk];  dr_ccls = s_ccls[drk];
+            dr_pc = s_pc[drk];  dr_rvc = s_insn[drk][1:0] != 2'b11;
+         end
    end
    assign dec_red     = |s_dr;
    assign dec_red_tgt = dr_tgt;
@@ -3968,13 +3973,17 @@ module smolrv64_core
    wire [RASB-1:0] fe_red_rsp = (m_red_fire | sy_red) ? rsp_r : fr_set ? cf_rsp : dec_rsp;
    always @(posedge clk) fe_red_rsp_q <= fe_red_rsp;
    // ---- the history every frontend redirect restores (smolrv64_predictor rb_ghr) ------------------
-   // The redirecting instruction's snapshot, plus its outcome when it is a conditional the BTB
-   // knew (the only ones the history holds): a CTF restart's own branch, or none for a decode
-   // resteer (a jal, or a backward branch the BTB missed). A redirect at the head (a trap, an
+   // The redirecting instruction's snapshot, stepped by its own address when it was taken
+   // (smolrv64_phist.vh): a restart's own transfer when it was taken, and a decode resteer always
+   // (a jal, or a backward branch the BTB missed, both taken). A redirect at the head (a trap, an
    // xret, a serializing op) starts a new context and restarts the history at zero.
+`include "smolrv64_phist.vh"
    wire [GHL-1:0] cf_ghr  = cf_pdet[PD_GHR +: GHL];
-   wire [GHL-1:0] fr_ghr  = (cf_is_branch & cf_pdet[DCR_HIT]) ? {cf_ghr[GHL-2:0], cf_taken} : cf_ghr;
-   wire [GHL-1:0] dec_ghr = dr_pdet[PD_GHR +: GHL];
+   wire           cf_tk   = cf_is_jump | cf_is_jalr | (cf_is_branch & cf_taken);
+   wire [PCW-1:0] cf_last = lr_pc[wl] + (lr_rvc[wl] ? 64'd0 : 64'd2);
+   wire [PCW-1:0] dr_last = dr_pc + (dr_rvc ? 64'd0 : 64'd2);
+   wire [GHL-1:0] fr_ghr  = cf_tk ? phist_step(cf_ghr, cf_last) : cf_ghr;
+   wire [GHL-1:0] dec_ghr = phist_step(dr_pdet[PD_GHR +: GHL], dr_last);
    wire [GHL-1:0] fe_red_ghr = (m_red_fire | sy_red) ? {GHL{1'b0}} : fr_set ? fr_ghr : dec_ghr;
    always @(posedge clk) fe_red_ghr_q <= fe_red_ghr;
    always @(posedge clk) if (!reset) begin

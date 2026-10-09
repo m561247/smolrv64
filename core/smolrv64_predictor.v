@@ -30,10 +30,11 @@
 // snapshot -- what a redirect by that instruction restores -- and what a restart of the stream
 // (a rejected prediction, a freeze) goes back to.
 //
-// THE HISTORY is the directions of the conditionals the BTB knew, in program order, as predicted
-// and then corrected: the stream shifts it once per pair that ends at one, and a redirect restores
-// the redirecting instruction's own snapshot, plus its outcome when it is such a conditional. It is
-// never rebuilt from resolves: control flow resolves out of order, wrong-path branches included.
+// THE HISTORY is the path of taken control transfers (smolrv64_phist.vh), in program order, as
+// predicted and then corrected: the stream steps it once per pair that ends at a predicted-taken
+// transfer, and a redirect restores the redirecting instruction's own snapshot, stepped by its own
+// address when it was taken. It is never rebuilt from resolves: control flow resolves out of
+// order, wrong-path branches included.
 //
 // Everything here is a HINT, never architectural: the mispredict check is the exec-side
 // `actual_npc != pred_npc` compare, and the aligner takes a prediction only on a bundle that ends
@@ -104,6 +105,7 @@ module smolrv64_predictor
    // Configuration INIT zeroes every bank. Bank b holds the halfwords at address bits [3:1] == b, so
    // a pair's halfword k is in bank k.
    localparam EW = TAGW + 3 + TGTW;
+`include "smolrv64_phist.vh"
 
    // The tag folds higher bits in, so halfwords that agree in the index but differ above still
    // miss: the kernel's pre-MMU execution at PA 0x802xxxxx aliases its VAs 0xffffffff80xxxxxx in
@@ -208,7 +210,6 @@ module smolrv64_predictor
    wire [PCW-1:0]  h    = sa_q + {60'd0, hk, 1'b0};             // its address
    wire [2:0]      ety  = e[TGTW +: 3];
    wire [TGTW-1:0] etg  = e[TGTW-1:0];
-   wire            cond = ~ety[2];
    wire            yhit = |(h1 & hy);
    wire            dir  = |(h1 & hd1);
    wire            call = (ety == TY_CALL), ret = (ety == TY_RET);
@@ -219,7 +220,7 @@ module smolrv64_predictor
    wire [PCW-1:0]  tgt  = ret ? ras[ras_ptr] : {{(PCW-TGTW-1){etg[TGTW-1]}}, etg, 1'b0};
    wire [PCW-1:0]  p_nx = tk ? tgt : p_cut ? ftc : sa_q + 64'd16;
    wire [RASB-1:0] rsp_post = (tk & call) ? ras_ptr + 1'b1 : (tk & ret) ? ras_ptr - 1'b1 : ras_ptr;
-   wire [GHL-1:0]  ghr_post = (p_cut & cond) ? {ghr[GHL-2:0], dir} : ghr;
+   wire [GHL-1:0]  ghr_post = tk ? phist_step(ghr, h) : ghr;
    wire [YBITS-1:0] p_yidx  = {h[YB+3:4] ^ yh_q, h[3:1]};
    wire            push     = adv & p_cut & ~flush;
    wire [QEW-1:0]  pq_in    = {tk, tgt, ras_ptr, ghr, yhit, yhit ? ce[1:0] : 2'b01, p_yidx, ety[1:0]};
