@@ -325,8 +325,9 @@ history shifts at most once per pair. The corrector is read with the history bef
 pair of lag), and the index read is the one carried for training. Training recomputes the key
 from the resolving CTI's PC and length.
 
-The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue in
-order (a pair pushes up to two; the stream moves only with two entries free): taken, the target,
+The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
+banks by position parity, one write each) in order (a pair pushes up to two; the stream moves
+only with two entries free): taken, the target,
 the corrector details training needs, and the RAS pointer and history as they stand before the
 CTI. The aligner reads the queue's first `IW` entries; an instruction ending on a marked halfword
 takes the next one, and a taken one ends the bundle. A bundle pops one entry per mark it holds
@@ -378,10 +379,11 @@ the head. A redirect discards every entry that has not retired, except the resta
 its squash (the ROB head). Training is a read-modify-write of the tables' current counters (the
 bimodal banks `bc`, the corrector), never of the snapshot carried from fetch, which every
 in-flight instance of a loop's branch shares. A mispredicting
-conditional branch's early restart restores its own history snapshot plus its outcome. The key
-is the CTI's last halfword (its PC and length). Dhrystone (`workloads/rvbench`, 5,000 runs, IW=3): 1.06
-redirects per iteration, the strcmp loop exit; 3 102 919 cycles. The Linux lockstep (IW=3)
-retires 15 607 214 instructions in 60 M cycles and 81 175 485 in 300 M.
+conditional branch's early restart restores its own history snapshot, stepped by its own address
+when it was taken. The key is the CTI's last halfword (its PC and length). Dhrystone
+(`workloads/rvbench`, 5,000 runs, IW=3): 1.06 redirects per iteration, the strcmp loop exit;
+1 470 958 cycles. The Linux lockstep (tiny128, IW=3) retires 44 372 101 instructions in 60 M
+cycles and 229 214 494 in 300 M.
 
 **The corrector's tag carries the PC bits its index consumes** (2026-09-10): the index is
 PC[10:1] xor the history, so those PC bits are not recoverable from the slot; the tag used to
@@ -1469,8 +1471,9 @@ queue's commit, the second ALU); the only yield left is M's, to a landing load o
 | `bank[b].btb` | `smolrv64_predictor` | 8 x 256 | 53 | 108 544 | block RAM, read as the stream moves |
 | `bank[b].yc` | `smolrv64_predictor` | 8 x 256 | 10 | 20 480 | distributed RAM, read as the stream moves |
 | `ras` | `smolrv64_predictor` | 8 | 64 | 512 | flops |
-| `pq` | `smolrv64_predictor` | 8 | 95 | 760 | the prediction queue |
-| `ring`, `rmk` | `smolrv64_fring` | 32 | 17 | 544 | flops |
+| `bank[b].bc` | `smolrv64_predictor` | 8 x 256 | 2 | 4 096 | distributed RAM, read as the stream moves and by training |
+| `pq0`, `pq1` | `smolrv64_predictor` | 2 x 4 | 95 | 760 | the prediction queue: even and odd positions, one write each |
+| `ring`, `rmk`, `rst` | `smolrv64_fring` | 32 | 18 | 576 | flops (the halfword, its mark, its start bit) |
 
 Neither BTB nor corrector bank has a valid bit — validity is the tag match (§4.2).
 
