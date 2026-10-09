@@ -7,11 +7,11 @@
 // the only architectural state here.
 //
 // PREDICTION. The fetch ring (smolrv64_fring) marks each halfword that ends a pair at a CTI the
-// predictor knows, and the head of the predictor's queue is the first mark's prediction. A
-// bundle ends at the first mark: the aligner ends it at an instruction ending on one. When the bundle's
-// last instruction ends exactly there, fetch consumes the mark (pop) and, if it is a real branch
-// or jump predicted taken, takes the prediction: the ring already holds the target's halfwords
-// after the mark. A mark that does not fit the code is rejected (`reject`), and the frontend
+// predictor knows, and the predictor's queue holds the marks' predictions in order: entry j is
+// the window's (j+1)-th mark's. A bundle ends at the first mark: the aligner ends it at an
+// instruction ending on one. Fetch consumes the bundle's marks (pop counts them) and, when its
+// LAST instruction ends on a mark predicted taken and is a real branch or jump, takes the
+// prediction: the ring already holds the target's halfwords after the mark. A mark that does not fit the code is rejected (`reject`), and the frontend
 // restarts the stream a cycle later, withholding the window meanwhile:
 //   - taken, on an instruction that is not a branch or jump (a straddler included): the bundle
 //     goes on falling through, and the ring, which holds the target's halfwords after it, restarts
@@ -76,11 +76,14 @@ module fetch
     // the PRESENTED bundle; it rides to dispatch and is the exec-side mispredict reference
     // (branch_unit redirects iff actual_npc != pred_npc).
     input  wire [HW-1:0]           imem_mk,     // the window's marks
-    input  wire                    pq_tk,       // the first mark's prediction: taken...
-    input  wire [PCW-1:0]          pq_tgt,      // ...to here
-    output wire                    pop,         // fetch took the first mark's prediction, or dropped it
-    output wire                    drop,        // ...dropped it: the ring clears the mark
-    output wire                    at_mark,     // the presented bundle's last instruction ends at the first mark
+    input  wire [IW-1:0]           pq_tk,       // the window's marks' predictions in order, j at [j]: taken...
+    input  wire [IW*PCW-1:0]       pq_tgt,      // ...to here
+    output wire [$clog2(IW+1)-1:0] pop,         // the marks fetch consumed, or the one it dropped
+    output wire                    drop,        // ...dropped the first: the ring clears the mark
+    output wire                    at_mark,     // the presented bundle's last instruction ends at a mark
+    output wire                    take,        // ...whose taken prediction fetch took: pc_q goes to its target
+    output wire [PCW-1:0]          take_tgt,    // the target of the last slot's prediction
+    output wire [IW-1:0]           slot_mk,     // per slot: it ends at a mark (its own prediction)
     output wire                    reject,      // the first mark does not fit the code: restart the stream...
     output wire                    reject_np,   // ...predicting nothing in its first pair
     output wire [PCW-1:0]          pred_npc,
@@ -176,11 +179,12 @@ module fetch
    wire [IW*PBW-1:0] al_offs;
    wire [IW*SEQW-1:0] al_seq;
    wire al_br_term, al_mk_term;
+   wire [IW-1:0] al_smk, al_sbr;
    aligner #(.IW(IW), .HW(HW), .PCW(PCW), .SEQW(SEQW)) u_al
      (.hwin(imem_data), .avail(eff_avail), .base_pc(pc_q), .base_seq(seq_q),
       .solo_all(solo_all), .bytes_late(bytes_late), .mk(imem_mk),
       .valid(al_valid), .inst(al_inst), .pc(al_pc), .offs(al_offs), .seq(al_seq), .consumed(al_consumed),
-      .br_term(al_br_term), .mk_term(al_mk_term));
+      .br_term(al_br_term), .mk_term(al_mk_term), .smk(al_smk), .sbr(al_sbr));
    // THE FALL-THROUGH AND THE SLOT PCs ARE MUXES, NOT ADDERS (2026-09-05). Gate U, the first
    // build of the two-wide fetch, failed at -0.620 ns on pc_q -> iMMU -> fetch buffer ->
    // aligner -> +2*consumed -> the RAS write and the decoupling queue's slot-1 PC: 23 levels with
@@ -214,9 +218,6 @@ module fetch
             if (al_offs[ps*PBW +: PBW] == pi[PBW-1:0]) al_pcm[ps*PCW +: PCW] = pc_plus[pi];
       end
    end
-   // straddle/irq bundles bypass the aligner: never predict on them (the straddle
-   // FSM owns its +4 advance; the pseudo-op holds PC).
-   wire   br_term = al_br_term & ~strad & ~irq_go;
 
    // slot-0 page-boundary straddler: pc_q at the last halfword, a 32-bit op (low2==11),
    // and that low halfword actually present (an I$ hit). The aligner excludes it (the
@@ -241,14 +242,34 @@ module fetch
    assign valid = |slot_valid;          // a bundle is present iff >=1 instr aligned
    wire   fire  = ready && valid;        // advance only on a downstream handshake
 
-   // the first mark (see PREDICTION): where the bundle ends, what it takes, what it rejects
-   assign at_mark   = (strad & imem_mk[0]) | (~strad & ~irq_go & al_mk_term);
-   wire   pred_v    = at_mark & pq_tk & br_term;
+   // the marks (see PREDICTION): which slots end at one, and the bundle's last slot. A straddle's
+   // one instruction may end at a mark; the interrupt pseudo-op never does. Straddle and interrupt
+   // bundles never take a prediction (the straddle FSM owns its +4 advance; the pseudo-op holds PC).
+   wire [IW-1:0] sm = irq_go ? {IW{1'b0}} : strad ? {{(IW-1){1'b0}}, imem_mk[0]} : al_smk & al_valid;
+   reg  [IW-1:0] lst;                          // the last valid slot, one-hot
+   reg  [$clog2(IW+1)-1:0] nm;                  // the marks in the bundle
+   integer ls;
+   always @* begin
+      lst = {IW{1'b0}};  nm = 0;
+      for (ls = 0; ls < IW; ls = ls + 1) begin
+         if (slot_valid[ls]) lst = {IW{1'b0}} | ({{(IW-1){1'b0}}, 1'b1} << ls);
+         nm = nm + {{($clog2(IW+1)-1){1'b0}}, sm[ls]};
+      end
+   end
+   // the last slot's mark is the bundle's nm-th: entry nm-1 (0 when there is none: unused then)
+   wire [$clog2(IW+1)-1:0] jm = (nm == 0) ? 0 : nm - 1'b1;
+   wire           tk_l  = at_mark & pq_tk[jm];
+   wire [PCW-1:0] tgt_l = pq_tgt[jm*PCW +: PCW];
+   assign at_mark   = |(sm & lst);
+   assign slot_mk   = sm;
+   wire   pred_v    = tk_l & |(al_sbr & lst) & ~strad & ~irq_go;   // the LAST slot is a branch or jump
    wire   mid       = imem_ok & ~strad & ~irq_go & imem_mk[0] & (imem_data[1:0] == 2'b11);
-   assign drop      = mid & ~pq_tk;
-   assign reject    = ~reset & ~redirect & ((fire & at_mark & pq_tk & ~pred_v) | (mid & pq_tk));
-   assign reject_np = mid & pq_tk;
-   assign pop       = (fire & at_mark & ~(pq_tk & ~pred_v)) | drop;
+   assign drop      = mid & ~pq_tk[0];
+   assign reject    = ~reset & ~redirect & ((fire & tk_l & ~pred_v) | (mid & pq_tk[0]));
+   assign reject_np = mid & pq_tk[0];
+   assign pop       = drop ? 1 : (fire & ~(tk_l & ~pred_v)) ? nm : 0;
+   assign take      = fire & pred_v;
+   assign take_tgt  = tgt_l;
 
    integer c;
    reg [SEQW-1:0] nvalid;
@@ -261,7 +282,7 @@ module fetch
    // straddle/irq arms of the advance chain come first, so pred_v is naturally
    // ignored there (the straddle FSM owns its +4; the pseudo-op holds PC).
    wire [PCW-1:0] ft_npc   = ft_sel;                                            // += 2*consumed, by selection
-   wire [PCW-1:0] norm_npc = pred_v ? pq_tgt : ft_npc;
+   wire [PCW-1:0] norm_npc = pred_v ? tgt_l : ft_npc;
    // the presented bundle's chosen next PC (mispredict reference at execute)
    assign pred_npc = irq_go     ? ipc_q
                    : strad      ? pc_plus[1]           // ipc_q + 4: the straddler's length

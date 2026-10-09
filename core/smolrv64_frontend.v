@@ -114,11 +114,15 @@ module smolrv64_frontend
    wire [FW*32-1:0]   dq_inst;
    wire [FW*PCW-1:0]  dq_pc;
    wire [FW*SEQW-1:0] dq_seq;
-   wire [PCW-1:0]     bp_tgt;
+   wire [PCW-1:0]     bp_tgt;                  // the target of the prediction fetch takes
+   wire [FW-1:0]      bp_tk;                   // the first FW predictions: taken...
+   wire [FW*PCW-1:0]  bp_tgts;                 // ...to here
    wire [1:0]         dq_pk;
 
    // ------------------------------------------------------------- the fetch ring
-   wire                f_pop, f_drop, f_at_mk, f_rej, f_rej_np, bp_tk;
+   wire                f_drop, f_rej, f_rej_np, f_take;
+   wire [$clog2(FW+1)-1:0] f_pop;
+   wire [FW-1:0]       f_smk;
    // A rejected mark restarts the stream a cycle later, as a freeze of one cycle: the ring
    // withholds its window, empties and restarts at the PC, and the predictor goes back to the
    // aligner's state. It is rare, and registering it keeps the aligner out of the stream's next
@@ -149,7 +153,7 @@ module smolrv64_frontend
    wire [63:0]         st_rst_a = redirect ? redirect_pc : imem_addr;
    smolrv64_fring #(.HW(HW), .PQB(PQB)) u_ring
      (.clk(clk), .reset(reset), .freeze(imem_freeze | rej_q), .restart(reset | redirect),
-      .adv_hw(f_adv_hw), .pop(f_pop), .drop(f_drop), .pq_tk(bp_tk), .pq_tgt(bp_tgt),
+      .adv_hw(f_adv_hw), .take(f_take), .drop(f_drop), .take_tgt(bp_tgt),
       .pc_va(imem_addr), .rst_a(st_rst_a), .pc_pa(imem_pa), .pc_lvl(imem_xlvl), .xlate_ok(imem_xlate_ok),
       .win(imem_data), .mk(imem_mk), .avail(imem_avail), .ok(imem_ok), .lvl(imem_lvl),
       .sa(st_sa), .sk(st_sk), .p_cut(p_cut), .p_end(p_end), .pr_adv(pr_adv),
@@ -168,8 +172,9 @@ module smolrv64_frontend
       .redirect(redirect), .redirect_pc(redirect_pc), .redirect_seq(redirect_seq),
       .solo_all(1'b0),                 // the aligner already cuts bundles at CTIs and SYSTEM ops
       .irq_inject(irq_inject), .irq_pres(irq_pres),
-      .imem_mk(imem_mk), .pq_tk(bp_tk), .pq_tgt(bp_tgt),
-      .pop(f_pop), .drop(f_drop), .at_mark(f_at_mk), .reject(f_rej), .reject_np(f_rej_np),
+      .imem_mk(imem_mk), .pq_tk(bp_tk), .pq_tgt(bp_tgts),
+      .pop(f_pop), .drop(f_drop), .at_mark(), .take(f_take), .take_tgt(bp_tgt), .slot_mk(f_smk),
+      .reject(f_rej), .reject_np(f_rej_np),
       // `pred_npc` (the chosen next PC, with its adder) is left unconnected: the queue
       // stores the CHOICE (pnpc_kind) and the target, and decode rebuilds the value from
       // the length it decodes anyway. See the queue below.
@@ -210,13 +215,12 @@ module smolrv64_frontend
    assign fe_dq_valid = dq_valid;
 
    // ------------------------------------------------------- branch predictor
-   wire [PDW-1:0] pd_mk, pd_no;
-   wire [PDW-1:0] pd_fetch = f_at_mk ? pd_mk : pd_no;   // one bundle's details, all its slots
-   smolrv64_predictor #(.PCW(PCW), .PDW(PDW), .RASB(RASB), .GHL(GHL), .PQB(PQB)) u_bp
+   wire [FW*PDW-1:0] pd_mk, pd_no;
+   smolrv64_predictor #(.PCW(PCW), .PDW(PDW), .RASB(RASB), .GHL(GHL), .PQB(PQB), .IW(FW)) u_bp
      (.clk(clk), .reset(reset),
       .flush(st_flush), .rst_a(st_rst_a), .rst_np(rej_np_q & ~redirect), .adv(pr_adv),
       .sa(st_sa), .sk(st_sk), .p_cut(p_cut), .p_end(p_end), .pq_room(pq_room), .pq_cnt(pq_cnt),
-      .pq_tk(bp_tk), .pq_tgt(bp_tgt), .pd_mk(pd_mk), .pd_no(pd_no), .pop(f_pop),
+      .pq_tk(bp_tk), .pq_tgt(bp_tgts), .pd_mk(pd_mk), .pd_no(pd_no), .pop(f_pop),
       .rollback(redirect), .rb_rsp(redirect_rsp), .rb_ghr(redirect_ghr),
       .res_v(res_v), .res_cbr(res_cbr), .res_call(res_call), .res_ret(res_ret),
       .res_taken(res_taken), .res_pdet(res_pdet), .res_tgt(res_tgt), .res_pc(res_pc),
@@ -271,12 +275,22 @@ module smolrv64_frontend
    endfunction
    // Slot k's queue record: slot 0 is the fetch-fault pseudo-op when fetch has nothing; a slot
    // falls through when a later one follows, and the bundle's last valid slot carries its
-   // prediction (pnpc_kind, the target and the details belong to it).
+   // prediction (pnpc_kind and the target belong to it). Each slot's details are its own: m is
+   // the number of marks in the slots before it, so a slot ending at a mark has prediction m's,
+   // and any other the details of an unpredicted instruction with prediction m's pre-state (the
+   // state between mark m-1 and mark m).
    wire [QW-1:0]  q_in [0:FW-1];
    genvar gk;
    generate for (gk = 0; gk < FW; gk = gk + 1) begin: qi
       wire last = (gk == FW - 1) ? 1'b1 : ~dq_sv[(gk == FW - 1) ? gk : gk + 1];
-      assign q_in[gk] = {pd_fetch, ((gk == 0) & dq_fault) ? imem_ipc : dq_pc[gk*PCW +: PCW],
+      reg  [$clog2(FW+1)-1:0] m;
+      integer mi;
+      always @* begin
+         m = 0;
+         for (mi = 0; mi < gk; mi = mi + 1) m = m + {{($clog2(FW+1)-1){1'b0}}, f_smk[mi]};
+      end
+      wire [PDW-1:0] pd_slot = f_smk[gk] ? pd_mk[m*PDW +: PDW] : pd_no[m*PDW +: PDW];
+      assign q_in[gk] = {pd_slot, ((gk == 0) & dq_fault) ? imem_ipc : dq_pc[gk*PCW +: PCW],
                          dq_inst[gk*32 +: 32], dq_seq[gk*SEQW +: SEQW],
                          last ? dq_pk : 2'd0, bp_tgt, (gk == 0) & dq_fault, imem_cause, imem_addr};
    end endgenerate

@@ -32,10 +32,9 @@ module smolrv64_fring
     input  wire                    restart, // a redirect: empty and restart the stream at rst_a
     // what fetch consumed, and the prediction it took (for the head's VA)
     input  wire [$clog2(HW+2)-1:0] adv_hw,
-    input  wire                    pop,
+    input  wire                    take,       // fetch took a taken prediction...
     input  wire                    drop,    // clear the head's mark
-    input  wire                    pq_tk,
-    input  wire [63:0]             pq_tgt,
+    input  wire [63:0]             take_tgt,   // ...to here: the head's VA jumps to it
     // the PC and its translation (the iMMU)
     input  wire [63:0]             pc_va,
     input  wire [63:0]             rst_a,   // where a restarted stream begins: the redirect's target, else the PC
@@ -141,7 +140,7 @@ module smolrv64_fring
          rg_cnt  <= rg_cnt + {{(RSB-3){1'b0}}, rp_n} - adv_w;
          rg_resv <= rg_resv + (rq_acc ? {{(RSB-3){1'b0}}, rq_n} : {(RSB+1){1'b0}}) - adv_w;
          rg_mfl  <= rg_mfl + {{PQB{1'b0}}, rq_acc & p_cut} - {{PQB{1'b0}}, rp_ok & rp_mk};
-         rg_hva  <= (pop & pq_tk) ? pq_tgt : rg_hva + {{(63-AVW){1'b0}}, adv_hw, 1'b0};
+         rg_hva  <= take ? take_tgt : rg_hva + {{(63-AVW){1'b0}}, adv_hw, 1'b0};
          if (rq_acc) rg_lvl <= pc_lvl;
          if (drop) rmk[rg_head] <= 1'b0;
          for (j = 0; j < 8; j = j + 1)

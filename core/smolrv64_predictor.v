@@ -25,10 +25,12 @@
 //
 // THE QUEUE. One entry per marked halfword, in order: taken, the target, the corrector details
 // training needs, and the RAS pointer and history as they stand BEFORE the CTI. Between two marks
-// the stream's state does not change, so the queue head's pre-state is the state as of wherever
-// the aligner is (the stream's own registers when the queue is empty): it is every instruction's
-// snapshot -- what a redirect by that instruction restores -- and what a restart of the stream
-// (a rejected prediction, a freeze) goes back to.
+// the stream's state does not change, so an entry's pre-state is the state of every instruction
+// from the mark before it up to its own (the stream's own registers past the last entry): it is
+// such an instruction's snapshot -- what a redirect by it restores -- and the head's is what a
+// restart of the stream (a rejected prediction, a freeze) goes back to. The aligner reads the
+// first IW entries, so a bundle holding several marks gives each slot its own entry's details,
+// and pops as many as it consumed.
 //
 // THE HISTORY is the path of taken control transfers (smolrv64_phist.vh), in program order, as
 // predicted and then corrected: the stream steps it once per pair that ends at a predicted-taken
@@ -50,6 +52,7 @@ module smolrv64_predictor
     parameter YBITS = 11,            // log2 corrector entries, all banks
     parameter YTAGW = 8,
     parameter PQB   = 3,             // log2 prediction-queue entries
+    parameter IW    = 3,             // entries the aligner reads, and pops, per cycle
     // Carried predict details {rsp, ghr, yhit, yctr, yidx, hit, ctr}. An index or a PC-only tag
     // is recomputed at resolve from the CTI's PC and length; yidx rides because it folds the
     // predict-time history.
@@ -67,12 +70,12 @@ module smolrv64_predictor
     output wire [2:0]           p_end,      // ...at this halfword (7 when it does not)
     output wire                 pq_room,
     output wire [PQB:0]         pq_cnt,
-    // ---- the aligner ----
-    output wire                 pq_tk,      // the head: predicted taken...
-    output wire [PCW-1:0]       pq_tgt,     // ...to here
-    output wire [PDW-1:0]       pd_mk,      // details of an instruction ending at the head's mark
-    output wire [PDW-1:0]       pd_no,      // ...and of any other
-    input  wire                 pop,        // the aligner took the head's prediction, or dropped it
+    // ---- the aligner: the first IW entries, entry j at [j] ----
+    output wire [IW-1:0]        pq_tk,      // entry j: predicted taken...
+    output wire [IW*PCW-1:0]    pq_tgt,     // ...to here
+    output wire [IW*PDW-1:0]    pd_mk,      // details of an instruction ending at entry j's mark
+    output wire [IW*PDW-1:0]    pd_no,      // ...and of any other before it (after entry j-1's)
+    input  wire [$clog2(IW+1)-1:0] pop,     // entries the aligner consumed, or dropped
     // ---- redirect ----
     input  wire                 rollback,   // a redirect is entering the frontend this cycle
     input  wire [RASB-1:0]      rb_rsp,     // ...and the RAS pointer...
@@ -152,19 +155,26 @@ module smolrv64_predictor
    reg [PQB-1:0]  pq_rp, pq_wp;
    reg [PQB:0]    pq_n;
    initial begin pq_rp = 0; pq_wp = 0; pq_n = 0; end
-   wire [QEW-1:0]  hd     = pq[pq_rp];
-   wire [RASB-1:0] hd_rsp = hd[QEW-1-1-PCW -: RASB];
-   wire [GHL-1:0]  hd_ghr = hd[QEW-1-1-PCW-RASB -: GHL];
+   // entry j's pre-state, or the stream's past the last entry
+   wire [RASB-1:0] en_rsp [0:IW-1];
+   wire [GHL-1:0]  en_ghr [0:IW-1];
+   genvar gj;
+   generate for (gj = 0; gj < IW; gj = gj + 1) begin : ent
+      wire [QEW-1:0] q  = pq[pq_rp + gj[PQB-1:0]];
+      wire           in = pq_n > gj;
+      assign en_rsp[gj] = in ? q[QEW-1-1-PCW -: RASB] : ras_ptr;
+      assign en_ghr[gj] = in ? q[QEW-1-1-PCW-RASB -: GHL] : ghr;
+      assign pq_tk[gj]               = q[QEW-1];
+      assign pq_tgt[gj*PCW +: PCW]   = q[QEW-2 -: PCW];
+      assign pd_mk[gj*PDW +: PDW]    = {en_rsp[gj], en_ghr[gj], q[2+YBITS+2 -: 1+2+YBITS], 1'b1, q[1:0]};
+      assign pd_no[gj*PDW +: PDW]    = {en_rsp[gj], en_ghr[gj], 1'b0, 2'b01, {YBITS{1'b0}}, 1'b0, 2'b01};
+   end endgenerate
    // the state as of the aligner: the head's pre-state, or the stream's when nothing is queued
-   wire            pq_e    = (pq_n == {(PQB+1){1'b0}});
-   wire [RASB-1:0] sn_rsp  = pq_e ? ras_ptr : hd_rsp;
-   wire [GHL-1:0]  sn_ghr  = pq_e ? ghr     : hd_ghr;
-   assign pq_tk   = hd[QEW-1];
-   assign pq_tgt  = hd[QEW-2 -: PCW];
+   wire [RASB-1:0] sn_rsp  = en_rsp[0];
+   wire [GHL-1:0]  sn_ghr  = en_ghr[0];
    assign pq_cnt  = pq_n;
+   wire [PQB:0]    popw    = {{(PQB+1-$clog2(IW+1)){1'b0}}, pop};   // the pop count, at the queue's width
    assign pq_room = ~pq_n[PQB];
-   assign pd_mk   = {sn_rsp, sn_ghr, hd[2+YBITS+2 -: 1+2+YBITS], 1'b1, hd[1:0]};
-   assign pd_no   = {sn_rsp, sn_ghr, 1'b0, 2'b01, {YBITS{1'b0}}, 1'b0, 2'b01};
 
    // A restart puts the stream back to the aligner's state, or to the redirect's; every name here
    // is a register or the queue head, so nothing of the aligner reaches the tables' read address.
@@ -300,20 +310,20 @@ module smolrv64_predictor
             pq_rp <= 0;  pq_wp <= 0;  pq_n <= 0;
          end else begin
             if (push) begin pq[pq_wp] <= pq_in;  pq_wp <= pq_wp + 1'b1; end
-            if (pop)  pq_rp <= pq_rp + 1'b1;
-            pq_n <= pq_n + {{PQB{1'b0}}, push} - {{PQB{1'b0}}, pop};
+            pq_rp <= pq_rp + popw[PQB-1:0];
+            pq_n <= pq_n + {{PQB{1'b0}}, push} - popw;
          end
       end
    end
    wire e_full = ~reset & push & ~pq_room;
-   wire e_empt = ~reset & pop & pq_e & ~flush;
+   wire e_empt = ~reset & (popw > pq_n) & ~flush;
    wire e_end  = ~reset & p_cut & (hk < sk_q);
    reg  [2:0] err_q;
    always @(posedge clk) err_q <= reset ? 3'd0 : {e_end, e_empt, e_full};
    assign err = err_q;
    always @(posedge clk) begin
       if (e_full) $fatal(1, "smolrv64_predictor: a prediction pushed into a full queue");
-      if (e_empt) $fatal(1, "smolrv64_predictor: the aligner popped an empty prediction queue");
+      if (e_empt) $fatal(1, "smolrv64_predictor: the aligner popped %0d of %0d predictions", pop, pq_n);
       if (e_end)  $fatal(1, "smolrv64_predictor: a pair ends (%0d) before the stream's address (%0d)", hk, sk_q);
    end
 

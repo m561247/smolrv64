@@ -47,7 +47,9 @@ module aligner
     output wire [$clog2(HW+2)-1:0] consumed,
     output wire                    br_term,   // bundle ends on a genuine branch/jump (not a
                                               // window cut or a SYSTEM/AMO/FENCE terminator)
-    output wire                    mk_term);  // bundle ends on a marked halfword
+    output wire                    mk_term,   // bundle ends on a marked halfword
+    output wire [IW-1:0]           smk,       // per slot: it ends on a marked halfword
+    output wire [IW-1:0]           sbr);      // per slot: it is a genuine branch/jump
 
    localparam PBW = $clog2(HW+2);        // holds a position 0..HW (+1 for lookahead)
 
@@ -113,6 +115,7 @@ module aligner
    reg  [SEQW-1:0]  sqv  [0:IW-1];
    reg  [PBW-1:0]   cons;
    reg              bt, mt;
+   reg  [IW-1:0]    smv, sbv;
 
    integer k;
    reg [PBW-1:0] pos;
@@ -140,6 +143,8 @@ module aligner
       bt  = 1'b0;
       mt  = 1'b0;
       wt  = 1'b0;
+      smv = {IW{1'b0}};
+      sbv = {IW{1'b0}};
       for (k = 0; k < IW; k = k + 1) begin
          h0   = hwr(pos);
          is32 = (h0[1:0] == 2'b11);
@@ -174,15 +179,15 @@ module aligner
             if (v[k]) begin
                pos = pos + (is32 ? 2'd2 : 2'd1);
                if (is_cti(h0)) run = 1'b0;  // CTI / SYSTEM / FENCE ends the bundle (youngest)
-               if (is_br(h0))  bt  = 1'b1;  // ... and it is a real branch/jump (is_br implies is_cti)
-               if (mkr(pos - 1'b1)) begin run = 1'b0; mt = 1'b1; end   // it ends on a mark
+               if (is_br(h0))  begin bt = 1'b1; sbv[k] = 1'b1; end   // ... a real branch/jump (is_br implies is_cti)
+               if (mkr(pos - 1'b1)) begin run = 1'b0; mt = 1'b1; smv[k] = 1'b1; end   // it ends on a mark
             end else begin                     // prefix: stop at the first that doesn't fit...
                if ((k != 0) && run && bytes_late) wt = 1'b1;   // ...or wait, when it is coming
                run = 1'b0;
             end
          end
       end
-      if (wt) begin v = {IW{1'b0}}; bt = 1'b0; mt = 1'b0; end
+      if (wt) begin v = {IW{1'b0}}; bt = 1'b0; mt = 1'b0; smv = {IW{1'b0}}; sbv = {IW{1'b0}}; end
       cons = wt ? {PBW{1'b0}} : pos;          // halfwords consumed (straddler excluded)
    end
 
@@ -199,6 +204,8 @@ module aligner
    assign consumed = cons;
    assign br_term  = bt;
    assign mk_term  = mt;
+   assign smk      = smv;
+   assign sbr      = sbv;
 endmodule
 
 `default_nettype wire
