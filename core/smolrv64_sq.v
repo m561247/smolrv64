@@ -61,6 +61,8 @@ module smolrv64_sq
     output wire                  uf_any,      // an entry whose address has not arrived
     output wire [IDXB-1:0]       uf_idx,      // ...the oldest such, and its sequence number
     output wire [SEQW-1:0]       uf_seq,
+    input  wire                  mf_v,        // M holds this entry's op: its fill is M's, so the next
+    input  wire [IDXB-1:0]       mf_idx,      // ...unfilled entry is the one after it
     output wire [IDXB:0]         d_tag,       // the STORE-SEQNO a load captures at dispatch: the
                                               // tail COUNTER, one bit wider than the index (below)
 
@@ -238,7 +240,8 @@ module smolrv64_sq
    assign d_idx     = tail;
    assign d_tag     = tailc;
    assign av_any    = |(v & av);
-   assign uf_any    = |(v & ~av);
+   wire [NENT-1:0] ufv = v & ~av & ~({{(NENT-1){1'b0}}, mf_v} << mf_idx);   // unfilled, and not M's
+   assign uf_any    = |ufv;
    // the data read's pick, from flops: the oldest entry with its address whose value is in a
    // register file and not yet read (every committed entry has its data, so it is at or after
    // the first uncommitted; the data is needed only to commit, which the address precedes)
@@ -260,7 +263,7 @@ module smolrv64_sq
    always @* begin
       uf_i = kc;
       for (ui = NENT - 1; ui >= 0; ui = ui - 1)
-         if (v[kc + ui[IDXB-1:0]] & ~av[kc + ui[IDXB-1:0]]) uf_i = kc + ui[IDXB-1:0];
+         if (ufv[kc + ui[IDXB-1:0]]) uf_i = kc + ui[IDXB-1:0];
    end
    assign uf_idx    = uf_i;
    assign uf_seq    = sqn[uf_i];

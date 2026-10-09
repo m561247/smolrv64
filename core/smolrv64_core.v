@@ -1490,7 +1490,7 @@ module smolrv64_core
       .d_alloc(d_st_alloc), .d_rob(gst_rob), .d_dpreg(gst_dpreg), .d_rdy(rdy_st),
       .d_pc(gst_pc), .d_seq(gst_seq),
       .d_ready(sq_d_ready), .d_ready2(sq_d_ready2), .d_idx(sq_d_idx), .d_tag(sq_d_tag), .av_any(sq_av_any),
-      .uf_any(sq_uf_any), .uf_idx(sq_uf_idx), .uf_seq(sq_uf_seq),
+      .uf_any(sq_uf_any), .uf_idx(sq_uf_idx), .uf_seq(sq_uf_seq), .mf_v(m_valid & m_st_nb), .mf_idx(m_sq_tag),
       .a_v(m_sq_fill), .a_idx(m_sq_tag), .a_addr(lsu_xo_pa), .a_va(m_addr[38:0]), .a_tv(lsu_xo_tv | lsu_xo_flt),
       .a_flt(lsu_xo_flt), .a_fc(lsu_xo_fc), .a_size(m_mem_size),
       .a_unc(lsu_xo_unc), .r_v(sq_r_v), .r_preg(sq_r_preg), .r_data(prf_sq),
@@ -1561,7 +1561,7 @@ module smolrv64_core
       .w_v(lsu_wk_done & ~wk_st), .w_idx(lq_k_idx), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
       .f_v(lq_f_v), .f_rob(lq_f_rob), .f_fc(lq_f_fc), .f_pc(lq_f_pc), .f_seq(lq_f_seq),
-      .x_devwait(lq_x_devwait), .occupancy(lq_occ), .av_any(lq_av_any), .e_dprd(lq_e_dprd), .uf_any(lq_uf_any), .uf_idx(lq_uf_idx), .uf_seq(lq_uf_seq), .rob_head(rob_head_idx), .flush(redirect),
+      .x_devwait(lq_x_devwait), .occupancy(lq_occ), .av_any(lq_av_any), .e_dprd(lq_e_dprd), .uf_any(lq_uf_any), .uf_idx(lq_uf_idx), .uf_seq(lq_uf_seq), .mf_v(m_valid & m_ld_nb), .mf_idx(m_lq_idx), .rob_head(rob_head_idx), .flush(redirect),
       .kd_v(rob_kd_v), .kd(rob_kd), .kmask(lq_kmask));
 
    // ------------------------------------------------- COLLAPSING FILL AND ACCESS
@@ -1792,7 +1792,8 @@ module smolrv64_core
    // the LQ/SQ fill, a load's early start and the address-only faults are M's, unchanged. M fills
    // in program order: it takes the oldest load or store whose address has not arrived, once it
    // has, so an op M holds (a fault waits for the ROB head) never has an older one behind it. The
-   // rest of the op rides in a record written at dispatch.
+   // op M holds is not a candidate (the queues' mf_*), so M takes the next one in the cycle it
+   // fills the last. The rest of the op rides in a record written at dispatch.
    localparam integer SPW = ROB_IDXB + PLW;        // {ROB slot, payload}
    reg  [SPW-1:0] spl_ld [0:LQ_N-1];
    reg  [SPW-1:0] spl_st [0:SQ_N-1];
@@ -2777,6 +2778,7 @@ module smolrv64_core
    // in a cycle have nowhere to go. Multiple outstanding loads is the step that has to solve
    // that, together with a load queue and D$ MSHRs.
    wire m_ld_nb  = m_mem_op & ~m_is_store & ~m_is_amo & ~m_is_cbo;  // plain load, rule C1
+   wire m_nb     = m_ld_nb | m_st_nb;   // a plain load or store: M fills its entry and writes no shared port
    // The 1-deep load scoreboard that stood here is GONE, replaced by smolrv64_lq. It tracked a
    // load from the cycle its ACCESS STARTED, which is why the ordering test had nowhere to
    // live but smolrv64_lsu's start gate, on the end of the translate path. The queue tracks it
@@ -2896,9 +2898,9 @@ module smolrv64_core
    always @(posedge clk) m_head_q <= ~reset & m_valid & m_at_head & ~m_done;
    wire head_block   = m_valid & m_needs_head & ~m_at_head;   // the instret second cycle is the SYSQ's now
 
-   // One write port, one ROB completion port: when a load lands, M yields the cycle. Costs
-   // ~0.3 cycles per load against the ~2.3 the early release saves.
-   assign m_done = m_done_raw & ~head_block & ~port_yield & ~sy_at_head & ~m_flt_pulse;
+   // One write port, one ROB completion port: when a load lands, M yields the cycle -- unless M
+   // holds a plain load or store, which only fills its queue entry and completes on neither.
+   assign m_done = m_done_raw & ~head_block & ~(port_yield & ~m_nb) & ~sy_at_head & ~m_flt_pulse;
    assign m_advance = ~m_valid | m_done;
 
 
@@ -3258,7 +3260,7 @@ module smolrv64_core
    assign wb_fe = fp_wb         ? fp_wval
                 :                 md_res_q;       // a divide's result
    // The LD stream has two writers, M's own completion and a load landing after M has moved
-   // on; they never coincide (m_done is forced low on ld_land).
+   // on; they never coincide (m_done is forced low on ld_land for any op M completes on it).
    //
    // THE WRITEBACK VALID IS BUILT FROM THE TERMS THAT CAN ACTUALLY WRITE, not from m_done.
    // we_ld/we_fe are the wakeup broadcast: every scheduler entry compares against them, the

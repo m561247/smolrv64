@@ -168,6 +168,8 @@ module smolrv64_lq
     output wire                  uf_any,      // an entry whose address has not arrived
     output wire [IDXB-1:0]       uf_idx,      // ...the oldest such, and its sequence number
     output wire [SEQW-1:0]       uf_seq,
+    input  wire                  mf_v,        // M holds this entry's op: its fill is M's, so the next
+    input  wire [IDXB-1:0]       mf_idx,      // ...unfilled entry is the one after it
     input  wire [ROBB-1:0]       rob_head,    // head-gate an uncached (device) load's access (non-speculative)
     input  wire                  flush,
     // the kill (smolrv64_rob kd): the entries of ops younger than a mispredicted branch die.
@@ -232,14 +234,15 @@ module smolrv64_lq
          assign e_dprd[gd*PBITS +: PBITS] = v[gd] ? prd[gd] : {PBITS{1'b0}};
       end
    endgenerate
-   assign uf_any    = |(v & ~av);
+   wire [NENT-1:0] ufv = v & ~av & ~({{(NENT-1){1'b0}}, mf_v} << mf_idx);   // unfilled, and not M's
+   assign uf_any    = |ufv;
    // every entry before the access candidate has its address, so the oldest unfilled entry is
    // the first one at or after it
    reg [IDXB-1:0] uf_i;  integer ui;
    always @* begin
       uf_i = acc;
       for (ui = NENT - 1; ui >= 0; ui = ui - 1)
-         if (v[acc + ui[IDXB-1:0]] & ~av[acc + ui[IDXB-1:0]]) uf_i = acc + ui[IDXB-1:0];
+         if (ufv[acc + ui[IDXB-1:0]]) uf_i = acc + ui[IDXB-1:0];
    end
    assign uf_idx    = uf_i;
    assign uf_seq    = sqn[uf_i];
