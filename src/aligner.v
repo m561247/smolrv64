@@ -6,10 +6,9 @@
 // ({inst[31:0], in_valid, seq} per slot) plus per-slot PC and a `consumed`
 // halfword count so fetch can advance.
 //
-// Length scan: instruction k begins at halfword position p[k]; it is 32-bit iff
-// hw[p[k]][1:0]==11 (consumes 2 halfwords) else 16-bit (1). p[0]=0,
-// p[k+1]=p[k]+len[k]. This is the classic O(W) dependent prefix scan -- short
-// (4 deep) and made of +1/+2 adders on a <=4-bit position.
+// Positions: instruction k begins at the window's k-th START halfword (`st`, which the fetch ring
+// writes as the bytes arrive), so every slot's position is known at once and no slot waits for the
+// lengths before it. A 32-bit op (hw[p][1:0]==11) takes two halfwords, an RVC one.
 //
 // The data path is uniform: inst[k] is always the 32-bit window {hw[p+1],hw[p]};
 // for an RVC the upper half is the next instruction's first halfword, which
@@ -34,6 +33,8 @@ module aligner
     input  wire [SEQW-1:0]         base_seq, // seq of slot 0
     input  wire                    solo_all, // force one instruction per bundle (fault replay)
     input  wire                    bytes_late, // the window is short of the page end: more is coming
+    input  wire [HW-1:0]           st,       // halfwords that begin an instruction (smolrv64_fring; st[0] is
+                                             // the PC, so set whenever a byte is held)
     input  wire [HW-1:0]           mk,       // halfwords that end a CTI the predictor knows (smolrv64_fring):
                                              // an instruction ending on one predicted taken ends the
                                              // bundle, and one whose FIRST halfword is marked does not fit
@@ -114,93 +115,87 @@ module aligner
       endcase
    endfunction
 
-   reg  [IW-1:0]    v;
+   // EVERY HALFWORD DECODED AT ONCE, EVERY SLOT A SELECT. `st` says which halfwords begin an
+   // instruction (the fetch ring writes it as the bytes arrive: a halfword begins one unless the
+   // one before began a 32-bit op), so slot k is the k-th start in the window and no slot's
+   // position waits for the lengths before it. The per-halfword facts are decoded for all HW
+   // positions in parallel; a slot reads its position's by a one-hot select; and the only chain
+   // across slots is the bundle's run, a gate or two per slot.
+   localparam CW = $clog2(HW + 1);
+   reg  [15:0]   h0;
+   reg  [HW-1:0] p32, phave, pmkin, psys, pend, pbr, pemk;   // per halfword, as a start
+   reg  [CW-1:0] cs [0:HW];                                  // starts before halfword i
+   reg  [CW-1:0] cm [0:HW];                                  // marks before halfword i
+   integer i;
+   always @* begin
+      cs[0] = {CW{1'b0}};  cm[0] = {CW{1'b0}};
+      for (i = 0; i < HW; i = i + 1) begin
+         h0       = hwin[i*16 +: 16];
+         p32[i]   = (h0[1:0] == 2'b11);
+         phave[i] = (i < avail) && (!p32[i] || ((i + 1) < avail));
+         pmkin[i] = p32[i] & mk[i];                          // a mark inside it: what follows is another path's
+         psys[i]  = p32[i] && ((h0[6:0] == 7'b1110011) || (h0[6:0] == 7'b0101111)
+                               || ((h0[6:0] == 7'b0001111) && (h0[14:13] == 2'b00)));
+         pend[i]  = is_cti(h0) & ~is_cond(h0);               // a jump, SYSTEM, AMO or FENCE ends the bundle
+         pbr[i]   = is_br(h0);
+         pemk[i]  = p32[i] ? mkr(i[PBW-1:0] + 1'b1) : mk[i];             // it ends on a marked halfword
+         cs[i+1]  = cs[i] + {{(CW-1){1'b0}}, st[i]};
+         cm[i+1]  = cm[i] + {{(CW-1){1'b0}}, mk[i]};
+      end
+   end
+
+   // slot k: its start (one-hot over the window; none when the k-th start is past it) and what
+   // that halfword says
+   reg  [HW-1:0]    ps   [0:IW-1];
+   reg  [IW-1:0]    s_in, s_have, s_mkin, s_sys, s_end, s_br, s_emk, s_tk;
+   reg  [PBW-1:0]   s_pos[0:IW-1], s_nxt[0:IW-1];
    reg  [31:0]      ir   [0:IW-1];
    reg  [PCW-1:0]   pcv  [0:IW-1];
-   reg  [PBW-1:0]   ofv  [0:IW-1];
    reg  [SEQW-1:0]  sqv  [0:IW-1];
+   reg  [IW-1:0]    v, smv, sbv;
    reg  [PBW-1:0]   cons;
-   reg              bt, mt;
-   reg  [IW-1:0]    smv, sbv;
-   reg  [$clog2(IW+1)-1:0] mi;            // the marks read so far: the next one's prediction is mk_tk[mi]
-
-   integer k;
-   reg [PBW-1:0] pos;
-   reg           run;
-   reg [15:0]    h0;
-   reg           is32, have, is_sys, mkin;
-   // Explicit sensitivity: hwin is read via the hwr() function, which iverilog's
-   // @* does not pull into the list -- name it so the block re-evaluates on it.
-   // A BUNDLE WAITS FOR ITS BYTES RATHER THAN CUTTING AT THEM (item 10e, 2026-09-05). The
-   // two-wide fetch's first cut ended a bundle at the 16-byte chunk boundary after slot 0:
-   // the chunk beyond may or may not have arrived, so a bundle allowed to span it has a
-   // shape that depends on timing, and the predictor, keyed by the bundle's base PC, then
-   // meets the same branch under different bases from one iteration to the next (every
-   // sha256 loop branch mispredicted, 0.003 -> 1.36 redirects per thousand). The cut made
-   // a bundle's shape a function of the code alone -- and 338 of that kernel's 934 bundles
-   // singles. The OTHER choice has the same property: when a later slot needs halfwords the
-   // window does not have yet but WILL (`bytes_late`: the shortfall is the buffer's, not
-   // the page's), the whole bundle waits, and its shape is still the code's. The buffer
-   // runs two chunks ahead now (rv_soc_top), so the wait is rare; at the page end the
-   // window is cut as before, deterministic because the page boundary is the code's too.
-   reg wt;
-   always @(hwin or avail or base_pc or base_seq or solo_all or bytes_late or mk or mk_tk) begin
-      pos = 0;
-      run = 1'b1;
-      bt  = 1'b0;
-      mt  = 1'b0;
-      wt  = 1'b0;
-      smv = {IW{1'b0}};
-      sbv = {IW{1'b0}};
-      mi  = 0;
+   reg              bt, mt, wt, run;
+   reg  [CW-1:0]    mi;
+   integer k, q;
+   always @* begin
       for (k = 0; k < IW; k = k + 1) begin
-         h0   = hwr(pos);
-         is32 = (h0[1:0] == 2'b11);
-         // all needed halfwords present?  first always, second only if 32-bit
-         have = (pos < avail) && (!is32 || ((pos + 1'b1) < avail));
-         mkin = is32 & mkr(pos);              // a mark inside it: what follows is another path's
-         // A SYSTEM op (ecall/ebreak/csr/xret), an AMO, or a FENCE is SOLO in its bundle:
-         // terminate the bundle BEFORE it (if not slot 0) as well as after (via is_cti). Solo
-         // SYSTEM lets a trap roll back TO that checkpoint and precisely annul the faulting op's
-         // rd (e.g. a priv-violating csrr). Solo AMO/FENCE means that when it issues (gated to
-         // oldest) every older store has drained, so an AMO's direct-memory RMW is coherent and a
-         // FENCE is a true ordering point (older writes precede any younger store, incl. a DMA notify).
-         is_sys = is32 && ((h0[6:0] == 7'b1110011) || (h0[6:0] == 7'b0101111)
-                           || ((h0[6:0] == 7'b0001111) && (h0[14:13] == 2'b00))); // FENCE / FENCE.I solo
-         ir[k]  = {hwr(pos + 1'b1), h0};      // uniform 32-bit window
-         pcv[k] = base_pc + (pos << 1);
-         ofv[k] = pos;
-         sqv[k] = base_seq + k[SEQW-1:0];
-         // A solo op begins a fresh bundle only if its halfwords are PRESENT. Testing `is_sys`
-         // on a slot beyond the window read the pair register's STALE bytes -- after a restart
-         // into a chunk whose successor had not landed, a csrr further down the loop sat at
-         // slot 1's position and ended the bundle after slot 0 without the wait below, so the
-         // bundle's shape depended on what the buffer used to hold: the predictor, keyed by
-         // the bundle base, then met the loop's back edge under a third base and lost its
-         // prediction (workloads/brbench near: 15 of 300 iterations, BP_TRACE, 2026-09-10).
-         if ((k != 0) && (solo_all || (have && is_sys))) begin
-            v[k] = 1'b0; run = 1'b0;           // SYSTEM (or fault replay) begins a fresh (solo) bundle
-         end else if (mkin) begin
-            v[k] = 1'b0; run = 1'b0;           // it does not fit, and no more of it is coming
-         end else begin
-            v[k] = run & have;
+         s_in[k] = 1'b0;  s_have[k] = 1'b0;  s_mkin[k] = 1'b0;  s_sys[k] = 1'b0;
+         s_end[k] = 1'b0;  s_br[k] = 1'b0;  s_emk[k] = 1'b0;  mi = {CW{1'b0}};
+         s_pos[k] = {PBW{1'b0}};  s_nxt[k] = {PBW{1'b0}};  ir[k] = 32'd0;
+         for (q = 0; q < HW; q = q + 1) begin
+            ps[k][q] = st[q] & (cs[q] == k[CW-1:0]);
+            if (ps[k][q]) begin
+               s_in[k] = 1'b1;  s_have[k] = phave[q];  s_mkin[k] = pmkin[q];  s_sys[k] = psys[q];
+               s_end[k] = pend[q];  s_br[k] = pbr[q];  s_emk[k] = pemk[q];  mi = cm[q];
+               s_pos[k] = q[PBW-1:0];  s_nxt[k] = q[PBW-1:0] + (p32[q] ? 2'd2 : 2'd1);
+               ir[k] = {hwr(q[PBW-1:0] + 1'b1), hwin[q*16 +: 16]};
+            end
+         end
+         s_tk[k] = mk_tk[mi[$clog2(IW)-1:0]];               // this slot's mark is the mi-th
+         pcv[k]  = base_pc + (s_pos[k] << 1);
+         sqv[k]  = base_seq + k[SEQW-1:0];
+      end
+      // the bundle: slots while each fits and the one before did not end it. A SYSTEM op (or a
+      // fault replay) goes alone, so it begins a fresh bundle; a later slot whose bytes are coming
+      // makes the whole bundle wait (bytes_late) so its shape is the code's, not the timing's.
+      run = 1'b1;  bt = 1'b0;  mt = 1'b0;  wt = 1'b0;  v = {IW{1'b0}};  smv = {IW{1'b0}};  sbv = {IW{1'b0}};
+      cons = {PBW{1'b0}};
+      for (k = 0; k < IW; k = k + 1) begin
+         if (((k != 0) && (solo_all || (s_have[k] && s_sys[k]))) || s_mkin[k]) run = 1'b0;
+         else begin
+            v[k] = run & s_in[k] & s_have[k];
             if (v[k]) begin
-               pos = pos + (is32 ? 2'd2 : 2'd1);
-               if (is_cti(h0) & ~is_cond(h0)) run = 1'b0;   // a jump, SYSTEM, AMO or FENCE ends the bundle
-               if (is_br(h0))  begin bt = 1'b1; sbv[k] = 1'b1; end   // ... a real branch/jump (is_br implies is_cti)
-               if (mkr(pos - 1'b1)) begin                  // it ends on a mark: the mi-th
-                  smv[k] = 1'b1;
-                  if (mk_tk[mi[$clog2(IW)-1:0]]) begin run = 1'b0; mt = 1'b1; end   // ...predicted taken: the bundle ends
-                  mi = mi + 1'b1;
-               end
-            end else begin                     // prefix: stop at the first that doesn't fit...
-               if ((k != 0) && run && bytes_late) wt = 1'b1;   // ...or wait, when it is coming
+               cons = s_nxt[k];
+               sbv[k] = s_br[k];  bt = bt | s_br[k];  smv[k] = s_emk[k];
+               if (s_end[k]) run = 1'b0;
+               if (s_emk[k] & s_tk[k]) begin run = 1'b0;  mt = 1'b1; end
+            end else begin
+               if ((k != 0) && run && bytes_late) wt = 1'b1;
                run = 1'b0;
             end
          end
       end
-      if (wt) begin v = {IW{1'b0}}; bt = 1'b0; mt = 1'b0; smv = {IW{1'b0}}; sbv = {IW{1'b0}}; end
-      cons = wt ? {PBW{1'b0}} : pos;          // halfwords consumed (straddler excluded)
+      if (wt) begin v = {IW{1'b0}}; bt = 1'b0; mt = 1'b0; smv = {IW{1'b0}}; sbv = {IW{1'b0}}; cons = {PBW{1'b0}}; end
    end
 
    genvar g;
@@ -208,7 +203,7 @@ module aligner
       for (g = 0; g < IW; g = g + 1) begin : pk
          assign inst[g*32  +: 32]   = ir[g];
          assign pc  [g*PCW +: PCW]  = pcv[g];
-         assign offs[g*PBW +: PBW]  = ofv[g];
+         assign offs[g*PBW +: PBW]  = s_pos[g];
          assign seq [g*SEQW +: SEQW] = sqv[g];
       end
    endgenerate

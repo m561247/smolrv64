@@ -48,11 +48,18 @@ module tb;
    wire [AW-1:0]     ptw_addr; wire ptw_read;
    reg  [63:0]       ptw_rdata; reg ptw_rvalid;
 
+   // the window begins at the PC, so its start bits follow from the lengths (the ring predecodes them)
+   reg  [HW-1:0] imem_st;
+   always @* begin : sts
+      integer j;
+      imem_st[0] = 1'b1;
+      for (j = 1; j < HW; j = j + 1) imem_st[j] = ~(imem_st[j-1] & (imem_data[(j-1)*16 +: 2] == 2'b11));
+   end
    fetch #(.IW(IW), .HW(HW), .PCW(PCW), .SEQW(SEQW)) u_fetch
      (.clk(clk), .reset(reset),
       .redirect(redirect), .redirect_pc(redirect_pc), .redirect_seq(redirect_seq),
       .solo_all(1'b0), .irq_inject(1'b0), .irq_pres(),
-      .imem_mk({HW{1'b0}}), .pq_tk('0), .pq_tgt('0),
+      .imem_mk({HW{1'b0}}), .imem_st(imem_st), .pq_tk('0), .pq_tgt('0),
       .pop(), .drop(), .at_mark(), .take(), .take_tgt(), .slot_mk(), .reject(), .reject_np(),
       .imem_addr(f_imem_va), .imem_ipc(f_imem_ipc),
       .imem_data(imem_data), .imem_avail(imem_avail_g), .imem_lvl(2'd0), .imem_ok(1'b1),

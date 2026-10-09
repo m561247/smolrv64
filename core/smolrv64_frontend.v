@@ -135,7 +135,7 @@ module smolrv64_frontend
    end
    wire [$clog2(HW+2)-1:0] f_adv_hw, imem_avail;
    wire [HW*16-1:0]    imem_data;
-   wire [HW-1:0]       imem_mk;
+   wire [HW-1:0]       imem_mk, imem_st;
    wire [1:0]          imem_lvl;
    wire                imem_ok;
    wire [5:0]          ring_err;
@@ -156,7 +156,7 @@ module smolrv64_frontend
      (.clk(clk), .reset(reset), .freeze(imem_freeze | rej_q), .restart(reset | redirect),
       .adv_hw(f_adv_hw), .take(f_take), .drop(f_drop), .take_tgt(bp_tgt),
       .pc_va(imem_addr), .rst_a(st_rst_a), .pc_pa(imem_pa), .pc_lvl(imem_xlvl), .xlate_ok(imem_xlate_ok),
-      .win(imem_data), .mk(imem_mk), .avail(imem_avail), .ok(imem_ok), .lvl(imem_lvl),
+      .win(imem_data), .mk(imem_mk), .st(imem_st), .avail(imem_avail), .ok(imem_ok), .lvl(imem_lvl),
       .sa(st_sa), .sk(st_sk), .p_mk(p_mk), .p_end(p_end), .pr_adv(pr_adv),
       .pq_room(pq_room), .pq_cnt(pq_cnt),
       .ic_req(ic_req), .ic_va(ic_va), .ic_pa(ic_pa), .ic_tag(ic_tag),
@@ -173,7 +173,7 @@ module smolrv64_frontend
       .redirect(redirect), .redirect_pc(redirect_pc), .redirect_seq(redirect_seq),
       .solo_all(1'b0),                 // the aligner already cuts bundles at CTIs and SYSTEM ops
       .irq_inject(irq_inject), .irq_pres(irq_pres),
-      .imem_mk(imem_mk), .pq_tk(bp_tk), .pq_tgt(bp_tgts),
+      .imem_mk(imem_mk), .imem_st(imem_st), .pq_tk(bp_tk), .pq_tgt(bp_tgts),
       .pop(f_pop), .drop(f_drop), .at_mark(), .take(f_take), .take_tgt(bp_tgt), .slot_mk(f_smk),
       .reject(f_rej), .reject_np(f_rej_np),
       // `pred_npc` (the chosen next PC, with its adder) is left unconnected: the queue

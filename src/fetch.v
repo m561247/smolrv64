@@ -77,6 +77,7 @@ module fetch
     // the PRESENTED bundle; it rides to dispatch and is the exec-side mispredict reference
     // (branch_unit redirects iff actual_npc != pred_npc).
     input  wire [HW-1:0]           imem_mk,     // the window's marks
+    input  wire [HW-1:0]           imem_st,     // ...and which of its halfwords begin an instruction
     input  wire [IW-1:0]           pq_tk,       // the window's marks' predictions in order, j at [j]: taken...
     input  wire [IW*PCW-1:0]       pq_tgt,      // ...to here
     output wire [$clog2(IW+1)-1:0] pop,         // the marks fetch consumed, or the one it dropped
@@ -183,7 +184,7 @@ module fetch
    wire [IW-1:0] al_smk, al_sbr;
    aligner #(.IW(IW), .HW(HW), .PCW(PCW), .SEQW(SEQW)) u_al
      (.hwin(imem_data), .avail(eff_avail), .base_pc(pc_q), .base_seq(seq_q),
-      .solo_all(solo_all), .bytes_late(bytes_late), .mk(imem_mk), .mk_tk(pq_tk),
+      .solo_all(solo_all), .bytes_late(bytes_late), .st(imem_st), .mk(imem_mk), .mk_tk(pq_tk),
       .valid(al_valid), .inst(al_inst), .pc(al_pc), .offs(al_offs), .seq(al_seq), .consumed(al_consumed),
       .br_term(al_br_term), .mk_term(al_mk_term), .smk(al_smk), .sbr(al_sbr));
    // THE FALL-THROUGH AND THE SLOT PCs ARE MUXES, NOT ADDERS (2026-09-05). Gate U, the first
@@ -328,6 +329,10 @@ module fetch
    // A pending interrupt never sees a straddle (irq_go), so no arm above reads irq_inject
    // while strad is high.
    wire e_pc = ~reset & (pc_q != (strad ? ipc_q + 64'd2 : ipc_q));
+   // the window's first halfword is the PC, which begins an instruction (outside a straddle)
+   always @(posedge clk)
+     if (~reset & ~redirect & ~strad & imem_ok & ~imem_st[0])
+        $fatal(1, "fetch: the PC %h is not marked as an instruction's start", pc_q);
    reg  [1:0] err_q;
    always @(posedge clk) err_q <= reset ? 2'd0 : {e_pc, e_cap};
    assign err = err_q;

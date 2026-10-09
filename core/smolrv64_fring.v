@@ -45,6 +45,7 @@ module smolrv64_fring
     // the window: HW halfwords from the head, and their marks
     output wire [HW*16-1:0]        win,
     output wire [HW-1:0]           mk,
+    output wire [HW-1:0]           st,      // ...and which halfwords begin an instruction
     output wire [$clog2(HW+2)-1:0] avail,
     output wire                    ok,
     output wire [1:0]              lvl,     // page size of the bytes held
@@ -73,6 +74,8 @@ module smolrv64_fring
    localparam integer AVW = $clog2(HW+2);
    reg  [15:0]     ring [0:RS-1];
    reg  [RS-1:0]   rmk;                                    // the slot ends a pair at a known CTI
+   reg  [RS-1:0]   rst;                                    // the slot begins an instruction
+   reg             rg_cy;                                  // the last halfword appended began a 32-bit op
    reg  [RSB-1:0]  rg_head;
    reg  [RSB:0]    rg_cnt, rg_resv;                        // halfwords held; held + in flight
    reg  [GW-1:0]   rg_gen;
@@ -81,7 +84,7 @@ module smolrv64_fring
    reg  [2:0]      rg_infl, rg_drop;                       // requests in flight; of them, stale
    reg  [PQB:0]    rg_mfl;                                 // marks in flight (checked)
    initial begin rg_head = 0; rg_cnt = 0; rg_resv = 0; rg_gen = 0;
-                 rg_lvl = 2'd0; rg_infl = 0; rg_drop = 0; rg_mfl = 0; rmk = 0; end
+                 rg_lvl = 2'd0; rg_infl = 0; rg_drop = 0; rg_mfl = 0; rmk = 0; rst = 0; rg_cy = 1'b0; end
    wire            flush  = restart | freeze;
 
    // the request: the stream's pair, inside the PC's enclosing page (a pair never crosses 4 KiB,
@@ -126,11 +129,26 @@ module smolrv64_fring
       wire [RSB-1:0] ix = rg_head + gw[RSB-1:0];
       assign win[gw*16 +: 16] = ring[ix];
       assign mk[gw]           = rmk[ix] & (rg_cnt > gw);
+      assign st[gw]           = rst[ix];
    end endgenerate
    assign avail = (rg_cnt >= HW[RSB:0]) ? HW[AVW-1:0] : rg_cnt[AVW-1:0];
    assign ok    = ~freeze & (rg_cnt != {(RSB+1){1'b0}});
    assign lvl   = rg_lvl;
 
+   // THE START BITS, PREDECODED AS THE BYTES ARRIVE: a halfword begins an instruction unless the one
+   // before it began a 32-bit op. The stream is the instruction stream in order (a predicted-taken
+   // pair ends at its CTI's last halfword), so the chain runs on from the last halfword appended
+   // (rg_cy) and a restart begins it afresh at the PC. The aligner then needs no length scan.
+   reg [7:0] rp_st;
+   reg       rp_cy;
+   integer   sj;
+   always @* begin
+      rp_cy = rg_cy;
+      for (sj = 0; sj < 8; sj = sj + 1) begin
+         rp_st[sj] = ~rp_cy;
+         if ((sj >= rp_skip) && (sj <= rp_end)) rp_cy = rp_st[sj] & (ic_data[sj*16 +: 2] == 2'b11);
+      end
+   end
    integer j;
    always @(posedge clk) begin
       // requests in flight, and how many of them a flush made stale (answers come in order)
@@ -139,7 +157,7 @@ module smolrv64_fring
                : flush ? rg_infl + {2'd0, rq_acc} - {2'd0, ic_valid}
                : rg_drop - {2'd0, ic_valid & (rg_drop != 3'd0)};
       if (reset | flush) begin
-         rg_cnt <= 0;  rg_resv <= 0;  rg_head <= 0;  rg_mfl <= 0;
+         rg_cnt <= 0;  rg_resv <= 0;  rg_head <= 0;  rg_mfl <= 0;  rg_cy <= 1'b0;
          rg_hva <= rst_a;
          if (flush) rg_gen <= rg_gen + 1'b1;
       end else begin
@@ -151,10 +169,12 @@ module smolrv64_fring
          rg_hva  <= take ? take_tgt : rg_hva + {{(63-AVW){1'b0}}, adv_hw, 1'b0};
          if (rq_acc) rg_lvl <= pc_lvl;
          if (drop) rmk[rg_head] <= 1'b0;
+         if (rp_ok) rg_cy <= rp_cy;
          for (j = 0; j < 8; j = j + 1)
             if (rp_ok && j >= rp_skip && j <= rp_end) begin
                ring[tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= ic_data[j*16 +: 16];
                rmk [tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= rp_mk[j];
+               rst [tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= rp_st[j];
             end
       end
    end
