@@ -302,7 +302,11 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
   bundle after slot 0 -- a shape the code did not determine, and a third bundle base for the
   loop back edge in `workloads/brbench`, 15 lost predictions in 300 iterations; 2 after.) A
   bundle also ends at a mark predicted taken and carries on through one predicted not taken, so
-  a bundle holds up to `IW` predictions, one for each slot that ends on a mark. `PDW` = 31:
+  a bundle holds up to `IW` predictions, one for each slot that ends on a mark. The fetch ring
+  predecodes a START bit per halfword as each pair arrives (a halfword begins an instruction unless
+  the one before began a 32-bit op; the chain runs on from the last halfword appended and restarts
+  at the PC), so the aligner places slot k at the window's k-th start, decodes every halfword in
+  parallel and selects per slot: no slot's position waits for the lengths before it. `PDW` = 31:
   {RAS-pointer snapshot 3, history snapshot 11, yhit, yctr 2, yidx 11, hit, ctr 2}.
 ### 4.2 Branch prediction
 
