@@ -1,4 +1,4 @@
-`include "smolrv64_ictag.vh"
+`include "smolrv64_tags.vh"
 `default_nettype none
 
 // The fetch ring: RS halfword slots holding the instruction stream from the PC on, filled from

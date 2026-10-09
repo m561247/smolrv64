@@ -1,4 +1,4 @@
-`include "smolrv64_ictag.vh"
+`include "smolrv64_tags.vh"
 `default_nettype none
 `ifndef PROBE_CLK_DIV8
  `define PROBE_CLK_DIV8 48        // 166.67 MHz -- THE shipping clock, not a suggestion
@@ -123,7 +123,7 @@ module rv_soc_top #(
    // The architectural physical-address width (64 GiB): the core faults any PA beyond its
    // instance's DRAM, so the D$ tags exactly PABITS bits (smolrv64_core, THE PHYSICAL-ADDRESS CAP).
    localparam integer PABITS = 36;
-   localparam integer LQ_IB  = 3;    // the core's load-queue index width: the D$ read tag carries it
+   localparam integer LQ_IB  = `SMOLRV64_LQB;    // the core's load-queue index width: the D$ read tag carries it
    localparam LAW  = AW-6;                  // line address width = 58
 
    // ---------------- core <-> caches nets ----------------

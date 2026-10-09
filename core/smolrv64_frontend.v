@@ -1,4 +1,4 @@
-`include "smolrv64_ictag.vh"
+`include "smolrv64_tags.vh"
 `default_nettype none
 `include "smolrv64_irec.vh"
 

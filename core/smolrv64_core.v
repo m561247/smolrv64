@@ -1,4 +1,4 @@
-`include "smolrv64_ictag.vh"
+`include "smolrv64_tags.vh"
 `include "va_codec.vh"
 `include "smolrv64_irec.vh"
 // An issued op's payload, as dispatch packs it (pl_in) and an issue port unpacks it.
@@ -69,7 +69,7 @@ module smolrv64_core
     parameter [63:0] LBASE    = 64'h7000_0000,   // the local SRAM, for the LSU's alignment rule
     parameter        LRAM_LG2 = 18,
     parameter        PABITS   = 36,              // the architectural physical-address width
-    parameter        LQ_IB    = 3)               // the load queue's index width: 1<<LQ_IB entries
+    parameter        LQ_IB    = `SMOLRV64_LQB)   // the load queue's index width: 1<<LQ_IB entries
    (input  wire                    clk,
     input  wire                    reset,
     // ---- instruction memory: the fetch ring's stream into the I$ (rv_icache) ----
