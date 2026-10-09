@@ -220,12 +220,24 @@ module smolrv64_predictor
          hy[k]  = ~ek[TGTW+2] & (ck[YEW-1 -: YTAGW] == ytagf(sa_q + 2*k));
          hd1[k] = ek[TGTW+2] | (hy[k] ? ck[1] : ek[TGTW+1]);
       end
-      mkv = 8'd0;  nmk = 4'd0;  hk = 3'd7;  cut = 1'b0;  e = {EW{1'b0}};
-      for (k = 0; k < 8; k = k + 1)
-         if (hv[k] & ~cut) begin
-            mkv[k] = 1'b1;  nmk = nmk + 4'd1;
-            if (hd1[k] | (nmk == M)) begin cut = 1'b1;  hk = k[2:0];  e = bq[k]; end
-         end
+   end
+   // The marks in parallel, one-hot: the first hit, the second, and the first taken one. The pair
+   // ends at the first taken hit when it is one of the first two, else at the second hit (M = 2),
+   // else at its own end; the marks are the hits up to where it ends.
+   wire [7:0] h1   = hv & (~hv + 8'd1);                    // the first hit
+   wire [7:0] hv2  = hv & ~h1;
+   wire [7:0] h2   = hv2 & (~hv2 + 8'd1);                  // the second
+   wire [7:0] tkv  = hv & hd1;
+   wire [7:0] t1   = tkv & (~tkv + 8'd1);                  // the first taken
+   wire       t_in = |(t1 & (h1 | h2));
+   wire [7:0] coh  = t_in ? t1 : h2;                       // where the pair ends, one-hot (0: its end)
+   always @* begin
+      cut = |coh;
+      mkv = cut ? (hv & ((coh - 8'd1) | coh)) : hv;
+      nmk = {3'd0, |mkv} + {3'd0, |(mkv & (mkv - 8'd1))};
+      hk  = 3'd7;
+      for (k = 0; k < 8; k = k + 1) if (coh[k]) hk = k[2:0];
+      e   = cut ? bq[hk] : {EW{1'b0}};
    end
    wire [PCW-1:0]  h    = sa_q + {60'd0, hk, 1'b0};             // its address
    wire [2:0]      ety  = e[TGTW +: 3];
