@@ -2575,7 +2575,13 @@ module smolrv64_core
    wire st_lq     = st_dsp &  hd_sched & ~rn_stall & ~hd_sq & hd_lq;
    wire st_srz    = st_dsp &  hd_sched & ~rn_stall & ~hd_sq & ~hd_lq;
    wire st_ser    = st_dsp;                                          // the bus's bit 11, as before
-   wire fe_bub    = ~st_m & ~d_valid & ~hd_wait & ~redirect;   // X starved, M not already stalled
+   // The IR loads the group the queue head takes, so the cycle after the head waits on a backend
+   // credit the IR is empty although the queue is not: that refill cycle is the stall's (td_rf),
+   // and takes the previous cycle's backend cause.
+   reg  td_pbe;
+   wire ir_mt     = ~st_m & ~d_valid & ~hd_wait & ~redirect;   // X starved, M not already stalled
+   wire td_rf     = ir_mt & fe_hd_v & td_pbe;
+   wire fe_bub    = ir_mt & ~td_rf;
    wire fe_mmu    = fe_bub & ~immu_ready;           // ...iMMU walking
    wire fe_ic     = fe_bub &  immu_ready & (imem_avail_g == {$clog2(HW+2){1'b0}});
 
@@ -2635,19 +2641,25 @@ module smolrv64_core
    //   5 iMMU  6 no fetch bytes  7 no whole insn  8 queue empty  9 other front-end
    //   10 M on memory  11 M other  12 ROB full  13 wait on a load  14 wait on FP  15 scheduler full
    //   16 rename  17 SQ full  18 LQ full  19 serializing  20 held otherwise
+   reg  [4:0] td_pk;
    wire       td_bs  = redirect | rd_wait;
    wire       td_fe  = ~td_bs & fe_bub;
-   wire       td_be  = ~td_bs & (st_m | hd_wait | (d_valid & ~d_take));   // M held, the queue head without credit, or a frozen IR
+   wire       td_be  = ~td_bs & (st_m | hd_wait | (d_valid & ~d_take) | td_rf);   // M held, the queue head without credit, a frozen IR, or the refill after
    wire [3:0] td_n4  = ones_nl(s_takev);
    wire [1:0] td_nd  = td_n4[1:0];
    reg  [4:0] td_k;
    always @* begin
       if (td_bs)      td_k = redirect ? 5'd3 : 5'd4;
       else if (td_fe) td_k = fe_mmu ? 5'd5 : fe_ic ? 5'd6 : fe_aln ? 5'd7 : fe_que ? 5'd8 : 5'd9;
-      else if (td_be) td_k = st_m ? (m_mem_op ? 5'd10 : 5'd11)
+      else if (td_be) td_k = td_rf ? td_pk : st_m ? (m_mem_op ? 5'd10 : 5'd11)
                            : st_rob ? 5'd12 : dep_ld ? 5'd13 : dep_fp ? 5'd14 : st_iq ? 5'd15
                            : st_rn ? 5'd16 : st_sq ? 5'd17 : st_lq ? 5'd18 : st_srz ? 5'd19 : 5'd20;
       else            td_k = (td_nd == 2'd0) ? 5'd21 : {3'b0, td_nd} - 5'd1;
+   end
+   initial begin td_pbe = 1'b0; td_pk = 5'd0; end
+   always @(posedge clk) begin
+      td_pbe <= ~reset & (td_k >= 5'd10) & (td_k <= 5'd20);
+      td_pk  <= td_k;
    end
    // the depth events, each a set of td_k values, so each is a subset of its parent
    wire td_be_mem = (td_k == 5'd10) | (td_k == 5'd13);                      // waiting on memory

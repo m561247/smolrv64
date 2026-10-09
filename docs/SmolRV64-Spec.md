@@ -129,7 +129,7 @@ complements.
 | iTLB miss / page-table walk | `FE_MMU` r0311 | PTW runs as a line requester |
 | had bytes, no complete instruction | `FE_ALN` r0313 | window is `SMOLRV64_HW` halfwords |
 | had an instruction, decoupling queue empty | `FE_QUE` r0314 | backend drained the queue |
-| X idle for any other reason | `FE_BUB` r0310 | catch-all frontend bubble |
+| X idle for any other reason | `FE_BUB` r0310 | catch-all frontend bubble; not the IR's refill after a backend stall |
 
 ### 3.2 X stalls — the queue head without a credit
 
@@ -1690,7 +1690,10 @@ cycle, printed as `perf stat` would) run through `tools/perf-cpi-stack.py` repro
 speculation (`bs:redirect`, `bs:drain` = `rd_wait`) wins over frontend (`fe:immu`, `fe:icache`,
 `fe:align`, `fe:queue`), which wins over backend (`be:M-mem`, `be:M-other`, `be:rob-full`,
 `be:dep-load`, `be:dep-fp`, `be:iq-full`, `be:rename`, `be:sq-full`, `be:lq-full`,
-`be:serialize`, in `d_hold`'s order). Any other cycle is `ok:N`, where N is the number of instructions dispatched that cycle. The run prints the totals as `TOPDOWN-SIM` lines, and
+`be:serialize`, in `d_hold`'s order). The IR loads the group the queue head takes, so the cycle
+after the head waits on a backend credit finds the IR empty with the queue still full: that
+refill cycle (`td_rf`) takes the previous cycle's backend cause, and no `FE_*` event counts it.
+Any other cycle is `ok:N`, where N is the number of instructions dispatched that cycle. The run prints the totals as `TOPDOWN-SIM` lines, and
 `closed: <cycles>` confirms the causes sum to the run's cycle count.
 
 `+kanata=<file>` writes the **pipe trace** (`core/tb_pipetrace.vh`) as a Konata pipe view
