@@ -753,27 +753,13 @@ module tb;
    end
    initial begin fr_req = 0; fr_hw = 0; fr_tk = 0; fr_nt = 0; fr_drop = 0; fr_rft = 0; fr_rmid = 0;
                  fr_pqfull = 0; fr_rgfull = 0; end
-   // Trainings, and how many of them came from an instruction that never retired (a wrong-path
-   // CTI resolves out of order and trains before the older mispredict squashes it): resolve marks
-   // the ROB entry, dispatch into it clears the mark, a commit of a marked entry counts.
-   reg [255:0] tr_mk;          // by ROB entry
-   integer    tmk;
-   reg [63:0] tr_n, tr_ret;
-   reg [63:0] tr_drops;
-   initial begin tr_mk = 0; tr_n = 0; tr_ret = 0; tr_drops = 0; end
+   // Trainings (every one from a retired CTI, smolrv64_core's training queue) and the CTIs dropped
+   // at a full queue.
+   reg [63:0] tr_n, tr_drops;
+   initial begin tr_n = 0; tr_drops = 0; end
    always @(posedge clk) if (!reset) begin
-      for (tmk = 0; tmk < dut.core.IW; tmk = tmk + 1)
-         if (dut.core.s_takev[tmk]) tr_mk[dut.core.s_rob[tmk]] <= 1'b0;
-      if (dut.core.res_v) begin tr_mk[dut.core.tr_rob] <= 1'b1;  tr_n <= tr_n + 1; end
+      if (dut.core.res_v) tr_n <= tr_n + 1;
       tr_drops <= tr_drops + 64'(dut.core.tr_drop);
-      tr_ret <= tr_ret + tr_c;
-   end
-   reg [63:0] tr_c;                 // marked entries committing this cycle
-   integer    tmc;
-   always @* begin
-      tr_c = 64'd0;
-      for (tmc = 0; tmc < dut.core.IW; tmc = tmc + 1)
-         tr_c = tr_c + 64'(dut.core.rc_v[tmc] & tr_mk[dut.core.rc_idx[tmc]]);
    end
    wire fr_open = ~dut.core.fe.u_ring.freeze & dut.core.fe.u_ring.xlate_ok & dut.core.fe.u_ring.inpg;
    wire fr_rej  = dut.core.fe.f_rej;
@@ -944,7 +930,7 @@ module tb;
                ser_c[0], ser_c[1], ser_c[2], ser_c[3], ser_c[4], ser_c[5], ser_c[6], ser_c[7]);
       $display("DISP-SIM d$ reads=%0d back-to-back=%0d held-only-by-the-request-pulse=%0d", ls_rd, ls_rd_b2b, ls_pulse_held);
       $display("ICMISS-SIM misses=%0d unused=%0d (a missing line nothing retired from before 64 more misses)", im_n, im_waste);
-      $display("TRAIN-SIM trainings=%0d by-retired=%0d by-squashed=%0d dropped=%0d", tr_n, tr_ret, tr_n - tr_ret, tr_drops);
+      $display("TRAIN-SIM trainings=%0d dropped=%0d", tr_n, tr_drops);
       $display("WALK-SIM squashes-at-the-head=%0d checked-after-the-walk=%0d rows-walked=%0d checked-after-the-kill=%0d releases=%0d", dut.core.wk_sq, dut.core.wk_chk, dut.core.wk_rows, dut.core.wk_kchk, dut.core.wk_rel);
       $display("MEM-SIM dcache fill-cycles=%0d fills=%0d mean-mshrs=%0.2f waiting=%0d wb-full=%0d cleans=%0d clean-cycles=%0d | st_mem=%0d with-fill=%0d with-waiting=%0d",
                ms_fill, ms_fills, (ms_fill != 0) ? $itor(ms_live) / $itor(ms_fill) : 0.0, ms_park, ms_wbfull, ms_cln, ms_clnc,

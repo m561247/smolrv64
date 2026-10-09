@@ -363,12 +363,17 @@ per ROB entry, written at dispatch and read at commit). The array itself is not 
 count kept at resolve cannot serve as the committed pointer: control flow resolves out of
 order on its own pipe, and a wrong-path call or return resolves before its squash (rule D14).
 
-**Training.** Every CTI trains the predictor once, mispredicted or not, from its lane's resolve
-register (`lr_*`). Up to three resolve per cycle and the predictor trains one: the tracked
-restart's own CTI trains in its restart cycle, before its squash (rule D16). Every resolving CTI
-enters an 8-entry queue in age order, from the resolve registers alone, and is dropped only when
-the queue is full (34 of 7.9 M in the 60 M boot); at the head, the pending restart's own CTI
-(already trained) and any CTI younger than it train nothing. A squash empties the queue. A mispredicting
+**Training.** Every CTI trains the predictor once, mispredicted or not, and only once it is
+NON-SPECULATIVE: when the ROB's irrevocable point (§6) has reached it, so everything older is done
+and nothing can squash it, or it has retired. Up to three resolve per cycle; each enters a
+16-entry queue in age order from its lane's resolve register (`lr_*`), carrying a copy of all
+training reads (rule D16), and the queue's head trains one per cycle once non-speculative. A CTI
+arriving at a full queue is dropped (training is a hint). A CTI younger than a pending restart
+queues nothing; an entry the kill marks dead, or one past the pending restart, is discarded at
+the head. A redirect discards every entry that has not retired, except the restart's own CTI at
+its squash (the ROB head). Training is a read-modify-write of the tables' current counters (the
+bimodal banks `bc`, the corrector), never of the snapshot carried from fetch, which every
+in-flight instance of a loop's branch shares. A mispredicting
 conditional branch's early restart restores its own history snapshot plus its outcome. The key
 is the CTI's last halfword (its PC and length). Dhrystone (`workloads/rvbench`, 5,000 runs, IW=3): 1.06
 redirects per iteration, the strcmp loop exit; 3 102 919 cycles. The Linux lockstep (IW=3)
