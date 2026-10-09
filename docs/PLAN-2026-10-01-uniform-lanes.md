@@ -696,6 +696,45 @@ wake at all only in the lane that took them.
 3. **5.5c: chains,** only if 5.5b's numbers say the first consumer is not enough: a confirmed
    speculative op's dependents woken at T+2 instead of T+3.
 
+## Step 6 in detail: out-of-order memory issue and memory-dependence speculation (design, 2026-10-09)
+
+**Measured (Dhrystone steady state, lockstep, IW=3, 20,004 loads).** A load spends 7.4 of ~14
+memory-stage cycles in `m` (address ready, waiting for M's in-order fill), 2.6 in `k` (filled,
+waiting to access), 1 in M and 3 in the D$. 39% of loads wait 5 or more cycles in `m`, behind the
+previous M user, a load (4,080) or a store (3,671) that itself waited 8-9 cycles on its operands.
+Load-hit speculation (Step 5.5) would save one of those ~14 cycles.
+
+**6a (built, 9fc3fd05): out-of-order fill and access.** M fills in arrival order and the load queue
+offers the oldest *ready* entry (its `pk_*`, `oldest()` and `rdy_m`). Alone it trades the `m` wait
+for a `k` wait: `ld_block` rises 9.6% -> 34.5% of Dhrystone's cycles, because a ready load now
+waits for every older store whose address is unknown. Dhrystone +3.0%, the 300 M boot ahead.
+
+**6b: loads past older stores with unknown addresses.** Of the 105,089 Dhrystone loads blocked only
+by unknown older store addresses, 90,075 (86%) did not alias any of them and had waited 1.1 M
+cycles (12 each). A load that goes ahead is right 86% of the time; a wrong one costs a replay, so a
+predictor keeps the repeat offenders waiting.
+1. *The wait table.* `mdw`, one bit per load-PC hash (256 entries), set when a load is replayed and
+   cleared periodically. A load carries `wt = mdw[hash(pc)]` from dispatch into its queue entry; a
+   load with `wt` set waits for unknown older store addresses as today, one without does not.
+2. *Detection, level-sensitive.* `smolrv64_sq` evaluates, every cycle and per load, "this load has
+   reached memory (sent or landed) and an older live store overlaps it" from the registered
+   overlap matrix `conf`. A load that went ahead and meets a store's address that overlaps it is
+   flagged once (sticky `rpl`). Level-sensitive because the registered block copy can lag a cycle
+   when the block RISES (an unknown store becoming a known overlap), which a pulse at the store's
+   address arrival would miss.
+3. *Watching.* A landed load whose older stores are not all known stays in the queue (`lnd`),
+   its address valid, until the last of them has an address; a flagged one stays until it replays.
+4. *Replay.* The flagged load, once it is the ROB head, is reported through the queue-fault path as
+   a pseudo-fault. The SYSQ takes it as a replay record: no trap, no CSR; at its fire it
+   redirects to the load's own PC (`sy_rp`), kills the head's retire the cycles before (the load
+   is already done), sets `mdw`, and the load re-executes behind the stores it conflicted with.
+   Everything younger dies in the redirect, as for any head-gated redirect.
+5. *Why the head is enough.* The load is younger than the store whose address reveals the
+   conflict, and the store retires only after its address is in, so the load cannot have retired.
+
+**6c: store-to-load forwarding,** only if the replays that remain say the aliasing loads are mostly
+full overlaps (Dhrystone's are: a callee reads what the caller just stored).
+
 ## Step 7 in detail: blocks cut at the first predicted-taken transfer (design, 2026-10-09)
 
 **Why.** Dhrystone (rvbench, lockstep, IW=3, main 23059656): `fe:queue` is 12.95% of cycles, and
