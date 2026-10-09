@@ -311,17 +311,25 @@ module smolrv64_lq
    // older load still waiting): at the tail with nothing waiting it can name an earlier lap's
    // load in flight, which is not one.
    reg  [NENT-1:0] kmk, kds;
-   reg  [IDXB-1:0] kd0, kd0d;
    integer         kq, kw;
    always @* begin
-      kd0 = tail;  kd0d = {IDXB{1'b0}};
       for (kq = 0; kq < NENT; kq = kq + 1) begin
          kds[kq] = kd_v & kd[rob[kq]];
          kmk[kq] = kds[kq] & v[kq];
-         // the oldest: the largest distance back from the tail
-         if (kmk[kq] & ((tail - 1'b1 - kq[IDXB-1:0]) >= kd0d)) begin kd0 = kq[IDXB-1:0];  kd0d = tail - 1'b1 - kq[IDXB-1:0]; end
       end
    end
+   // The oldest dead entry: the ring read from the tail on runs oldest to youngest, so it is the
+   // first set bit of the marks rotated to start at the tail -- a rotate and a priority encoder,
+   // not a compare per entry.
+   wire [2*NENT-1:0] k_dbl = {kmk, kmk} >> tail;
+   wire [NENT-1:0]   k_rot = k_dbl[NENT-1:0];
+   reg  [IDXB-1:0]   k_off;
+   integer           kf;
+   always @* begin
+      k_off = {IDXB{1'b0}};
+      for (kf = NENT - 1; kf >= 0; kf = kf - 1) if (k_rot[kf]) k_off = kf[IDXB-1:0];
+   end
+   wire [IDXB-1:0]   kd0 = tail + k_off;
    assign kmask = kds;
    wire          k_any = |kmk;
    reg  [IDXB:0] k_n;
