@@ -161,7 +161,7 @@ The core sits in an IPC trough whose causes the traces and the counters show dir
       misses (Tommy: needed for good performance; postponed from 5.2d-c).
 6. **The pipe trace**, built for the pipeline the lanes leave (its stages, its credits, its block
    reasons). Until then the steps use today's trace and counters.
-7. **The predictor:** path history, blocks cut at the first predicted-taken transfer.
+7. **The predictor:** path history, blocks cut at the first predicted-taken transfer (design: "Step 7 in detail").
 8. Then loads past unknown-address stores (C4b step 6), C5, the future TLB, the clock review.
 
 ## Step 5.1: the FP register file (design, 2026-10-03)
@@ -695,6 +695,61 @@ wake at all only in the lane that took them.
    only; FP loads keep the landing's wake.
 3. **5.5c: chains,** only if 5.5b's numbers say the first consumer is not enough: a confirmed
    speculative op's dependents woken at T+2 instead of T+3.
+
+## Step 7 in detail: blocks cut at the first predicted-taken transfer (design, 2026-10-09)
+
+**Why.** Dhrystone (rvbench, lockstep, IW=3, main 23059656): `fe:queue` is 12.95% of cycles, and
+fetch delivers 2.11 instructions per bundle. The queue is full 49% of cycles, held by the back end;
+when the back end frees, dispatch drains three a cycle while fetch refills two, and the queue runs
+dry. Bundles are short because every control transfer ends one, taken or not (`src/aligner.v`),
+and the predictor ends its I$ pair at every known one (`smolrv64_predictor`), so the rest of the
+pair costs a second request. `strcmp`'s seven-instruction loop arrives as 3 + 3 + 1. In the 300 M
+tiny128 lockstep 16% of pairs end at a not-taken branch.
+
+**What already copes** (read from the code, 2026-10-09). A dispatch group already holds several
+control transfers in any slots: the queue head forms groups across bundles, so a branch in slot 0
+is routinely followed by younger slots in its ROB row. The row's kill is by column
+(`smolrv64_rob` `kd_n`), the walk restores per column (`pold`, `wl_v` for the columns past the
+branch's), `pred_npc` and the mispredict compare are per slot (`smolrv64_dslot`, `branch_unit`),
+the oldest mispredict wins by age, and every resolved transfer queues for training by age. Nothing
+after the decoupling queue changes.
+
+**What assumes one prediction per bundle** is the front end alone: the predictor's pair holds one
+prediction and fetch pops one queue entry per bundle (`fetch.v` `pop`, the ring's mark count);
+`pd_fetch` is one bundle's details written into every slot; and `br_term` is "some slot is a
+branch", which equals "the last slot is" only while a branch ends the bundle. With bundles that
+span branches, a taken mark on a last slot that is not a branch would be accepted with no compare
+at execute: a wrong path retires. It becomes "the last slot is a branch or jump".
+
+**The design.**
+1. **Path history.** The history is a shifted hash of taken transfers' addresses, shifted once per
+   pair that ends at a predicted-taken transfer; not-taken branches leave it alone. Every branch
+   of a pair is then looked up with the same history, the one before the pair, and every mark of
+   a pair has the same pre-state. A redirect restores its transfer's pre-state and, when it was
+   taken, shifts its own address in. (Direction history would shift once per not-taken branch,
+   several times in one pair, each branch seeing a different history.)
+2. **A pair ends at its first predicted-taken transfer.** Every known transfer from the stream's
+   address to that one is a mark and gets a queue entry, in order: up to M per pair (M = 2; a
+   pair with more known not-taken branches ends at the M-th, as today). The queue takes up to M
+   pushes a cycle.
+3. **A bundle ends** at an instruction ending on a mark whose prediction is taken, at an unmarked
+   `jal`/`jalr` (it redirects at decode or at execute), before and after a solo op, at the cap, or
+   at the window's end. A not-taken mark, and an unmarked conditional (predicted not taken), do
+   not end it. Fetch pops one entry per mark the bundle consumes, up to IW; it takes a prediction
+   only when the bundle's LAST slot is a branch or jump ending on a taken mark.
+4. **Each slot carries its own details:** the entry of its own mark, or `pd_no` with the
+   pre-state of the first entry at or after it (the stream's state when there is none). The
+   predictor exposes its first IW entries. The frontend writes per-slot details into the queue.
+
+**Increments**, each in lockstep (the 300 M row, rvbench Dhrystone, the riscv-tests):
+- **7a, path history.** Pairs still end at their first known transfer. The only behaviour change
+  is the history: measured alone (redirects per thousand, cycles).
+- **7b, per-slot details and a counted pop** (`br_term` = the last slot), still one mark per
+  bundle: cycle-identical with 7a.
+- **7c, spanning.** The predictor's pair ends at the first predicted-taken transfer and pushes a
+  mark per known transfer (M = 2); the aligner continues past not-taken marks and unmarked
+  conditionals; fetch pops per mark. Measured against 7b.
+- Then FW split from IW, and predecode before the queue with decode after it (separate designs).
 
 ## The PRF in block RAM: built, measured, dropped (2026-10-03)
 
