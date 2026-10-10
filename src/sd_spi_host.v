@@ -18,7 +18,8 @@
 module sd_spi_host #(
     parameter [15:0] SLOW_HALF  = 16'd416,   // SCK half-period in core clocks-1
     parameter [15:0] FAST_HALF  = 16'd12,    //   (~400 kHz / ~12 MHz @ 333 MHz)
-    parameter [15:0] INIT_BYTES = 16'd10     // idle bytes (CS high) before CMD0
+    parameter [15:0] INIT_BYTES = 16'd10,    // idle bytes (CS high) before CMD0
+    parameter [15:0] FLUSH_BYTES= 16'd520    // 0xFF bytes with CS low before them: a pending block drains or completes
 ) (
     input  wire        clock,
     input  wire        reset,
@@ -49,7 +50,7 @@ module sd_spi_host #(
     output reg         cs_n,
 
     output wire [ 6:0] dbg_state,   // SPI FSM state, for an MMIO debug overlay
-    output wire [15:0] dbg_io       // {5'b0, rd_crc_err, retried, rd_token_timeout, last_io_R1}
+    output wire [15:0] dbg_io       // {1'b0, rd_err_token[3:0], rd_crc_err, retried, rd_token_timeout, last_io_R1}
 );
    // ---------------------------------------------------------------------
    // 512-byte block buffer: 64 x 64-bit LE words, sync write / async read.
@@ -158,7 +159,8 @@ module sd_spi_host #(
      S_COMPLETE  = 7'd38, S_ERROR    = 7'd39,
      S_IO_BLK    = 7'd40, S_IO_BLK_END = 7'd41,
      S_BLK_DONE  = 7'd42, S_MB_WBUSY = 7'd43,
-     S_MB_RDRAIN0= 7'd44, S_MB_RDRAIN = 7'd45;
+     S_MB_RDRAIN0= 7'd44, S_MB_RDRAIN = 7'd45,
+     S_FLUSH     = 7'd46;
 
    reg [6:0]  state, bx_ret;
    reg [15:0] init_cnt;
@@ -203,10 +205,11 @@ module sd_spi_host #(
    reg       dbg_rd_to;    // sticky: a read-token poll timed out
    reg       dbg_retried;  // sticky: a read was retried after a failure
    reg       dbg_crc_err;  // sticky: a read block failed the data CRC16
+   reg [3:0] dbg_rd_err;   // sticky: the last data error token's flags (0 = none)
    reg [2:0] io_retry;     // remaining read retries
    assign busy = (state != S_READY);
    assign dbg_state = state;
-   assign dbg_io = {5'd0, dbg_crc_err, dbg_retried, dbg_rd_to, dbg_r1};
+   assign dbg_io = {1'b0, dbg_rd_err, dbg_crc_err, dbg_retried, dbg_rd_to, dbg_r1};
 
    // CRC16-CCITT (x^16+x^12+x^5+1, init 0) over read data — the card always
    // transmits it after each block even with SPI CRC checking off.
@@ -241,9 +244,19 @@ module sd_spi_host #(
         S_BX:  begin bx_go <= 1'b1; state <= S_BXW; end
         S_BXW: if (bx_done) state <= bx_ret;
 
-        // ---- power-up: INIT_BYTES idle bytes, CS high ----
+        // ---- power-up: FLUSH_BYTES of 0xFF with CS low, then INIT_BYTES idle bytes with CS high ----
+        // A card left mid-transfer by a reconfiguration keeps its state: it ignores clocks while
+        // CS is high and, once CS drops, takes CMD0's bytes as the rest of its data block, so it
+        // never re-initialises and answers later reads with an error token (S_RD_TOK). The flush
+        // drains a pending read block or completes a pending write block, after which the card
+        // is back in its transfer state and CMD0 lands. A card at power-up sees only idle bytes
+        // (no start bit) and is unaffected.
         S_RESET: begin
-           cs_n <= 1'b1; init_cnt <= INIT_BYTES; ready <= 1'b0; state <= S_PWRUP;
+           cs_n <= 1'b0; init_cnt <= FLUSH_BYTES; ready <= 1'b0; state <= S_FLUSH;
+        end
+        S_FLUSH: begin
+           if (init_cnt == 16'd0) begin cs_n <= 1'b1; init_cnt <= INIT_BYTES; state <= S_PWRUP; end
+           else begin bx_tx <= 8'hff; bx_ret <= S_FLUSH; init_cnt <= init_cnt - 16'd1; state <= S_BX; end
         end
         S_PWRUP: begin
            if (init_cnt == 16'd0) begin
@@ -381,6 +394,9 @@ module sd_spi_host #(
         // ---- read: wait token 0xFE, read 512 bytes, check 2 CRC bytes ----
         S_RD_TOK: begin
            if (bx_rx == 8'hFE) begin byte_idx<=9'd0; cur_word<=64'd0; rd_crc<=16'd0; bx_tx<=8'hff; bx_ret<=S_RD_DATA; state<=S_BX; end
+           // a data error token (0000xxxx, nonzero): the card refused the block -- out of range, a
+           // card ECC failure, a CC error. Reported at once and kept in dbg_io, not waited out as "no token".
+           else if (bx_rx[7:4] == 4'h0 && bx_rx[3:0] != 4'h0) begin io_ok<=1'b0; dbg_rd_err<=bx_rx[3:0]; state<=S_IO_BLK_END; end
            else if (to_cnt==28'd0) begin io_ok<=1'b0; dbg_rd_to<=1'b1; state<=S_IO_BLK_END; end
            else begin bx_tx<=8'hff; bx_ret<=S_RD_TOK; state<=S_BX; end
         end

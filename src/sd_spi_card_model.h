@@ -83,6 +83,8 @@ struct SpiSdCard {
     }
 
     int corrupt_reads = 0;   // test hook: bit-flip a data byte in this many upcoming read blocks
+    bool keep_state_on_cs = false;  // test hook: CS high only pauses the card, as a real card keeps its state
+    bool saw_cmd0 = false;          // test hook: a CMD0 was parsed
 
     void push_block(const std::array<uint8_t,512>& d) {
         txq.push_back(0xFE);
@@ -96,7 +98,7 @@ struct SpiSdCard {
         uint8_t r1 = card_idle ? 0x01 : 0x00;
         uint32_t sector = high_capacity ? arg : (arg >> 9);
         switch (cmd) {
-        case 0:  txq.push_back(0x01); break;                       // GO_IDLE
+        case 0:  txq.push_back(0x01); saw_cmd0 = true; card_idle = true; acmd41_tries = 0; break;   // GO_IDLE
         case 8:  txq.push_back(0x01);                              // R7 (idle)
                  txq.push_back(0x00); txq.push_back(0x00);
                  txq.push_back(0x01); txq.push_back(0xAA); break;
@@ -176,7 +178,7 @@ struct SpiSdCard {
     }
 
     void clock_edge(int sck, int cs_n, int mosi) {
-        if (cs_n) { reset_transfer(); prev_sck = sck; return; }
+        if (cs_n) { if (keep_state_on_cs) { bitpos = 0; in_byte = 0; } else reset_transfer(); prev_sck = sck; return; }
         if (sck && !prev_sck) {                       // rising: sample MOSI
             in_byte = (in_byte << 1) | (mosi & 1);
             if (++bitpos == 8) {

@@ -204,6 +204,31 @@ int main(int argc, char** argv) {
         else printf("ok: clean read after mb error\n");
     }
 
+    // ---- Test 10: a host reset mid-write (a reconfiguration) against a card that keeps its
+    // state: the flush completes the pending block, so CMD0 is parsed rather than eaten ----
+    if (dut->ready) {
+        card.keep_state_on_cs = true; card.saw_cmd0 = false;
+        dut->buf_we = 1;
+        for (int w = 0; w < 64; w++) { dut->buf_addr = w; dut->buf_wdata = 0x1122334455667788ull * (w + 1); core_cycle(); }
+        dut->buf_we = 0;
+        dut->req_valid = 1; dut->req_write = 1; dut->req_sector = 777; dut->req_last = 1;
+        long n = 0;
+        while (dut->busy == 0 && n++ < 5000000) core_cycle();
+        dut->req_valid = 0;
+        while (!(card.st == SpiSdCard::WRITE_RECV && card.wr_state == 1 && card.wr_idx >= 100) && n++ < 5000000) core_cycle();
+        if (card.wr_idx < 100) { printf("FAIL: test 10 never reached the write data phase\n"); failures++; }
+        dut->reset = 1; for (int i = 0; i < 8; i++) core_cycle(); dut->reset = 0;
+        n = 0; while (dut->ready == 0 && n++ < 20000000) core_cycle();
+        if (!dut->ready) { printf("FAIL: re-init after a reset mid-write did not complete\n"); failures++; }
+        else if (!card.saw_cmd0) { printf("FAIL: re-init after a reset mid-write never got CMD0 to the card\n"); failures++; }
+        else {
+            std::array<uint8_t,512> pat; for (int i = 0; i < 512; i++) pat[i] = (uint8_t)(0x3C ^ (i * 7)); card.store[1235] = pat;
+            if (!run_request(0, 1235, 1, 5000000)) { printf("FAIL: read after the re-init failed\n"); failures++; }
+            else printf("ok: reset mid-write -> the flush completes the block, CMD0 is parsed, re-init and a read\n");
+        }
+        card.keep_state_on_cs = false;
+    }
+
     printf("sd_spi_host: %s (%d failure(s))\n", failures ? "FAIL" : "PASS", failures);
     delete dut;
     return failures ? 1 : 0;
