@@ -51,9 +51,9 @@ proc add_unique_property_value {object property value} {
 proc configure_cvfpu_sources {repo_root src_dir} {
     set fileset [current_fileset]
     set cvfpu_manifest [file join $src_dir cvfpu_sources.f]
-    set cvfpu_submodule [file join $repo_root third_party cvfpu src common_cells include]
-    if {![file isdirectory $cvfpu_submodule]} {
-        error "CVFPU submodule is missing or incomplete: $cvfpu_submodule\nRun: git submodule update --init --recursive"
+    set cvfpu_include [file join $repo_root third_party cvfpu src common_cells include]
+    if {![file isdirectory $cvfpu_include]} {
+        error "the vendored CVFPU subset is missing or incomplete: $cvfpu_include\nRegenerate it: tools/cvfpu-import.sh <commit> (third_party/cvfpu/UPSTREAM names the commit)"
     }
     if {![file exists $cvfpu_manifest]} {
         error "CVFPU source manifest missing: $cvfpu_manifest"

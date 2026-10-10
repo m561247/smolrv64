@@ -288,7 +288,7 @@ explains each line and the `cpi` and `mem` sets that go under it.
 | `workloads/` | The Linux images and device trees (tiny128, Ubuntu over NFS, Geekbench), the glibc and systemd cosim harnesses, the ROM monitor, the bare-metal microbenchmarks |
 | `tests/` | riscv-tests binaries |
 | `docs/` | The specification (`SmolRV64-Spec.md`, normative), `rtl-rules.md`, the current plans, and `history/`, the dated design records |
-| `third_party/cvfpu` | CVFPU (fpnew), as a submodule |
+| `third_party/cvfpu` | CVFPU (fpnew): the subset the build uses, vendored by `tools/cvfpu-import.sh` (`UPSTREAM` names the commit) |
 
 ## What comes next
 
