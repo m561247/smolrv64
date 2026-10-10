@@ -21,7 +21,7 @@ TMPL  := ubuntu-nfs.dts.in
 	$(DTC) -I dts -O dtb < $^ > $@
 
 .PHONY: dtbs
-dtbs: ubuntu-nfs.dtb ubuntu-nfs-166.dtb ubuntu-nfs-polled.dtb ubuntu-sd.dtb
+dtbs: ubuntu-nfs.dtb ubuntu-nfs-166.dtb ubuntu-nfs-polled.dtb ubuntu-sd.dtb ubuntu-nfs-4g.dtb ubuntu-sd-4g.dtb
 
 ubuntu-nfs.dts: $(TMPL) $(GEN)          # the one to boot
 	$(GEN) --gen $(DIV8) $(TMPL) $@
@@ -31,3 +31,7 @@ ubuntu-nfs-polled.dts: $(TMPL) $(GEN)   # UART polled instead of interrupt-drive
 	$(GEN) --gen $(DIV8) --polled $(TMPL) $@
 ubuntu-sd.dts: $(TMPL) $(GEN)           # root on the SD card's first partition, not NFS
 	$(GEN) --gen $(DIV8) --sd-root $(TMPL) $@
+ubuntu-nfs-4g.dts: $(TMPL) $(GEN)       # 4 GiB: only for a board with 16 Gb DDR4 parts
+	$(GEN) --gen $(DIV8) --4g $(TMPL) $@
+ubuntu-sd-4g.dts: $(TMPL) $(GEN)
+	$(GEN) --gen $(DIV8) --sd-root --4g $(TMPL) $@

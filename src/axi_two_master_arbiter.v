@@ -14,7 +14,7 @@ module axi_two_master_arbiter #(
     input  wire        reset,
 
     input  wire [ 2:0] s0_axi_awid,
-    input  wire [30:0] s0_axi_awaddr,
+    input  wire [31:0] s0_axi_awaddr,
     input  wire [ 7:0] s0_axi_awlen,
     input  wire [ 2:0] s0_axi_awsize,
     input  wire [ 1:0] s0_axi_awburst,
@@ -34,7 +34,7 @@ module axi_two_master_arbiter #(
     output wire        s0_axi_bvalid,
     input  wire        s0_axi_bready,
     input  wire [ 2:0] s0_axi_arid,
-    input  wire [30:0] s0_axi_araddr,
+    input  wire [31:0] s0_axi_araddr,
     input  wire [ 7:0] s0_axi_arlen,
     input  wire [ 2:0] s0_axi_arsize,
     input  wire [ 1:0] s0_axi_arburst,
@@ -52,7 +52,7 @@ module axi_two_master_arbiter #(
     input  wire        s0_axi_rready,
 
     input  wire [ 2:0] s1_axi_awid,
-    input  wire [30:0] s1_axi_awaddr,
+    input  wire [31:0] s1_axi_awaddr,
     input  wire [ 7:0] s1_axi_awlen,
     input  wire [ 2:0] s1_axi_awsize,
     input  wire [ 1:0] s1_axi_awburst,
@@ -72,7 +72,7 @@ module axi_two_master_arbiter #(
     output wire        s1_axi_bvalid,
     input  wire        s1_axi_bready,
     input  wire [ 2:0] s1_axi_arid,
-    input  wire [30:0] s1_axi_araddr,
+    input  wire [31:0] s1_axi_araddr,
     input  wire [ 7:0] s1_axi_arlen,
     input  wire [ 2:0] s1_axi_arsize,
     input  wire [ 1:0] s1_axi_arburst,
@@ -90,7 +90,7 @@ module axi_two_master_arbiter #(
     input  wire        s1_axi_rready,
 
     output wire [ 2:0] m_axi_awid,
-    output wire [30:0] m_axi_awaddr,
+    output wire [31:0] m_axi_awaddr,
     output wire [ 7:0] m_axi_awlen,
     output wire [ 2:0] m_axi_awsize,
     output wire [ 1:0] m_axi_awburst,
@@ -110,7 +110,7 @@ module axi_two_master_arbiter #(
     input  wire        m_axi_bvalid,
     output wire        m_axi_bready,
     output wire [ 2:0] m_axi_arid,
-    output wire [30:0] m_axi_araddr,
+    output wire [31:0] m_axi_araddr,
     output wire [ 7:0] m_axi_arlen,
     output wire [ 2:0] m_axi_arsize,
     output wire [ 1:0] m_axi_arburst,
@@ -297,7 +297,7 @@ endmodule
 // axi_aww_reg_slice -- single-entry skid buffers on the AW and W channels (independent,
 // both lossless and order-preserving). Breaks the arbiter->MIG-upsizer setup paths at
 // 333 MHz (the -0.57 device-DMA wdata / awaddr cones), same recipe as axi_r_reg_slice.
-module axi_aww_reg_slice #(parameter IDW = 3, AW = 31, DW = 64)
+module axi_aww_reg_slice #(parameter IDW = 3, AW = 32, DW = 64)
   (input  wire            clock,
    input  wire            reset,
    // slave side (from the arbiter)

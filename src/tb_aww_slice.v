@@ -4,9 +4,9 @@
 module tb_aww_slice;
    localparam N = 5000;
    reg clock=0, reset=1;  always #5 clock=~clock;
-   reg  [2:0] s_awid; reg [30:0] s_awaddr; reg [7:0] s_awlen; reg s_awvalid; wire s_awready;
+   reg  [2:0] s_awid; reg [31:0] s_awaddr; reg [7:0] s_awlen; reg s_awvalid; wire s_awready;
    reg  [63:0] s_wdata; reg [7:0] s_wstrb; reg s_wlast, s_wvalid; wire s_wready;
-   wire [2:0] m_awid; wire [30:0] m_awaddr; wire [7:0] m_awlen; wire m_awvalid; reg m_awready;
+   wire [2:0] m_awid; wire [31:0] m_awaddr; wire [7:0] m_awlen; wire m_awvalid; reg m_awready;
    wire [63:0] m_wdata; wire [7:0] m_wstrb; wire m_wlast, m_wvalid; reg m_wready;
    axi_aww_reg_slice dut(.clock(clock), .reset(reset),
       .s_awid(s_awid), .s_awaddr(s_awaddr), .s_awlen(s_awlen), .s_awsize(3'd3),
@@ -24,7 +24,7 @@ module tb_aww_slice;
       else begin
          if (!s_awvalid || (s_awvalid&&s_awready)) begin
             if (agen<N && ($random%3!=0)) begin
-               s_awvalid<=1; s_awaddr<=agen[30:0]; s_awid<=agen[2:0]; s_awlen<=agen[7:0]; agen<=agen+1;
+               s_awvalid<=1; s_awaddr<=agen[31:0]; s_awid<=agen[2:0]; s_awlen<=agen[7:0]; agen<=agen+1;
             end else s_awvalid<=0;
          end
          if (!s_wvalid || (s_wvalid&&s_wready)) begin
@@ -39,7 +39,7 @@ module tb_aww_slice;
       else begin
          m_awready<=($random%2==0); m_wready<=($random%2==0);
          if (m_awvalid && m_awready) begin
-            if (m_awaddr!==aexp[30:0] || m_awid!==aexp[2:0] || m_awlen!==aexp[7:0]) begin
+            if (m_awaddr!==aexp[31:0] || m_awid!==aexp[2:0] || m_awlen!==aexp[7:0]) begin
                $display("AW MISMATCH recv=%0d got=%h exp=%h", arecv, m_awaddr, aexp); errors<=errors+1; end
             aexp<=aexp+1; arecv<=arecv+1;
          end

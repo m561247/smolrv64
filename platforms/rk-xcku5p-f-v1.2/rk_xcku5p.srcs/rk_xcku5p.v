@@ -221,12 +221,12 @@ module rk_xcku5p(
    // AXI4 wires between smolrv64 and the DDR4 IP (64-bit data, 31-bit byte addr,
    // 3-bit ID, 8-byte beats, single-beat bursts).
    // arbiter->MIG AW/W skid nets (slice instance sits by the R slice below)
-   wire [2:0]  mig_awid;   wire [30:0] mig_awaddr; wire [7:0] mig_awlen; wire [2:0] mig_awsize;
+   wire [2:0]  mig_awid;   wire [31:0] mig_awaddr; wire [7:0] mig_awlen; wire [2:0] mig_awsize;
    wire [1:0]  mig_awburst; wire mig_awlock; wire [3:0] mig_awcache; wire [2:0] mig_awprot;
    wire [3:0]  mig_awqos;  wire mig_awvalid; wire mig_awready;
    wire [63:0] mig_wdata;  wire [7:0] mig_wstrb; wire mig_wlast; wire mig_wvalid; wire mig_wready;
    wire [ 2:0] m_axi_awid;
-   wire [30:0] m_axi_awaddr;
+   wire [31:0] m_axi_awaddr;
    wire [ 7:0] m_axi_awlen;
    wire [ 2:0] m_axi_awsize;
    wire [ 1:0] m_axi_awburst;
@@ -246,7 +246,7 @@ module rk_xcku5p(
    wire        m_axi_bvalid;
    wire        m_axi_bready;
    wire [ 2:0] m_axi_arid;
-   wire [30:0] m_axi_araddr;
+   wire [31:0] m_axi_araddr;
    wire [ 7:0] m_axi_arlen;
    wire [ 2:0] m_axi_arsize;
    wire [ 1:0] m_axi_arburst;
@@ -264,7 +264,7 @@ module rk_xcku5p(
    wire        m_axi_rready;
 
    wire [ 2:0] core_axi_awid;
-   wire [30:0] core_axi_awaddr;
+   wire [31:0] core_axi_awaddr;
    wire [ 7:0] core_axi_awlen;
    wire [ 2:0] core_axi_awsize;
    wire [ 1:0] core_axi_awburst;
@@ -284,7 +284,7 @@ module rk_xcku5p(
    wire        core_axi_bvalid;
    wire        core_axi_bready;
    wire [ 2:0] core_axi_arid;
-   wire [30:0] core_axi_araddr;
+   wire [31:0] core_axi_araddr;
    wire [ 7:0] core_axi_arlen;
    wire [ 2:0] core_axi_arsize;
    wire [ 1:0] core_axi_arburst;
@@ -480,7 +480,7 @@ module rk_xcku5p(
    wire [31:0] virtio_net_debug_last_ring_word_lo;
    wire [31:0] virtio_net_debug_last_ring_word_hi;
    wire [ 2:0] virtio_net_axi_awid;
-   wire [30:0] virtio_net_axi_awaddr;
+   wire [31:0] virtio_net_axi_awaddr;
    wire [ 7:0] virtio_net_axi_awlen;
    wire [ 2:0] virtio_net_axi_awsize;
    wire [ 1:0] virtio_net_axi_awburst;
@@ -500,7 +500,7 @@ module rk_xcku5p(
    wire        virtio_net_axi_bvalid;
    wire        virtio_net_axi_bready;
    wire [ 2:0] virtio_net_axi_arid;
-   wire [30:0] virtio_net_axi_araddr;
+   wire [31:0] virtio_net_axi_araddr;
    wire [ 7:0] virtio_net_axi_arlen;
    wire [ 2:0] virtio_net_axi_arsize;
    wire [ 1:0] virtio_net_axi_arburst;
@@ -523,7 +523,7 @@ module rk_xcku5p(
    // virtio-blk backend DMA master + the device-side arbiter output that merges
    // net + blk into one master before the existing core-vs-device arbiter.
    wire [ 2:0] virtio_blk_axi_awid;
-   wire [30:0] virtio_blk_axi_awaddr;
+   wire [31:0] virtio_blk_axi_awaddr;
    wire [ 7:0] virtio_blk_axi_awlen;
    wire [ 2:0] virtio_blk_axi_awsize;
    wire [ 1:0] virtio_blk_axi_awburst;
@@ -543,7 +543,7 @@ module rk_xcku5p(
    wire        virtio_blk_axi_bvalid;
    wire        virtio_blk_axi_bready;
    wire [ 2:0] virtio_blk_axi_arid;
-   wire [30:0] virtio_blk_axi_araddr;
+   wire [31:0] virtio_blk_axi_araddr;
    wire [ 7:0] virtio_blk_axi_arlen;
    wire [ 2:0] virtio_blk_axi_arsize;
    wire [ 1:0] virtio_blk_axi_arburst;
@@ -561,7 +561,7 @@ module rk_xcku5p(
    wire        virtio_blk_axi_rready;
 
    wire [ 2:0] devab_axi_awid;
-   wire [30:0] devab_axi_awaddr;
+   wire [31:0] devab_axi_awaddr;
    wire [ 7:0] devab_axi_awlen;
    wire [ 2:0] devab_axi_awsize;
    wire [ 1:0] devab_axi_awburst;
@@ -581,7 +581,7 @@ module rk_xcku5p(
    wire        devab_axi_bvalid;
    wire        devab_axi_bready;
    wire [ 2:0] devab_axi_arid;
-   wire [30:0] devab_axi_araddr;
+   wire [31:0] devab_axi_araddr;
    wire [ 7:0] devab_axi_arlen;
    wire [ 2:0] devab_axi_arsize;
    wire [ 1:0] devab_axi_arburst;
@@ -599,7 +599,7 @@ module rk_xcku5p(
    wire        devab_axi_rready;
 
    wire [ 2:0] vga_axi_awid;
-   wire [30:0] vga_axi_awaddr;
+   wire [31:0] vga_axi_awaddr;
    wire [ 7:0] vga_axi_awlen;
    wire [ 2:0] vga_axi_awsize;
    wire [ 1:0] vga_axi_awburst;
@@ -619,7 +619,7 @@ module rk_xcku5p(
    wire        vga_axi_bvalid;
    wire        vga_axi_bready;
    wire [ 2:0] vga_axi_arid;
-   wire [30:0] vga_axi_araddr;
+   wire [31:0] vga_axi_araddr;
    wire [ 7:0] vga_axi_arlen;
    wire [ 2:0] vga_axi_arsize;
    wire [ 1:0] vga_axi_arburst;
@@ -637,7 +637,7 @@ module rk_xcku5p(
    wire        vga_axi_rready;
 
    wire [ 2:0] kbd_axi_awid;
-   wire [30:0] kbd_axi_awaddr;
+   wire [31:0] kbd_axi_awaddr;
    wire [ 7:0] kbd_axi_awlen;
    wire [ 2:0] kbd_axi_awsize;
    wire [ 1:0] kbd_axi_awburst;
@@ -657,7 +657,7 @@ module rk_xcku5p(
    wire        kbd_axi_bvalid;
    wire        kbd_axi_bready;
    wire [ 2:0] kbd_axi_arid;
-   wire [30:0] kbd_axi_araddr;
+   wire [31:0] kbd_axi_araddr;
    wire [ 7:0] kbd_axi_arlen;
    wire [ 2:0] kbd_axi_arsize;
    wire [ 1:0] kbd_axi_arburst;
@@ -675,7 +675,7 @@ module rk_xcku5p(
    wire        kbd_axi_rready;
 
    wire [ 2:0] periph_axi_awid;
-   wire [30:0] periph_axi_awaddr;
+   wire [31:0] periph_axi_awaddr;
    wire [ 7:0] periph_axi_awlen;
    wire [ 2:0] periph_axi_awsize;
    wire [ 1:0] periph_axi_awburst;
@@ -695,7 +695,7 @@ module rk_xcku5p(
    wire        periph_axi_bvalid;
    wire        periph_axi_bready;
    wire [ 2:0] periph_axi_arid;
-   wire [30:0] periph_axi_araddr;
+   wire [31:0] periph_axi_araddr;
    wire [ 7:0] periph_axi_arlen;
    wire [ 2:0] periph_axi_arsize;
    wire [ 1:0] periph_axi_arburst;
@@ -713,7 +713,7 @@ module rk_xcku5p(
    wire        periph_axi_rready;
 
    wire [ 2:0] device_axi_awid;
-   wire [30:0] device_axi_awaddr;
+   wire [31:0] device_axi_awaddr;
    wire [ 7:0] device_axi_awlen;
    wire [ 2:0] device_axi_awsize;
    wire [ 1:0] device_axi_awburst;
@@ -733,7 +733,7 @@ module rk_xcku5p(
    wire        device_axi_bvalid;
    wire        device_axi_bready;
    wire [ 2:0] device_axi_arid;
-   wire [30:0] device_axi_araddr;
+   wire [31:0] device_axi_araddr;
    wire [ 7:0] device_axi_arlen;
    wire [ 2:0] device_axi_arsize;
    wire [ 1:0] device_axi_arburst;
@@ -1385,7 +1385,7 @@ module rk_xcku5p(
    assign virtio_net_irq      = 1'b0;
    always @(*) virtio_net_debug_word = 32'd0;
    assign eth_txc = 1'b0;  assign eth_txd = 4'd0;  assign eth_tx_ctl = 1'b0;
-   assign virtio_net_axi_awid    = 3'd0;   assign virtio_net_axi_awaddr  = 31'd0;
+   assign virtio_net_axi_awid    = 3'd0;   assign virtio_net_axi_awaddr  = 32'd0;
    assign virtio_net_axi_awlen   = 8'd0;   assign virtio_net_axi_awsize  = 3'd0;
    assign virtio_net_axi_awburst = 2'd0;   assign virtio_net_axi_awlock  = 1'b0;
    assign virtio_net_axi_awcache = 4'd0;   assign virtio_net_axi_awprot  = 3'd0;
@@ -1393,7 +1393,7 @@ module rk_xcku5p(
    assign virtio_net_axi_wdata   = 64'd0;  assign virtio_net_axi_wstrb   = 8'd0;
    assign virtio_net_axi_wlast   = 1'b0;   assign virtio_net_axi_wvalid  = 1'b0;
    assign virtio_net_axi_bready  = 1'b1;
-   assign virtio_net_axi_arid    = 3'd0;   assign virtio_net_axi_araddr  = 31'd0;
+   assign virtio_net_axi_arid    = 3'd0;   assign virtio_net_axi_araddr  = 32'd0;
    assign virtio_net_axi_arlen   = 8'd0;   assign virtio_net_axi_arsize  = 3'd0;
    assign virtio_net_axi_arburst = 2'd0;   assign virtio_net_axi_arlock  = 1'b0;
    assign virtio_net_axi_arcache = 4'd0;   assign virtio_net_axi_arprot  = 3'd0;
@@ -1476,7 +1476,7 @@ module rk_xcku5p(
       .pix_clk(vga_pix_clk), .pix_rst(vga_pix_rst_s[1]),
       .vga_hs(vga_hs), .vga_vs(vga_vs), .vga_r(vga_r), .vga_g(vga_g), .vga_b(vga_b));
    // The scanout only reads: its write channel is idle.
-   assign vga_axi_awid = 3'd0;    assign vga_axi_awaddr = 31'd0;  assign vga_axi_awlen = 8'd0;
+   assign vga_axi_awid = 3'd0;    assign vga_axi_awaddr = 32'd0;  assign vga_axi_awlen = 8'd0;
    assign vga_axi_awsize = 3'd0;  assign vga_axi_awburst = 2'd0;  assign vga_axi_awlock = 1'b0;
    assign vga_axi_awcache = 4'd0; assign vga_axi_awprot = 3'd0;   assign vga_axi_awqos = 4'd0;
    assign vga_axi_awvalid = 1'b0; assign vga_axi_wdata = 64'd0;   assign vga_axi_wstrb = 8'd0;
@@ -2009,7 +2009,7 @@ module rk_xcku5p(
    // Register slice on the core-side read response: arbiter s0 R (_arb) -> core_axi_r*.
    // AW/W skid into the MIG: breaks the arbiter->upsizer setup cones (-0.57ns class),
    // same recipe as the R slice below. AR passes through (read-address cone was clean).
-   axi_aww_reg_slice #(.IDW(3), .AW(31), .DW(64)) mig_aww_slice (
+   axi_aww_reg_slice #(.IDW(3), .AW(32), .DW(64)) mig_aww_slice (
       .clock(ui_clk), .reset(ui_cpu_reset),
       .s_awid(m_axi_awid), .s_awaddr(m_axi_awaddr), .s_awlen(m_axi_awlen), .s_awsize(m_axi_awsize),
       .s_awburst(m_axi_awburst), .s_awlock(m_axi_awlock), .s_awcache(m_axi_awcache),

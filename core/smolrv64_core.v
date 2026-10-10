@@ -330,12 +330,13 @@ module smolrv64_core
    // THE PHYSICAL-ADDRESS CAP. DRAM starts at 0x8000_0000 and is 2^DRAM_LG2 bytes; a PA at or
    // above its top does not exist and takes an access fault in both MMUs (src/mmu.v), so no
    // access to it reaches a cache or the bus. DRAM_LG2 is the instance's configuration: the
-   // board's 2 GiB (its DTS memory node, checked by src/lint.sh), or the cosim's modeled DDR,
+   // board's 4 GiB window (src/dram_window.vh; a DTS memory node lies inside it, checked by
+   // src/lint.sh, and describes 2 GiB on a board with 8 Gb parts), or the cosim's modeled DDR,
    // which Simmerv faults beyond in the same way. PABITS bounds every instance.
 `ifdef COSIM_MEM_SIZE_LG2
    localparam integer DRAM_LG2 = `COSIM_MEM_SIZE_LG2;
 `else
-   localparam integer DRAM_LG2 = 31;
+   localparam integer DRAM_LG2 = 32;
 `endif
    localparam [63:0] DRAM_TOP = 64'h8000_0000 + (64'd1 << DRAM_LG2);
    initial if (DRAM_TOP > (64'd1 << PABITS))

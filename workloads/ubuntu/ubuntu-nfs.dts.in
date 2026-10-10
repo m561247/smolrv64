@@ -176,7 +176,7 @@
 
 	memory@80000000 {
 		device_type = "memory";
-		reg = <0 0x80000000 0 0x80000000>; // 2 GiB, the framebuffer included
+		@MEMORY@
 	};
 
 	/* simplefb and fbcon draw here; identical to simmerv's node (src/fdt.rs embed_framebuffer).

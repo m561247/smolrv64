@@ -20,8 +20,8 @@ module tb;
 
    // ---- MMIO-side configuration (what virtio_mmio would present) ----
    reg         notify = 0; reg [31:0] notify_q = 0;
-   reg [63:0]  txd = 64'h1000, txa = 64'h2000, txu = 64'h3000;   // TX desc / avail (driver) / used (device)
-   reg [63:0]  rxd = 64'h4000, rxa = 64'h5000, rxu = 64'h6000;
+   reg [63:0]  txd = 64'h1_0000_1000, txa = 64'h1_0000_2000, txu = 64'h1_0000_3000;   // TX desc / avail (driver) / used (device)
+   reg [63:0]  rxd = 64'h1_0000_4000, rxa = 64'h1_0000_5000, rxu = 64'h1_0000_6000;
    reg         qready = 0; reg [7:0] status = 0;
    wire        irq;
    // ---- engines ----
@@ -34,7 +34,7 @@ module tb;
    reg  [7:0]  txbuf [0:2047];
    always @(posedge clk) if (tx_wr_en) txbuf[tx_wr_addr] <= tx_wr_data;
    // ---- AXI ----
-   wire [2:0] awid, arid; wire [30:0] awaddr, araddr; wire [7:0] awlen, arlen; wire [2:0] awsize, arsize;
+   wire [2:0] awid, arid; wire [31:0] awaddr, araddr; wire [7:0] awlen, arlen; wire [2:0] awsize, arsize;
    wire [1:0] awburst, arburst; wire awlock, arlock; wire [3:0] awcache, arcache, awqos, arqos; wire [2:0] awprot, arprot;
    wire awvalid, wvalid, bready, arvalid, rready, wlast; wire [63:0] wdata; wire [7:0] wstrb;
    reg  awready = 0, wready = 0, bvalid = 0, arready = 0, rvalid = 0; reg [63:0] rdata = 0;
@@ -69,7 +69,7 @@ module tb;
    function [63:0] merge(input [63:0] old, input [63:0] d, input [7:0] s);
       integer b; begin merge = old; for (b = 0; b < 8; b = b + 1) if (s[b]) merge[b*8 +: 8] = d[b*8 +: 8]; end
    endfunction
-   reg [30:0] wa; reg [63:0] wd; reg [7:0] ws; reg aw_got = 0, w_got = 0; integer wcnt = 0, rcnt = 0;
+   reg [31:0] wa; reg [63:0] wd; reg [7:0] ws; reg aw_got = 0, w_got = 0; integer wcnt = 0, rcnt = 0;
    reg jit = 0;
    `TB_RAND(vrnd, vrs)
    function integer jitter(input integer base); begin jitter = jit ? base + ($urandom % 9) : base; end endfunction
@@ -85,17 +85,20 @@ module tb;
          bvalid <= 1'b1; aw_got <= 1'b0; w_got <= 1'b0; wcnt <= 0;
       end
       if (arvalid && rcnt == 0 && !arready && (!jit || ($urandom % 3) != 0)) begin arready <= 1'b1; rcnt <= jitter(RLAT); rdata <= mem[araddr[20:3]]; end
+      // the bench's DRAM is 2 MiB at physical 0x1_0000_0000, AXI 0x8000_0000 (src/dram_window.vh)
+      if ((awvalid && awaddr[31:21] != 11'h400) || (arvalid && araddr[31:21] != 11'h400))
+         $fatal(1, "DMA outside the bench's DRAM: AXI aw %h ar %h", awaddr, araddr);
       if (rcnt > 1) rcnt <= rcnt - 1;
       else if (rcnt == 1) begin rvalid <= 1'b1; rcnt <= 0; n_rd <= n_rd + 1; end
    end
    // byte access helpers for the tb
-   task put8(input [30:0] a, input [7:0] v);  begin mem[a[20:3]][a[2:0]*8 +: 8] = v; end endtask
-   function [7:0] get8(input [30:0] a);       begin get8 = mem[a[20:3]][a[2:0]*8 +: 8]; end endfunction
-   task put16(input [30:0] a, input [15:0] v); begin put8(a, v[7:0]); put8(a+1, v[15:8]); end endtask
-   task put32(input [30:0] a, input [31:0] v); begin put16(a, v[15:0]); put16(a+2, v[31:16]); end endtask
-   task put64(input [30:0] a, input [63:0] v); begin put32(a, v[31:0]); put32(a+4, v[63:32]); end endtask
-   function [15:0] get16(input [30:0] a); begin get16 = {get8(a+1), get8(a)}; end endfunction
-   function [31:0] get32(input [30:0] a); begin get32 = {get16(a+2), get16(a)}; end endfunction
+   task put8(input [31:0] a, input [7:0] v);  begin mem[a[20:3]][a[2:0]*8 +: 8] = v; end endtask
+   function [7:0] get8(input [31:0] a);       begin get8 = mem[a[20:3]][a[2:0]*8 +: 8]; end endfunction
+   task put16(input [31:0] a, input [15:0] v); begin put8(a, v[7:0]); put8(a+1, v[15:8]); end endtask
+   task put32(input [31:0] a, input [31:0] v); begin put16(a, v[15:0]); put16(a+2, v[31:16]); end endtask
+   task put64(input [31:0] a, input [63:0] v); begin put32(a, v[31:0]); put32(a+4, v[63:32]); end endtask
+   function [15:0] get16(input [31:0] a); begin get16 = {get8(a+1), get8(a)}; end endfunction
+   function [31:0] get32(input [31:0] a); begin get32 = {get16(a+2), get16(a)}; end endfunction
    function [7:0] pat(input integer i); begin pat = i[7:0] ^ {i[11:8], 4'h5}; end endfunction
 
    integer errors = 0, i, t0, tx_cyc, rx_cyc, cyc = 0;
@@ -107,7 +110,7 @@ module tb;
    task step; begin @(posedge clk); #1; end endtask
    task chk(input cond, input [511:0] what); begin if (!cond) begin $display("FAIL %0s", what); errors = errors + 1; end end endtask
 
-   reg [30:0] buf_tx, buf_rx; integer off, n, flen, tx_first, rx_first;
+   reg [31:0] buf_tx, buf_rx; integer off, n, flen, tx_first, rx_first;
    // TX frames of every alignment and a few lengths (the first word's byte offset and the
    // last word's lane both vary), each its own descriptor and avail slot; RX buffers at
    // every byte offset, so the gathered word's head and tail strobes are all exercised.
@@ -116,20 +119,20 @@ module tb;
    initial begin
       repeat (4) step; reset = 0; repeat (2) step;
       qready = 1; status = 8'h04; step;
-      put16(txa[30:0], 16'd0); put16(txa[30:0] + 2, 16'd0); put16(txu[30:0], 16'd0); put16(txu[30:0] + 2, 16'd0);
-      put16(rxa[30:0], 16'd0); put16(rxa[30:0] + 2, 16'd0); put16(rxu[30:0], 16'd0); put16(rxu[30:0] + 2, 16'd0);
+      put16(txa[31:0], 16'd0); put16(txa[31:0] + 2, 16'd0); put16(txu[31:0], 16'd0); put16(txu[31:0] + 2, 16'd0);
+      put16(rxa[31:0], 16'd0); put16(rxa[31:0] + 2, 16'd0); put16(rxu[31:0], 16'd0); put16(rxu[31:0] + 2, 16'd0);
       tx_first = 0; rx_first = 0;
       // ================= TX =================
       for (n = 0; n < 8; n = n + 1) begin
          flen = tx_len[n]; off = n;                                        // desc payload at offset n
-         buf_tx = 31'h10000 + n * 31'h1000 + off;
+         buf_tx = 32'h0001_0000 + n * 32'h1000 + off;
          for (i = 0; i < 12; i = i + 1) put8(buf_tx + i, 8'h00);           // virtio_net_hdr_v1
          for (i = 0; i < flen; i = i + 1) put8(buf_tx + 12 + i, pat(i + n));
-         put64(txd[30:0] + n*16,      {33'd0, buf_tx});                   // desc[n]
-         put32(txd[30:0] + n*16 + 8,  32'd12 + flen);
-         put16(txd[30:0] + n*16 + 12, 16'd0); put16(txd[30:0] + n*16 + 14, 16'd0);
-         put16(txa[30:0] + 4 + n*2, n[15:0]);                              // avail.ring[n] = desc n
-         put16(txa[30:0] + 2, n[15:0] + 16'd1);                            // avail.idx
+         put64(txd[31:0] + n*16,      {32'd1, buf_tx});                   // desc[n]
+         put32(txd[31:0] + n*16 + 8,  32'd12 + flen);
+         put16(txd[31:0] + n*16 + 12, 16'd0); put16(txd[31:0] + n*16 + 14, 16'd0);
+         put16(txa[31:0] + 4 + n*2, n[15:0]);                              // avail.ring[n] = desc n
+         put16(txa[31:0] + 2, n[15:0] + 16'd1);                            // avail.idx
          for (i = 0; i < 2048; i = i + 1) txbuf[i] = 8'hEE;
          sent = 0; t0 = cyc; notify = 1; notify_q = 1; step; notify = 0;
          i = 0; while (!sent && i < 400000) begin step; i = i + 1; end
@@ -139,19 +142,19 @@ module tb;
          for (i = 0; i < flen; i = i + 1) if (txbuf[i] !== pat(i + n)) begin errors = errors + 1; if (errors < 6) $display("FAIL TX case %0d byte %0d: %h want %h", n, i, txbuf[i], pat(i + n)); end
          chk(txbuf[flen] == 8'hEE, "TX: wrote past the frame");
          tx_busy = 1; repeat (20) step; tx_busy = 0;
-         i = 0; while (get16(txu[30:0] + 2) != n[15:0] + 16'd1 && i < 4000) begin step; i = i + 1; end
-         chk(get16(txu[30:0] + 2) == n[15:0] + 16'd1, "TX: used.idx");
-         chk(get32(txu[30:0] + 4 + n*8) == n, "TX: used.ring[n].id");
+         i = 0; while (get16(txu[31:0] + 2) != n[15:0] + 16'd1 && i < 4000) begin step; i = i + 1; end
+         chk(get16(txu[31:0] + 2) == n[15:0] + 16'd1, "TX: used.idx");
+         chk(get32(txu[31:0] + 4 + n*8) == n, "TX: used.ring[n].id");
          repeat (4) step;
       end
       // ================= RX =================
       for (n = 0; n < 8; n = n + 1) begin
          flen = rx_len[n]; off = n;
-         buf_rx = 31'h20000 + n * 31'h1000 + off;
+         buf_rx = 32'h0002_0000 + n * 32'h1000 + off;
          for (i = -8; i < 12 + flen + 8; i = i + 1) put8(buf_rx + i, 8'hA5);   // sentinel around and inside
-         put64(rxd[30:0] + n*16, {33'd0, buf_rx}); put32(rxd[30:0] + n*16 + 8, 32'd2048);
-         put16(rxd[30:0] + n*16 + 12, 16'd2); put16(rxd[30:0] + n*16 + 14, 16'd0);   // VIRTQ_DESC_F_WRITE
-         put16(rxa[30:0] + 4 + n*2, n[15:0]); put16(rxa[30:0] + 2, n[15:0] + 16'd1);
+         put64(rxd[31:0] + n*16, {32'd1, buf_rx}); put32(rxd[31:0] + n*16 + 8, 32'd2048);
+         put16(rxd[31:0] + n*16 + 12, 16'd2); put16(rxd[31:0] + n*16 + 14, 16'd0);   // VIRTQ_DESC_F_WRITE
+         put16(rxa[31:0] + 4 + n*2, n[15:0]); put16(rxa[31:0] + 2, n[15:0] + 16'd1);
          for (i = 0; i < flen; i = i + 1) rxbuf[i] = pat(i + 77 + n);
          rx_frame_len = flen; t0 = cyc; rx_frame_valid = 1;
          i = 0; while (!rx_frame_ack && i < 400000) begin step; i = i + 1; end
@@ -164,10 +167,10 @@ module tb;
             chk(get8(buf_rx - i) == 8'hA5, "RX: wrote below the buffer");
             chk(get8(buf_rx + 12 + flen + i - 1) == 8'hA5, "RX: wrote past the frame");
          end
-         i = 0; while (get16(rxu[30:0] + 2) != n[15:0] + 16'd1 && i < 4000) begin step; i = i + 1; end
-         chk(get16(rxu[30:0] + 2) == n[15:0] + 16'd1, "RX: used.idx");
-         chk(get32(rxu[30:0] + 4 + n*8) == n, "RX: used.ring[n].id");
-         chk(get32(rxu[30:0] + 8 + n*8) == 32'd12 + flen, "RX: used.ring[n].len");
+         i = 0; while (get16(rxu[31:0] + 2) != n[15:0] + 16'd1 && i < 4000) begin step; i = i + 1; end
+         chk(get16(rxu[31:0] + 2) == n[15:0] + 16'd1, "RX: used.idx");
+         chk(get32(rxu[31:0] + 4 + n*8) == n, "RX: used.ring[n].id");
+         chk(get32(rxu[31:0] + 8 + n*8) == 32'd12 + flen, "RX: used.ring[n].len");
          repeat (4) step;
       end
       // ================= STRESS: 200 frames, random direction, length and alignment, with
@@ -175,7 +178,7 @@ module tb;
       // not at all (the drop path), TX batches of up to 3 descriptors per notify. ==========
       begin : stress
          integer q, tn, rn, nb, b, dir, want_drop;
-         reg [30:0] ba;
+         reg [31:0] ba;
          vrs = `TB_SEED(7); tn = 8; rn = 8;                                 // avail/used indices continue from the directed cases
          for (q = 0; q < 200; q = q + 1) begin
             dir = vrnd(0) % 2;
@@ -185,15 +188,15 @@ module tb;
                for (b = 0; b < nb; b = b + 1) begin
                   flen = 14 + (vrnd(0) % 1501);
                   off  = vrnd(0) % 8;
-                  ba = 31'h40000 + ((tn + b) % 64) * 31'h1000 + off;
+                  ba = 32'h0004_0000 + ((tn + b) % 64) * 32'h1000 + off;
                   for (i = 0; i < 12; i = i + 1) put8(ba + i, 8'h00);
                   for (i = 0; i < flen; i = i + 1) put8(ba + 12 + i, pat(i + tn + b));
-                  put64(txd[30:0] + ((tn + b) % QS)*16, {33'd0, ba}); put32(txd[30:0] + ((tn + b) % QS)*16 + 8, 32'd12 + flen);
-                  put16(txd[30:0] + ((tn + b) % QS)*16 + 12, 16'd0); put16(txd[30:0] + ((tn + b) % QS)*16 + 14, 16'd0);
-                  put16(txa[30:0] + 4 + ((tn + b) % QS)*2, ((tn + b) % QS));
+                  put64(txd[31:0] + ((tn + b) % QS)*16, {32'd1, ba}); put32(txd[31:0] + ((tn + b) % QS)*16 + 8, 32'd12 + flen);
+                  put16(txd[31:0] + ((tn + b) % QS)*16 + 12, 16'd0); put16(txd[31:0] + ((tn + b) % QS)*16 + 14, 16'd0);
+                  put16(txa[31:0] + 4 + ((tn + b) % QS)*2, ((tn + b) % QS));
                   stress_len[b] = flen; stress_key[b] = tn + b;
                end
-               put16(txa[30:0] + 2, (tn + nb));
+               put16(txa[31:0] + 2, (tn + nb));
                notify = 1; notify_q = 1; step; notify = 0;
                for (b = 0; b < nb; b = b + 1) begin
                   for (i = 0; i < 2048; i = i + 1) txbuf[i] = 8'hEE;
@@ -204,19 +207,19 @@ module tb;
                   chk(txbuf[stress_len[b]] == 8'hEE, "STRESS TX: wrote past the frame");
                   tx_busy = 1; repeat (3 + (vrnd(0) % 40)) step; tx_busy = 0;
                end
-               i = 0; while (get16(txu[30:0] + 2) != ((tn + nb) & 16'hFFFF) && i < 8000) begin step; i = i + 1; end
-               chk(get16(txu[30:0] + 2) == ((tn + nb) & 16'hFFFF), "STRESS TX: used.idx");
+               i = 0; while (get16(txu[31:0] + 2) != ((tn + nb) & 16'hFFFF) && i < 8000) begin step; i = i + 1; end
+               chk(get16(txu[31:0] + 2) == ((tn + nb) & 16'hFFFF), "STRESS TX: used.idx");
                tn = tn + nb;
             end else begin                                            // ---- RX, one frame; sometimes no buffer
                flen = 14 + (vrnd(0) % 1501);
                off  = vrnd(0) % 8;
                want_drop = (vrnd(0) % 8) == 0;
-               ba = 31'h80000 + (rn % 64) * 31'h1000 + off;
+               ba = 32'h0008_0000 + (rn % 64) * 32'h1000 + off;
                for (i = -8; i < 12 + flen + 8; i = i + 1) put8(ba + i, 8'hA5);
                if (!want_drop) begin
-                  put64(rxd[30:0] + (rn % QS)*16, {33'd0, ba}); put32(rxd[30:0] + (rn % QS)*16 + 8, 32'd2048);
-                  put16(rxd[30:0] + (rn % QS)*16 + 12, 16'd2); put16(rxd[30:0] + (rn % QS)*16 + 14, 16'd0);
-                  put16(rxa[30:0] + 4 + (rn % QS)*2, (rn % QS)); put16(rxa[30:0] + 2, (rn + 1));
+                  put64(rxd[31:0] + (rn % QS)*16, {32'd1, ba}); put32(rxd[31:0] + (rn % QS)*16 + 8, 32'd2048);
+                  put16(rxd[31:0] + (rn % QS)*16 + 12, 16'd2); put16(rxd[31:0] + (rn % QS)*16 + 14, 16'd0);
+                  put16(rxa[31:0] + 4 + (rn % QS)*2, (rn % QS)); put16(rxa[31:0] + 2, (rn + 1));
                end
                for (i = 0; i < flen; i = i + 1) rxbuf[i] = pat(i + 3 * rn + 5);
                rx_frame_len = flen; rx_frame_valid = 1;
@@ -225,14 +228,14 @@ module tb;
                rx_frame_valid = 0; step;
                if (want_drop) begin
                   for (i = -8; i < 12 + flen + 8; i = i + 1) chk(get8(ba + i) == 8'hA5, "STRESS RX: a dropped frame wrote memory");
-                  chk(get16(rxu[30:0] + 2) == (rn & 16'hFFFF), "STRESS RX: used.idx moved on a drop");
+                  chk(get16(rxu[31:0] + 2) == (rn & 16'hFFFF), "STRESS RX: used.idx moved on a drop");
                end else begin
                   for (i = 0; i < 12; i = i + 1) if (get8(ba + i) !== (i == 10 ? 8'h01 : 8'h00)) begin errors = errors + 1; if (errors < 8) $display("FAIL STRESS RX frame %0d hdr byte %0d: %h", rn, i, get8(ba + i)); end
                   for (i = 0; i < flen; i = i + 1) if (get8(ba + 12 + i) !== pat(i + 3 * rn + 5)) begin errors = errors + 1; if (errors < 8) $display("FAIL STRESS RX frame %0d byte %0d: %h want %h", rn, i, get8(ba + 12 + i), pat(i + 3 * rn + 5)); end
                   for (i = 1; i <= 8; i = i + 1) begin chk(get8(ba - i) == 8'hA5, "STRESS RX: wrote below"); chk(get8(ba + 12 + flen + i - 1) == 8'hA5, "STRESS RX: wrote past"); end
-                  i = 0; while (get16(rxu[30:0] + 2) != ((rn + 1) & 16'hFFFF) && i < 8000) begin step; i = i + 1; end
-                  chk(get16(rxu[30:0] + 2) == ((rn + 1) & 16'hFFFF), "STRESS RX: used.idx");
-                  chk(get32(rxu[30:0] + 8 + (rn % QS)*8) == 32'd12 + flen, "STRESS RX: used len");
+                  i = 0; while (get16(rxu[31:0] + 2) != ((rn + 1) & 16'hFFFF) && i < 8000) begin step; i = i + 1; end
+                  chk(get16(rxu[31:0] + 2) == ((rn + 1) & 16'hFFFF), "STRESS RX: used.idx");
+                  chk(get32(rxu[31:0] + 8 + (rn % QS)*8) == 32'd12 + flen, "STRESS RX: used len");
                   rn = rn + 1;
                end
             end
@@ -242,34 +245,34 @@ module tb;
       // ================= NOTIFICATION SUPPRESSION: the flag the driver toggles while a frame
       // is in flight must be the one the device acts on -- read after used.idx, not before.
       begin : suppression
-         reg [30:0] ba; integer rn2;
-         rn2 = get16(rxu[30:0] + 2);                                     // the next RX slot
+         reg [31:0] ba; integer rn2;
+         rn2 = get16(rxu[31:0] + 2);                                     // the next RX slot
          // (a) NO_INTERRUPT set when the frame arrives, cleared while it is being written: interrupt expected
-         ba = 31'h90000;
-         put64(rxd[30:0] + (rn2 % QS)*16, {33'd0, ba}); put32(rxd[30:0] + (rn2 % QS)*16 + 8, 32'd2048);
-         put16(rxd[30:0] + (rn2 % QS)*16 + 12, 16'd2); put16(rxd[30:0] + (rn2 % QS)*16 + 14, 16'd0);
-         put16(rxa[30:0] + 4 + (rn2 % QS)*2, (rn2 % QS)); put16(rxa[30:0] + 2, (rn2 + 1));
-         put16(rxa[30:0], 16'd1);                                        // NO_INTERRUPT
+         ba = 32'h0009_0000;
+         put64(rxd[31:0] + (rn2 % QS)*16, {32'd1, ba}); put32(rxd[31:0] + (rn2 % QS)*16 + 8, 32'd2048);
+         put16(rxd[31:0] + (rn2 % QS)*16 + 12, 16'd2); put16(rxd[31:0] + (rn2 % QS)*16 + 14, 16'd0);
+         put16(rxa[31:0] + 4 + (rn2 % QS)*2, (rn2 % QS)); put16(rxa[31:0] + 2, (rn2 + 1));
+         put16(rxa[31:0], 16'd1);                                        // NO_INTERRUPT
          for (i = 0; i < 1500; i = i + 1) rxbuf[i] = pat(i);
          irq_seen = 0; rx_frame_len = 1500; rx_frame_valid = 1;
          repeat (400) step;                                              // the device has read the flags and is streaming
-         put16(rxa[30:0], 16'd0);                                        // the driver re-arms
+         put16(rxa[31:0], 16'd0);                                        // the driver re-arms
          i = 0; while (!rx_frame_ack && i < 400000) begin step; i = i + 1; end
          rx_frame_valid = 0; repeat (4) step;
          chk(irq_seen, "SUPPRESSION: the driver re-armed during delivery and got no interrupt (flag sampled too early)");
          // (b) enabled when the frame arrives, NO_INTERRUPT set while it is written: no interrupt
          rn2 = rn2 + 1;
-         put64(rxd[30:0] + (rn2 % QS)*16, {33'd0, ba}); put32(rxd[30:0] + (rn2 % QS)*16 + 8, 32'd2048);
-         put16(rxd[30:0] + (rn2 % QS)*16 + 12, 16'd2); put16(rxd[30:0] + (rn2 % QS)*16 + 14, 16'd0);
-         put16(rxa[30:0] + 4 + (rn2 % QS)*2, (rn2 % QS)); put16(rxa[30:0] + 2, (rn2 + 1));
-         put16(rxa[30:0], 16'd0);
+         put64(rxd[31:0] + (rn2 % QS)*16, {32'd1, ba}); put32(rxd[31:0] + (rn2 % QS)*16 + 8, 32'd2048);
+         put16(rxd[31:0] + (rn2 % QS)*16 + 12, 16'd2); put16(rxd[31:0] + (rn2 % QS)*16 + 14, 16'd0);
+         put16(rxa[31:0] + 4 + (rn2 % QS)*2, (rn2 % QS)); put16(rxa[31:0] + 2, (rn2 + 1));
+         put16(rxa[31:0], 16'd0);
          irq_seen = 0; rx_frame_valid = 1;
          repeat (400) step;
-         put16(rxa[30:0], 16'd1);                                        // the driver suppresses
+         put16(rxa[31:0], 16'd1);                                        // the driver suppresses
          i = 0; while (!rx_frame_ack && i < 400000) begin step; i = i + 1; end
          rx_frame_valid = 0; repeat (4) step;
          chk(!irq_seen, "SUPPRESSION: interrupt raised although the driver suppressed it during delivery");
-         put16(rxa[30:0], 16'd0);
+         put16(rxa[31:0], 16'd0);
       end
       $display("VNET-TB tx=%0d rx=%0d cycles per %0d-byte frame (8 TX + 8 RX cases, every alignment; RLAT=%0d WLAT=%0d)",
                tx_cyc, rx_cyc, FLEN, RLAT, WLAT);

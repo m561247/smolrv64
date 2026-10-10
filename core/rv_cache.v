@@ -28,8 +28,8 @@ module rv_cache #(
                                // name for a read, returned with its response.
    parameter PAW      = 34,
    // THE TAG COVERS THE SIGNIFICANT PHYSICAL ADDRESS BITS, NOT THE PORT WIDTH. The SoC's
-   // ports are 64 wide (a PA rides in a 64-bit bus), but the platform decodes 34 bits: 2 GiB
-   // of DDR at 0x8000_0000 and every device below it. Tagging all 64 made the tag 49 bits
+   // ports are 64 wide (a PA rides in a 64-bit bus), but the platform decodes 34 bits: up to
+   // 4 GiB of DDR at 0x8000_0000 and every device below it. Tagging all 64 made the tag 49 bits
    // wide -- 30 of them structurally zero -- so the compare was 49 bits, the tag array
    // 1K x 49 (RAM64M8 x 224 per read port) and its index fanned out to every one of them.
    // A PA at or above 2^PAW_SIG cannot be tagged and is asserted never to arrive; the

@@ -57,7 +57,7 @@ module tb;
 
    // AXI: c_* the port's master, d_* the DMA master, s_* the arbiter's output to the slave
    wire [2:0] c_awid, c_arid, c_bid, c_rid, d_bid, d_rid, s_awid, s_arid;
-   wire [30:0] c_awaddr, c_araddr, s_awaddr, s_araddr;
+   wire [31:0] c_awaddr, c_araddr, s_awaddr, s_araddr;
    wire [7:0] c_awlen, c_arlen, s_awlen, s_arlen, c_wstrb, s_wstrb;
    wire [2:0] c_awsize, c_arsize, s_awsize, s_arsize, c_awprot, c_arprot, s_awprot, s_arprot;
    wire [1:0] c_awburst, c_arburst, s_awburst, s_arburst, c_bresp, c_rresp, d_bresp, d_rresp;
@@ -70,7 +70,7 @@ module tb;
    wire d_awready, d_wready, d_bvalid, d_arready, d_rlast, d_rvalid;
    reg  s_awready, s_wready, s_bvalid, s_arready, s_rlast, s_rvalid;
    reg  [2:0] s_bid, s_rid;  reg [63:0] s_rdata;
-   reg  d_awvalid, d_wvalid, d_wlast, d_arvalid;  reg [30:0] d_awaddr, d_araddr;  reg [63:0] d_wdata;
+   reg  d_awvalid, d_wvalid, d_wlast, d_arvalid;  reg [31:0] d_awaddr, d_araddr;  reg [63:0] d_wdata;
    ddr_port_axi bridge
      (.clk(clk_m), .reset(reset_m),
       .q_valid(mq_valid), .q_ready(mq_ready), .q_id(mq_id), .q_we(mq_we), .q_addr(mq_addr),
@@ -133,9 +133,9 @@ module tb;
    // reads: a queue of accepted ARs, each with a ready time; in order, or with +ooo any whose
    // ID differs from every older one's
    localparam integer SQ = 16;
-   reg        rq_v [0:SQ-1];  reg [2:0] rq_id [0:SQ-1];  reg [30:0] rq_a [0:SQ-1];
+   reg        rq_v [0:SQ-1];  reg [2:0] rq_id [0:SQ-1];  reg [31:0] rq_a [0:SQ-1];
    reg [31:0] rq_t [0:SQ-1];  reg [31:0] rq_seq [0:SQ-1];
-   reg        wq_v [0:SQ-1];  reg [2:0] wq_id [0:SQ-1];  reg [30:0] wq_a [0:SQ-1];
+   reg        wq_v [0:SQ-1];  reg [2:0] wq_id [0:SQ-1];  reg [31:0] wq_a [0:SQ-1];
    reg [31:0] wq_t [0:SQ-1];  reg [31:0] wq_seq [0:SQ-1];  reg wq_dat [0:SQ-1];
    reg [31:0] now = 0, sseq = 0;
    integer    rk = -1, rbeat = 0, wk_data = -1, wbeat = 0;
@@ -236,13 +236,13 @@ module tb;
    // reads at 0x100000.., writes at 0x108000..: disjoint from each other and from the core's lines
    integer dma_r = 0, dma_w = 0, d_wb = 0;
    reg d_rbusy = 0, d_wbusy = 0;
-   reg [30:0] d_ra;
+   reg [31:0] d_ra;
    initial begin d_arvalid = 0; d_awvalid = 0; d_wvalid = 0; d_wlast = 0; end
    reg [5:0] d_rbeat = 0;
    always @(posedge clk_m) if (!reset_m) begin
       if (d_arvalid && d_arready) d_arvalid <= 0;
       if (!d_rbusy && !d_arvalid && rnd[20:18] == 3'd0) begin
-         d_ra = 31'h100000 + {rnd[28:23], 6'd0};  d_araddr <= d_ra;  d_arvalid <= 1;  d_rbusy <= 1;  d_rbeat <= 0;
+         d_ra = 32'h100000 + {rnd[28:23], 6'd0};  d_araddr <= d_ra;  d_arvalid <= 1;  d_rbusy <= 1;  d_rbeat <= 0;
       end
       if (d_rvalid) begin
          if (d_rid != 3'd1) begin $display("FAIL: DMA read data with ID %0d", d_rid); $finish; end
@@ -263,7 +263,7 @@ module tb;
          d_wbusy <= 0; dma_w = dma_w + 1;
       end
       if (!d_wbusy && rnd[23:21] == 3'd0) begin
-         d_awaddr <= 31'h100000 + 31'h8000 + {rnd[30:25], 6'd0};  d_awvalid <= 1;  d_wvalid <= 1;
+         d_awaddr <= 32'h100000 + 32'h8000 + {rnd[30:25], 6'd0};  d_awvalid <= 1;  d_wvalid <= 1;
          d_wdata <= {rnd, rnd};  d_wlast <= 0;  d_wb = 0;  d_wbusy <= 1;
       end
    end

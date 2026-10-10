@@ -65,7 +65,7 @@ module virtio_net #(
     output wire [31:0] debug_rx_nobuf_count,
 
     output wire [ 2:0] m_axi_awid,
-    output wire [30:0] m_axi_awaddr,
+    output wire [31:0] m_axi_awaddr,
     output wire [ 7:0] m_axi_awlen,
     output wire [ 2:0] m_axi_awsize,
     output wire [ 1:0] m_axi_awburst,
@@ -85,7 +85,7 @@ module virtio_net #(
     input  wire        m_axi_bvalid,
     output wire        m_axi_bready,
     output wire [ 2:0] m_axi_arid,
-    output wire [30:0] m_axi_araddr,
+    output wire [31:0] m_axi_araddr,
     output wire [ 7:0] m_axi_arlen,
     output wire [ 2:0] m_axi_arsize,
     output wire [ 1:0] m_axi_arburst,
@@ -207,10 +207,9 @@ module virtio_net #(
    assign debug_rx_deliver_count = rx_deliver_count;
    assign debug_rx_nobuf_count   = rx_nobuf_count;
 
+`include "dram_window.vh"
    wire rx_queue_configured = rx_queue_ready && rx_queue_num != 32'd0 &&
-                              rx_queue_desc[63:32] == 32'd0 &&
-                              rx_queue_driver[63:32] == 32'd0 &&
-                              rx_queue_device[63:32] == 32'd0;
+                              dram_ok(rx_queue_desc) && dram_ok(rx_queue_driver) && dram_ok(rx_queue_device);
    wire [15:0] rx_avail_slot = rx_last_avail_idx & ring_mask;
    wire [15:0] rx_used_slot  = rx_used_idx & ring_mask;
    wire [15:0] rx_next_avail_idx = rx_last_avail_idx + 16'd1;
@@ -246,7 +245,7 @@ module virtio_net #(
    reg        dma_cmd_valid;
    wire       dma_cmd_ready;
    reg        dma_cmd_write;
-   reg [30:0] dma_cmd_addr;
+   reg [31:0] dma_cmd_addr;
    reg [63:0] dma_cmd_wdata;
    reg [ 7:0] dma_cmd_wstrb;
    wire       dma_rsp_valid;
@@ -283,9 +282,7 @@ module virtio_net #(
 
    wire driver_ok = device_status[2];
    wire tx_queue_configured = tx_queue_ready && tx_queue_num != 32'd0 &&
-                              tx_queue_desc[63:32] == 32'd0 &&
-                              tx_queue_driver[63:32] == 32'd0 &&
-                              tx_queue_device[63:32] == 32'd0;
+                              dram_ok(tx_queue_desc) && dram_ok(tx_queue_driver) && dram_ok(tx_queue_device);
    wire tx_notify = queue_notify_pulse && queue_notify_value == 32'd1;
    wire [15:0] next_avail_idx = last_avail_idx + 16'd1;
 
@@ -296,34 +293,28 @@ module virtio_net #(
    wire [15:0] avail_slot = last_avail_idx & ring_mask;
    wire [15:0] used_slot  = used_idx & ring_mask;
 
-   /* Registered queue-base copies + a precomputed range check. The bases arrive
-    * from virtio_mmio's registers over a long route, and a DMA address used to be
-    * base + ring offset through a 64b carry chain AND a 33b magnitude compare in
-    * the dma_cmd_addr cycle -- the chronic -0.003ns setup endpoint
-    * (queue1_device_q -> dma_cmd_addr). Bases only change during queue setup
-    * (before queue_ready; MMIO writes are many cycles apart through the CDC
-    * bridge), so 1-cycle-stale copies are safe. The check matches the tasks'
-    * addr[63:31] <= 1 clamp exactly, except it also requires the base below the
-    * top 4 KiB of the 2 GiB window so no ring offset (< 4 KiB) can carry out of
-    * bit 30 -- a ring up there couldn't fit anyway. Descriptor-sourced buffer
-    * addresses (desc_addr/rx_waddr, locally registered from DMA data) keep the
-    * inline clamp in the 64b tasks. */
-   reg  [30:0] txq_drv_b, txq_desc_b, txq_dev_b, rxq_drv_b, rxq_desc_b, rxq_dev_b;
+   /* Registered queue bases, as AXI addresses, and their window checks. The bases arrive from
+    * virtio_mmio's registers over a long route; registering them, and checking the window here,
+    * leaves the dma_cmd_addr cycle a 32-bit add and nothing else. Bases change only during queue
+    * setup (before queue_ready; MMIO writes are many cycles apart through the CDC bridge), so the
+    * one-cycle-stale copies are safe. A ring lies inside DRAM, so base + offset never carries
+    * out of the AXI address. Descriptor-sourced buffer addresses (desc_addr/rx_waddr, registered
+    * from DMA data) go through the 64-bit tasks. */
+   reg  [31:0] txq_drv_b, txq_desc_b, txq_dev_b, rxq_drv_b, rxq_desc_b, rxq_dev_b;
    reg         txq_drv_ok, txq_desc_ok, txq_dev_ok, rxq_drv_ok, rxq_desc_ok, rxq_dev_ok;
-   localparam [30:0] BASE_MAX = 31'h7FFF_F000;   // 2 GiB - 4 KiB
    always @(posedge clock) begin
-      txq_drv_b   <= tx_queue_driver[30:0];
-      txq_desc_b  <= tx_queue_desc[30:0];
-      txq_dev_b   <= tx_queue_device[30:0];
-      rxq_drv_b   <= rx_queue_driver[30:0];
-      rxq_desc_b  <= rx_queue_desc[30:0];
-      rxq_dev_b   <= rx_queue_device[30:0];
-      txq_drv_ok  <= (tx_queue_driver[63:32] == 32'd0) && (tx_queue_driver[30:0] <= BASE_MAX);
-      txq_desc_ok <= (tx_queue_desc[63:32]   == 32'd0) && (tx_queue_desc[30:0]   <= BASE_MAX);
-      txq_dev_ok  <= (tx_queue_device[63:32] == 32'd0) && (tx_queue_device[30:0] <= BASE_MAX);
-      rxq_drv_ok  <= (rx_queue_driver[63:32] == 32'd0) && (rx_queue_driver[30:0] <= BASE_MAX);
-      rxq_desc_ok <= (rx_queue_desc[63:32]   == 32'd0) && (rx_queue_desc[30:0]   <= BASE_MAX);
-      rxq_dev_ok  <= (rx_queue_device[63:32] == 32'd0) && (rx_queue_device[30:0] <= BASE_MAX);
+      txq_drv_b   <= dram_axi(tx_queue_driver);
+      txq_desc_b  <= dram_axi(tx_queue_desc);
+      txq_dev_b   <= dram_axi(tx_queue_device);
+      rxq_drv_b   <= dram_axi(rx_queue_driver);
+      rxq_desc_b  <= dram_axi(rx_queue_desc);
+      rxq_dev_b   <= dram_axi(rx_queue_device);
+      txq_drv_ok  <= dram_ok(tx_queue_driver);
+      txq_desc_ok <= dram_ok(tx_queue_desc);
+      txq_dev_ok  <= dram_ok(tx_queue_device);
+      rxq_drv_ok  <= dram_ok(rx_queue_driver);
+      rxq_desc_ok <= dram_ok(rx_queue_desc);
+      rxq_dev_ok  <= dram_ok(rx_queue_device);
    end
 
    assign debug_status = {device_status, 14'd0, rx_frame_valid, notify_pending,
@@ -347,36 +338,38 @@ module virtio_net #(
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b0;
-         dma_cmd_addr <= addr[63:31] <= 33'd1 ? addr[30:0] : 31'd0;
+         if (!dram_ok(addr)) $fatal(1, "virtio_net: DMA address %h is outside DRAM", addr);
+         dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= 64'd0;
          dma_cmd_wstrb <= 8'd0;
       end
    endtask
 
-   // pre-checked-base variants: the range clamp was resolved at base-register
-   // time (see *_ok above), so dma_cmd_addr sees only a 31-bit add + a 2:1 mux
-   // on a registered select -- no 64b carry chain, no magnitude compare.
-   task start_read31;
+   // Ring accesses: the base's window check is a register (see *_ok above), so dma_cmd_addr
+   // sees only the 32-bit add.
+   task start_read32;
       input        ok;
-      input [30:0] a31;
+      input [31:0] a;
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b0;
-         dma_cmd_addr <= ok ? a31 : 31'd0;
+         if (!ok) $fatal(1, "virtio_net: a ring base is outside DRAM (AXI %h)", a);
+         dma_cmd_addr <= a;
          dma_cmd_wdata <= 64'd0;
          dma_cmd_wstrb <= 8'd0;
       end
    endtask
 
-   task start_write31;
+   task start_write32;
       input        ok;
-      input [30:0] a31;
+      input [31:0] a;
       input [63:0] data;
       input [7:0]  strobe;
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b1;
-         dma_cmd_addr <= ok ? a31 : 31'd0;
+         if (!ok) $fatal(1, "virtio_net: a ring base is outside DRAM (AXI %h)", a);
+         dma_cmd_addr <= a;
          dma_cmd_wdata <= data;
          dma_cmd_wstrb <= strobe;
       end
@@ -389,7 +382,8 @@ module virtio_net #(
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b1;
-         dma_cmd_addr <= addr[63:31] <= 33'd1 ? addr[30:0] : 31'd0;
+         if (!dram_ok(addr)) $fatal(1, "virtio_net: DMA address %h is outside DRAM", addr);
+         dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= data;
          dma_cmd_wstrb <= strobe;
       end
@@ -467,7 +461,7 @@ module virtio_net #(
 
            S_READ_AVAIL: begin
               if (dma_cmd_ready) begin
-                 start_read31(txq_drv_ok, txq_drv_b);
+                 start_read32(txq_drv_ok, txq_drv_b);
                  state <= S_WAIT_AVAIL;
               end
            end
@@ -505,7 +499,7 @@ module virtio_net #(
 
            S_READ_RING: begin
               if (dma_cmd_ready) begin
-                 start_read31(txq_drv_ok, txq_drv_b + 31'd4 + {14'd0, avail_slot, 1'b0});
+                 start_read32(txq_drv_ok, txq_drv_b + 32'd4 + {14'd0, avail_slot, 1'b0});
                  state <= S_WAIT_RING;
               end
            end
@@ -533,7 +527,7 @@ module virtio_net #(
            // (hdr 8..11 in the low 4), and later words are 8 frame bytes each.
            S_DESC_A: begin
               if (dma_cmd_ready) begin
-                 start_read31(txq_desc_ok, txq_desc_b + {11'd0, head_desc, 4'd0});
+                 start_read32(txq_desc_ok, txq_desc_b + {11'd0, head_desc, 4'd0});
                  state <= S_WAIT_DESC_A;
               end
            end
@@ -546,7 +540,7 @@ module virtio_net #(
            end
            S_DESC_B: begin
               if (dma_cmd_ready) begin
-                 start_read31(txq_desc_ok, txq_desc_b + {11'd0, head_desc, 4'd0} + 31'd8);
+                 start_read32(txq_desc_ok, txq_desc_b + {11'd0, head_desc, 4'd0} + 32'd8);
                  state <= S_WAIT_DESC_B;
               end
            end
@@ -636,7 +630,7 @@ module virtio_net #(
 
            S_WRITE_USED_ID: begin
               if (dma_cmd_ready) begin
-                 start_write31(txq_dev_ok, txq_dev_b + 31'd4 + {12'd0, used_slot, 3'd0},
+                 start_write32(txq_dev_ok, txq_dev_b + 32'd4 + {12'd0, used_slot, 3'd0},
                              write_shift({48'd0, head_desc}, (tx_queue_device[2:0] + 3'd4) & 3'h7),
                              write_strobe((tx_queue_device[2:0] + 3'd4) & 3'h7, 4'd4));
                  state <= S_WAIT_USED_ID;
@@ -652,7 +646,7 @@ module virtio_net #(
 
            S_WRITE_USED_LEN: begin
               if (dma_cmd_ready) begin
-                 start_write31(txq_dev_ok, txq_dev_b + 31'd8 + {12'd0, used_slot, 3'd0},
+                 start_write32(txq_dev_ok, txq_dev_b + 32'd8 + {12'd0, used_slot, 3'd0},
                              write_shift(64'd0, tx_queue_device[2:0]),
                              write_strobe(tx_queue_device[2:0], 4'd4));
                  state <= S_WAIT_USED_LEN;
@@ -668,7 +662,7 @@ module virtio_net #(
 
            S_WRITE_USED_IDX: begin
               if (dma_cmd_ready) begin
-                 start_write31(txq_dev_ok, txq_dev_b,
+                 start_write32(txq_dev_ok, txq_dev_b,
                              write_shift({32'd0, used_idx + 16'd1, 16'd0}, tx_queue_device[2:0]),
                              write_strobe(tx_queue_device[2:0], 4'd4));
                  state <= S_WAIT_USED_IDX;
@@ -689,7 +683,7 @@ module virtio_net #(
            // few minutes on the board (2026-09-05), rarer when a frame took 30 k cycles.
            S_TX_FLAGS: begin
               if (dma_cmd_ready) begin
-                 start_read31(txq_drv_ok, txq_drv_b);
+                 start_read32(txq_drv_ok, txq_drv_b);
                  state <= S_TX_FLAGS_WAIT;
               end
            end
@@ -720,7 +714,7 @@ module virtio_net #(
            // ---- RX delivery (queue 0): take a buffer, DMA hdr+frame in -----
            S_RX_AVAIL: begin
               if (dma_cmd_ready) begin
-                 start_read31(rxq_drv_ok, rxq_drv_b);          // avail flags+idx
+                 start_read32(rxq_drv_ok, rxq_drv_b);          // avail flags+idx
                  state <= S_RX_WAIT_AVAIL;
               end
            end
@@ -738,7 +732,7 @@ module virtio_net #(
            end
            S_RX_RING: begin
               if (dma_cmd_ready) begin
-                 start_read31(rxq_drv_ok, rxq_drv_b + 31'd4 + {14'd0, rx_avail_slot, 1'b0});
+                 start_read32(rxq_drv_ok, rxq_drv_b + 32'd4 + {14'd0, rx_avail_slot, 1'b0});
                  state <= S_RX_WAIT_RING;
               end
            end
@@ -753,7 +747,7 @@ module virtio_net #(
            end
            S_RX_DESC: begin
               if (dma_cmd_ready) begin
-                 start_read31(rxq_desc_ok, rxq_desc_b + {11'd0, rx_head_desc, 4'd0});
+                 start_read32(rxq_desc_ok, rxq_desc_b + {11'd0, rx_head_desc, 4'd0});
                  state <= S_RX_WAIT_DESC;
               end
            end
@@ -799,7 +793,7 @@ module virtio_net #(
            end
            S_RX_USED_ID: begin
               if (dma_cmd_ready) begin
-                 start_write31(rxq_dev_ok, rxq_dev_b + 31'd4 + {12'd0, rx_used_slot, 3'd0},
+                 start_write32(rxq_dev_ok, rxq_dev_b + 32'd4 + {12'd0, rx_used_slot, 3'd0},
                              write_shift({48'd0, rx_head_desc}, (rx_queue_device[2:0] + 3'd4) & 3'h7),
                              write_strobe((rx_queue_device[2:0] + 3'd4) & 3'h7, 4'd4));
                  state <= S_RX_WAIT_USED_ID;
@@ -813,7 +807,7 @@ module virtio_net #(
            end
            S_RX_USED_LEN: begin
               if (dma_cmd_ready) begin
-                 start_write31(rxq_dev_ok, rxq_dev_b + 31'd8 + {12'd0, rx_used_slot, 3'd0},
+                 start_write32(rxq_dev_ok, rxq_dev_b + 32'd8 + {12'd0, rx_used_slot, 3'd0},
                              write_shift({53'd0, rx_total}, rx_queue_device[2:0]),
                              write_strobe(rx_queue_device[2:0], 4'd4));
                  state <= S_RX_WAIT_USED_LEN;
@@ -827,7 +821,7 @@ module virtio_net #(
            end
            S_RX_USED_IDX: begin
               if (dma_cmd_ready) begin
-                 start_write31(rxq_dev_ok, rxq_dev_b,
+                 start_write32(rxq_dev_ok, rxq_dev_b,
                              write_shift({32'd0, rx_used_idx + 16'd1, 16'd0}, rx_queue_device[2:0]),
                              write_strobe(rx_queue_device[2:0], 4'd4));
                  state <= S_RX_WAIT_USED_IDX;
@@ -841,7 +835,7 @@ module virtio_net #(
            end
            S_RX_FLAGS: begin                            // see S_TX_FLAGS
               if (dma_cmd_ready) begin
-                 start_read31(rxq_drv_ok, rxq_drv_b);
+                 start_read32(rxq_drv_ok, rxq_drv_b);
                  state <= S_RX_FLAGS_WAIT;
               end
            end

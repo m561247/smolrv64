@@ -115,8 +115,8 @@ is read off the RTL or measured with the workload named):
 virtio-blk backed by an SD card over SPI, virtio-net over RGMII with an eight-slot receive
 ring and word-wide DMA, a virtio keyboard and mouse fed by USB devices through a Pico (see
 [Virtio devices](#virtio-devices)), a 256 KiB boot SRAM holding a ROM monitor that boots over TFTP or from the
-SD card or takes an XMODEM upload and has a memory-integrity command set, and one 512-bit line port into DDR4 with a hardware latency
-monitor on it. Ubuntu boots to `login:` over an NFS root; the board has run for days at a
+SD card or takes an XMODEM upload and has a memory-integrity command set, and one 512-bit line port into DDR4 (2 GiB, or 4 GiB on a board with 16 Gb
+parts) with a hardware latency monitor on it. Ubuntu boots to `login:` over an NFS root; the board has run for days at a
 time.
 
 **Verification that is part of the design.**

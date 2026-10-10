@@ -8,7 +8,7 @@ module axi_single_beat_master(
     input  wire        cmd_valid,
     output wire        cmd_ready,
     input  wire        cmd_write,
-    input  wire [30:0] cmd_addr,
+    input  wire [31:0] cmd_addr,
     input  wire [63:0] cmd_wdata,
     input  wire [ 7:0] cmd_wstrb,
     output reg         rsp_valid,
@@ -16,7 +16,7 @@ module axi_single_beat_master(
     output reg         rsp_error,
 
     output wire [ 2:0] m_axi_awid,
-    output wire [30:0] m_axi_awaddr,
+    output wire [31:0] m_axi_awaddr,
     output wire [ 7:0] m_axi_awlen,
     output wire [ 2:0] m_axi_awsize,
     output wire [ 1:0] m_axi_awburst,
@@ -36,7 +36,7 @@ module axi_single_beat_master(
     input  wire        m_axi_bvalid,
     output wire        m_axi_bready,
     output wire [ 2:0] m_axi_arid,
-    output wire [30:0] m_axi_araddr,
+    output wire [31:0] m_axi_araddr,
     output wire [ 7:0] m_axi_arlen,
     output wire [ 2:0] m_axi_arsize,
     output wire [ 1:0] m_axi_arburst,
@@ -58,7 +58,7 @@ module axi_single_beat_master(
    localparam [1:0] S_WRITE = 2'd2;
 
    reg [1:0]  state;
-   reg [30:0] addr_q;
+   reg [31:0] addr_q;
    reg [63:0] wdata_q;
    reg [ 7:0] wstrb_q;
    reg        ar_pending;
@@ -72,7 +72,7 @@ module axi_single_beat_master(
 
       if (reset) begin
          state <= S_IDLE;
-         addr_q <= 31'd0;
+         addr_q <= 32'd0;
          wdata_q <= 64'd0;
          wstrb_q <= 8'd0;
          ar_pending <= 1'b0;
@@ -85,7 +85,7 @@ module axi_single_beat_master(
          case (state)
            S_IDLE: begin
               if (cmd_valid) begin
-                 addr_q <= {cmd_addr[30:3], 3'b000};
+                 addr_q <= {cmd_addr[31:3], 3'b000};
                  wdata_q <= cmd_wdata;
                  wstrb_q <= cmd_wstrb;
                  rsp_error <= 1'b0;

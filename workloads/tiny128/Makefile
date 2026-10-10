@@ -30,6 +30,14 @@ tiny128-blk.img: gen-blk-img.py
 	./gen-blk-img.py $@
 tiny128-cosim-blk.dtb: tiny128-cosim-blk.dts
 	dtc -I dts -O dtb < $^ > $@
+# The same disk check with 4 GiB of DRAM, the board's whole window (src/dram_window.vh). Linux puts
+# the upper 2 GiB in ZONE_NORMAL and allocates from it first, so the page cache, and with it the
+# virtio-blk buffers, lie above 0x1_0000_0000: DMA through AXI address bit 31.
+cosim-blk-4g: tiny128-cosim-blk-4g.dtb $(FW) tiny128-blk.cpio tiny128-blk.img
+	DTB=$(CURDIR)/tiny128-cosim-blk-4g.dtb INITRD=$(CURDIR)/tiny128-blk.cpio DISK=$(CURDIR)/tiny128-blk.img \
+	  MEM_LG2=32 CYC=$${CYC:-1500000000} ../../core/run-cosim-linux.sh
+tiny128-cosim-blk-4g.dtb: tiny128-cosim-blk.dts
+	sed 's/reg = <0 0x80000000 0 0x1ff00000>;.*/reg = <0 0x80000000 1 0x00000000>; \/\/ 4 GiB/' $^ | dtc -I dts -O dtb > $@
 ref: tiny128.dtb $(FW) tiny128.cpio
 	(cd $(SIMMERV); cargo b -rq)
 	$(SIMMERV)/target/release/simmerv-cli -m 512 -d tiny128-simmerv.dtb,0x9ff00000 $(FW),0x80000000 tiny128.cpio,0x9f52c000

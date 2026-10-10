@@ -43,7 +43,7 @@ module vga_scanout (
     output reg  [31:0] mmio_rdata,
 
     output wire [ 2:0] m_axi_arid,
-    output wire [30:0] m_axi_araddr,
+    output wire [31:0] m_axi_araddr,
     output wire [ 7:0] m_axi_arlen,
     output wire [ 2:0] m_axi_arsize,
     output wire [ 1:0] m_axi_arburst,
@@ -249,7 +249,8 @@ module vga_scanout (
    end
 
    assign m_axi_arvalid = fs == F_AR;
-   assign m_axi_araddr  = f_addr[30:0];
+`include "dram_window.vh"
+   assign m_axi_araddr  = dram_axi({32'd0, f_addr});
    assign m_axi_arlen   = 8'd7;       // 8 beats = 64 bytes; never crosses 4 KiB (64-aligned)
    assign m_axi_arsize  = 3'b011;
    assign m_axi_arburst = 2'b01;
@@ -261,8 +262,8 @@ module vga_scanout (
    assign m_axi_rready  = fs == F_R;
 
    always @(posedge clk)
-      if (!reset && fs == F_AR && f_addr[31] == 1'b0)
-         $fatal(1, "vga_scanout: line address %h is below DRAM", f_addr);
+      if (!reset && fs == F_AR && !dram_ok({32'd0, f_addr}))
+         $fatal(1, "vga_scanout: line address %h is outside DRAM", f_addr);
 endmodule
 
 `default_nettype wire

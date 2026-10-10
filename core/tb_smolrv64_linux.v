@@ -294,12 +294,12 @@ module tb;
       .queue1_num(), .queue1_ready(), .queue1_desc(), .queue1_driver(), .queue1_device(),
       .device_status(v_dev_status));
 
-   wire [2:0]  ax_awid;   wire [30:0] ax_awaddr; wire [7:0] ax_awlen;  wire [2:0] ax_awsize;
+   wire [2:0]  ax_awid;   wire [31:0] ax_awaddr; wire [7:0] ax_awlen;  wire [2:0] ax_awsize;
    wire [1:0]  ax_awburst; wire ax_awlock; wire [3:0] ax_awcache; wire [2:0] ax_awprot;
    wire [3:0]  ax_awqos;  wire ax_awvalid;  wire ax_awready;
    wire [63:0] ax_wdata;  wire [7:0] ax_wstrb; wire ax_wlast; wire ax_wvalid; wire ax_wready;
    wire [2:0]  ax_bid;    wire [1:0] ax_bresp; wire ax_bvalid; wire ax_bready;
-   wire [2:0]  ax_arid;   wire [30:0] ax_araddr; wire [7:0] ax_arlen;  wire [2:0] ax_arsize;
+   wire [2:0]  ax_arid;   wire [31:0] ax_araddr; wire [7:0] ax_arlen;  wire [2:0] ax_arsize;
    wire [1:0]  ax_arburst; wire ax_arlock; wire [3:0] ax_arcache; wire [2:0] ax_arprot;
    wire [3:0]  ax_arqos;  wire ax_arvalid;  wire ax_arready;
    wire [2:0]  ax_rid;    wire [63:0] ax_rdata; wire [1:0] ax_rresp; wire ax_rlast; wire ax_rvalid; wire ax_rready;
@@ -326,7 +326,7 @@ module tb;
       .m_axi_rvalid(ax_rvalid), .m_axi_rready(ax_rready));
 
    // behavioral always-ready single-beat AXI slave into lram[] (non-coherent DMA);
-   // ax_*addr[30:0] is the DDR byte offset (guest_pa - BASE).
+   // ax_*addr is the DDR byte offset (src/dram_window.vh).
    reg axi_rvalid, axi_bvalid;  reg [63:0] axi_rdata;  integer ka;
    reg [63:0] ar_line, aw_line;  reg [9:0] ar_bp, aw_bp;  integer n_dma_rd = 0, n_dma_wr = 0;
    assign ax_arready = 1'b1; assign ax_awready = 1'b1; assign ax_wready = 1'b1;
@@ -350,7 +350,7 @@ module tb;
             aw_bp   = (ax_awaddr & 6'h3f) << 3;
             for (ka=0;ka<8;ka=ka+1) if (ax_wstrb[ka]) lram[aw_line][aw_bp + ka*8 +: 8] <= ax_wdata[ka*8 +: 8];
 `ifdef SMOLRV64_COSIM
-            cosim_dma_write({33'd0, ax_awaddr}, ax_wdata, ax_wstrb);   // mirror into simmerv
+            cosim_dma_write({32'd0, ax_awaddr}, ax_wdata, ax_wstrb);   // mirror into simmerv
 `endif
             axi_bvalid <= 1'b1;  n_dma_wr = n_dma_wr + 1;
          end else if (axi_bvalid && ax_bready) axi_bvalid <= 1'b0;

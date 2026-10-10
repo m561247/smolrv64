@@ -1463,7 +1463,7 @@ the time the device decides, and a suppressed interrupt then is a lost wakeup th
 only recovers from by a timeout -- NFS "server not responding" every few minutes on the
 board with bitstream O. `tb_virtio_net` toggles the flag mid-delivery both ways.
 | on-chip SRAM (boot/monitor) | `0x7000_0000` | 256 KiB |
-| DDR4 | `0x8000_0000` | platform |
+| DDR4 | `0x8000_0000` | 2 or 4 GiB (§13, DDR4) |
 
 UART is **3 Mbps, hardwired in RTL** — not derived from the DTS or the kernel printout.
 
@@ -1565,8 +1565,10 @@ bits (64 GiB; `rv_soc_top` passes it to the D$), and a write-back's address is r
 tag and the row.
 
 **The physical-address cap.** DRAM starts at `0x8000_0000` and is `2^DRAM_LG2` bytes, a
-configuration of the instance: 31 on the board (2 GiB; `src/lint.sh` checks the board DTS memory
-nodes against it with `tools/check-dts-memory.py`), the modeled DDR's size under cosim. A PA
+configuration of the instance: 32 on the board (4 GiB, the DMA masters' window,
+`src/dram_window.vh`; a board DTS describes 2 or 4 GiB of it, §13, and `src/lint.sh` checks its
+memory nodes against the cap with `tools/check-dts-memory.py`), the modeled DDR's size under
+cosim. A PA
 at or above `DRAM_TOP` = `0x8000_0000 + 2^DRAM_LG2` does not exist and takes an access fault
 (cause 1/5/7), so no access to it reaches a cache or the bus; every device lies below DRAM, and
 the SoC's decode owns that hole. `DRAM_TOP` may not exceed `2^PABITS`. Both MMUs enforce it
@@ -1863,6 +1865,7 @@ abort at that retire (the check's self-test; it does on retire 35, the boot's fi
 | | |
 |---|---|
 | `probe_clk` | 166.67 MHz (6.000 ns), `PROBE_CLK_DIV8=48`: a BUFGCE_DIV of the 333.33 MHz DDR4 `ui_clk` (an MMCM was tried and reverted, 2026-08-20; only integer multiples of 3.000 ns time) |
+| DDR4 | Two x16 parts, 32 bits at 2666 MT/s (`ui_clk` 333.33 MHz). One controller configuration serves 8 Gb parts (MT40A512M16LY-075, 2 GiB) and 16 Gb parts (MT40A1G16RC-062E, 4 GiB): the custom part `ddr4_part.csv` has 17 row bits, CL19/CWL14 at 750 ps, and each timing the worse of the two (tRFC 550 ns, tXPR 560 ns, tRCD/tRP 14.25 ns). The AXI address is 32 bits, PA − `0x8000_0000` (`src/dram_window.vh`); an 8 Gb part ignores row bit 16 (A16), so on a 2 GiB board the upper 2 GiB repeats the lower and its device tree describes 2 GiB (`ubuntu-nfs.dts`). A 16 Gb board boots either; `ubuntu-nfs-4g.dts` and `ubuntu-sd-4g.dts` describe 4 GiB. |
 | Timing | `probe_clk` WNS **+0.023 ns**, TNS 0.000, 0 failing endpoints on the default directive (the 2026-09-07 release build 384fd599: the two-wide stack with the six T1 cuts; +0.019 on W7, +0.056 on the counter split) |
 | Margin | 50 ps against a placement spread of 81-400 ps (rule I2): closed, **not robustly**. History, because each step was paid for: +0.029 at 10/12 dynamic issue; +0.124 at 8/8 (reverted -- it cost 4.1% geomean on GB5); +0.069 with FP four-in-flight, which *gained* 40 ps by deleting `fpu_inflight`/`fb_busy` from M; +0.028 with the FP scheduler and stage F, which cost 41 ps; +0.038 at `NF`=5; **+0.015 at `NF`=8** once the frontend's `apc` cone was cut (rule I6) -- the minimum-8 policy is affordable and was never the scheduler's fault. Area of the release build 384fd599: 83,093 LUTs (38.3% of the XCKU5P), 49,498 flip-flops, 122 of 480 block RAM tiles, 28 DSPs, no UltraRAM. |
 | Measured clock | 164.2 MHz by on-chip counter |

@@ -14,6 +14,11 @@ workloads/ubuntu/ubuntu-nfs-166.dts
 workloads/ubuntu/ubuntu-nfs-166.dtb
 workloads/ubuntu/ubuntu-nfs-polled.dts
 workloads/ubuntu/ubuntu-nfs-polled.dtb
+workloads/ubuntu/ubuntu-nfs-4g.dts
+workloads/ubuntu/ubuntu-nfs-4g.dtb
+workloads/ubuntu/ubuntu-sd-4g.dts
+workloads/ubuntu/ubuntu-sd-4g.dtb
+workloads/tiny128/tiny128-cosim-blk-4g.dtb
 
 # Serial console capture from `screen -L`. Grows without bound (17 MB when it was
 # committed by mistake) and is a byproduct of every single boot. It was deliberately

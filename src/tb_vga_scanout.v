@@ -14,7 +14,7 @@ module tb_vga_scanout;
 
    reg  [ 7:0] mmio_addr = 8'd0;  reg mmio_write = 1'b0;  reg [31:0] mmio_wdata = 32'd0;
    wire [31:0] mmio_rdata;
-   wire [ 2:0] arid, arsize, arprot;  wire [30:0] araddr;  wire [7:0] arlen;  wire [1:0] arburst;
+   wire [ 2:0] arid, arsize, arprot;  wire [31:0] araddr;  wire [7:0] arlen;  wire [1:0] arburst;
    wire        arlock, arvalid, rready;  wire [3:0] arcache, arqos;
    reg         arready = 1'b0, rvalid = 1'b0, rlast = 1'b0;  reg [63:0] rdata = 64'd0;
    wire        hs, vs;  wire [1:0] r, g, b;
@@ -60,7 +60,7 @@ module tb_vga_scanout;
       if (arvalid && arready) begin
          if (arlen != 8'd7 || arsize != 3'b011 || arburst != 2'b01 || araddr[5:0] != 6'd0 || arid != 3'd0)
             $fatal(1, "AR: len=%0d size=%0d burst=%0d addr=%h id=%0d", arlen, arsize, arburst, araddr, arid);
-         burst_addr <= {1'b1, araddr};  beats_left <= 8;
+         burst_addr <= araddr ^ 32'h8000_0000;  beats_left <= 8;
       end
       arready <= beats_left == 0 && !(arvalid && arready) && rnd(30);
       if (rvalid && rready) begin

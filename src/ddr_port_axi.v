@@ -10,11 +10,10 @@
 // not by anything the controller happens to do. A read may issue while an earlier write's
 // beats are still going out; writes are posted (the next one does not wait for a B).
 //
-// Line address: the port's addr is the physical line index PA[63:6]; the controller maps DDR at
-// BASE, so the AXI byte address is {addr[AXI_AW-7:0], 6'b0} (PA[30:0] for a 2 GiB window).
+// Line address: the port's addr is the physical line index PA[63:6]; the AXI byte address is the
+// line's place in the DRAM window (src/dram_window.vh).
 module ddr_port_axi #(
    parameter integer IDW    = 5,
-   parameter integer AXI_AW = 31,
    parameter integer NOUT   = 8                  // reads (and writes) in flight
 ) (
    input  wire                clk,
@@ -38,7 +37,7 @@ module ddr_port_axi #(
    output wire [IDW-1:0]      w_id,
    // -------- AXI4 master (to the MIG slave / arbiter) --------
    output wire [2:0]          m_axi_awid,
-   output reg  [AXI_AW-1:0]   m_axi_awaddr,
+   output reg  [31:0]         m_axi_awaddr,
    output wire [7:0]          m_axi_awlen,
    output wire [2:0]          m_axi_awsize,
    output wire [1:0]          m_axi_awburst,
@@ -58,7 +57,7 @@ module ddr_port_axi #(
    input  wire                m_axi_bvalid,
    output wire                m_axi_bready,
    output wire [2:0]          m_axi_arid,
-   output reg  [AXI_AW-1:0]   m_axi_araddr,
+   output reg  [31:0]         m_axi_araddr,
    output wire [7:0]          m_axi_arlen,
    output wire [2:0]          m_axi_arsize,
    output wire [1:0]          m_axi_arburst,
@@ -99,7 +98,10 @@ module ddr_port_axi #(
    wire rd_go = q_valid & ~q_we & ~m_axi_arvalid & ~rt_full;
    wire wr_go = q_valid &  q_we & ~m_axi_awvalid & (wn == 4'd0) & ~bt_full;
    assign q_ready = rd_go | wr_go;
-   wire [AXI_AW-1:0] line_byte = {q_addr[AXI_AW-7:0], 6'b0};
+`include "dram_window.vh"
+   wire [31:0] line_byte = dram_axi({q_addr, 6'b0});
+   always @(posedge clk) if (!reset && q_valid && q_ready && !dram_ok({q_addr, 6'b0}))
+      $fatal(1, "ddr_port_axi: line %h is outside DRAM", {q_addr, 6'b0});
 
    // ---- W beats: shifted out of the line, the byte mask as WSTRB ----
    assign m_axi_wvalid = (wn != 4'd0);

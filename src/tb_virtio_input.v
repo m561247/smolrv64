@@ -29,7 +29,7 @@ module tb_virtio_input;
    wire [31:0] rdata;  wire irq;
    reg         key_valid = 1'b0;  reg [7:0] key_byte = 8'd0;
    reg         hid_rxd = 1'b1;
-   wire [2:0]  awid, awsize, awprot, arid, arsize, arprot;  wire [30:0] awaddr, araddr;
+   wire [2:0]  awid, awsize, awprot, arid, arsize, arprot;  wire [31:0] awaddr, araddr;
    wire [7:0]  awlen, arlen, wstrb;  wire [1:0] awburst, arburst;  wire [3:0] awcache, awqos, arcache, arqos;
    wire        awlock, awvalid, wlast, wvalid, bready, arlock, arvalid, rready;  wire [63:0] wdata_ax;
    reg         awready = 1'b0, wready = 1'b0, bvalid = 1'b0, arready = 1'b0, rvalid = 1'b0;
@@ -50,20 +50,23 @@ module tb_virtio_input;
       .m_axi_rid(3'd0), .m_axi_rdata(rdata_ax), .m_axi_rresp(2'b00), .m_axi_rlast(1'b1),
       .m_axi_rvalid(rvalid), .m_axi_rready(rready));
 
-   // ---- DRAM: 64 KiB at physical 0x8010_0000 (AXI 0x0010_0000), random stalls ----
-   localparam [31:0] PBASE = 32'h8010_0000;
+   // ---- DRAM: 64 KiB at physical 0x1_0010_0000 (AXI 0x8010_0000), random stalls ----
+   // Above 4 GiB, so every DMA address carries AXI bit 31 (src/dram_window.vh). The bench's
+   // addresses are the low words; PA_HI is the high word of every one.
+   localparam [31:0] PA_HI = 32'd1;
+   localparam [31:0] PBASE = 32'h0010_0000;
    reg [63:0] mem [0:8191];
    reg [31:0] seed = 32'd7;
    function rnd(input integer pct);
       begin seed = seed * 1103515245 + 12345;  rnd = (seed[30:16] % 100) < pct; end
    endfunction
-   function [12:0] widx(input [30:0] a);
+   function [12:0] widx(input [31:0] a);
       begin
-         if (a[30:16] != 15'h0010) $fatal(1, "DMA outside the bench's DRAM: AXI %h", a);
+         if (a[31:16] != 16'h8010) $fatal(1, "DMA outside the bench's DRAM: AXI %h", a);
          widx = a[15:3];
       end
    endfunction
-   reg [30:0] aw_q;  reg aw_have = 1'b0, w_have = 1'b0;  reg [63:0] w_q;  reg [7:0] s_q;
+   reg [31:0] aw_q;  reg aw_have = 1'b0, w_have = 1'b0;  reg [63:0] w_q;  reg [7:0] s_q;
    always @(posedge clk) begin
       arready <= !arready && arvalid && !rvalid && rnd(50);
       if (arvalid && arready) begin rdata_ax <= mem[widx(araddr)];  rvalid <= 1'b1; end
@@ -136,9 +139,9 @@ module tb_virtio_input;
          mw(12'h030, sel, 4'hf);
          expect32(12'h034, 32'd64, "QueueNumMax");
          mw(12'h038, num, 4'hf);
-         mw(12'h080, d, 4'hf);  mw(12'h084, 32'd0, 4'hf);
-         mw(12'h090, a, 4'hf);  mw(12'h094, 32'd0, 4'hf);
-         mw(12'h0a0, u, 4'hf);  mw(12'h0a4, 32'd0, 4'hf);
+         mw(12'h080, d, 4'hf);  mw(12'h084, PA_HI, 4'hf);
+         mw(12'h090, a, 4'hf);  mw(12'h094, PA_HI, 4'hf);
+         mw(12'h0a0, u, 4'hf);  mw(12'h0a4, PA_HI, 4'hf);
          mw(12'h044, 32'd1, 4'hf);
       end
    endtask
@@ -247,7 +250,7 @@ module tb_virtio_input;
       cfg(8'h11, 8'h02, 8'd2, 128'h0103, "EV_REL bits");
       cfg(8'h12, 8'h00, 8'd0, 128'h0, "ABS_INFO");
       for (i = 0; i < NBUF; i = i + 1) begin                         // event buffers: 8 bytes, WRITE
-         wr64(Q0D + 16 * i, {32'd0, EBUF + 32'd8 * i});
+         wr64(Q0D + 16 * i, {PA_HI, EBUF + 32'd8 * i});
          wr64(Q0D + 16 * i + 8, {16'd0, 16'd2, 32'd8});
       end
       setup_queue(0, QN, Q0D, Q0A, Q0U);
@@ -328,7 +331,7 @@ module tb_virtio_input;
 
       // ---- statusq: an LED update is returned with len 0, and interrupts ----
       mw(12'h064, 32'h3, 4'hf);                                      // clear any pending
-      wr64(Q1D, {32'd0, LBUF});  wr64(Q1D + 8, {16'd0, 16'd0, 32'd8});
+      wr64(Q1D, {PA_HI, LBUF});  wr64(Q1D + 8, {16'd0, 16'd0, 32'd8});
       wr16(Q1A + 32'd4, 16'd0);  wr16(Q1A + 32'd2, 16'd1);
       mw(12'h050, 32'd1, 4'hf);
       repeat (500) @(negedge clk);

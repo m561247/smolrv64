@@ -50,7 +50,7 @@ module virtio_blk #(
     output wire [21:0] dbg,
 
     output wire [ 2:0] m_axi_awid,
-    output wire [30:0] m_axi_awaddr,
+    output wire [31:0] m_axi_awaddr,
     output wire [ 7:0] m_axi_awlen,
     output wire [ 2:0] m_axi_awsize,
     output wire [ 1:0] m_axi_awburst,
@@ -70,7 +70,7 @@ module virtio_blk #(
     input  wire        m_axi_bvalid,
     output wire        m_axi_bready,
     output wire [ 2:0] m_axi_arid,
-    output wire [30:0] m_axi_araddr,
+    output wire [31:0] m_axi_araddr,
     output wire [ 7:0] m_axi_arlen,
     output wire [ 2:0] m_axi_arsize,
     output wire [ 1:0] m_axi_arburst,
@@ -191,7 +191,7 @@ module virtio_blk #(
    reg        dma_cmd_valid;
    wire       dma_cmd_ready;
    reg        dma_cmd_write;
-   reg [30:0] dma_cmd_addr;
+   reg [31:0] dma_cmd_addr;
    reg [63:0] dma_cmd_wdata;
    reg [ 7:0] dma_cmd_wstrb;
    wire       dma_rsp_valid;
@@ -266,18 +266,18 @@ module virtio_blk #(
       end
    endfunction
 
+`include "dram_window.vh"
    wire driver_ok = device_status[2];
    wire queue_configured = queue_ready && queue_num != 32'd0 &&
-                           queue_desc[63:32] == 32'd0 &&
-                           queue_driver[63:32] == 32'd0 &&
-                           queue_device[63:32] == 32'd0;
+                           dram_ok(queue_desc) && dram_ok(queue_driver) && dram_ok(queue_device);
 
    task start_read64;
       input [63:0] addr;
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b0;
-         dma_cmd_addr <= addr[63:31] <= 33'd1 ? addr[30:0] : 31'd0;
+         if (!dram_ok(addr)) $fatal(1, "virtio_blk: DMA address %h is outside DRAM", addr);
+         dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= 64'd0;
          dma_cmd_wstrb <= 8'd0;
       end
@@ -290,7 +290,8 @@ module virtio_blk #(
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b1;
-         dma_cmd_addr <= addr[63:31] <= 33'd1 ? addr[30:0] : 31'd0;
+         if (!dram_ok(addr)) $fatal(1, "virtio_blk: DMA address %h is outside DRAM", addr);
+         dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= data;
          dma_cmd_wstrb <= strobe;
       end

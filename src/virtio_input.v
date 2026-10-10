@@ -54,7 +54,7 @@ module virtio_input #(
     input  wire        hid_rxd,        // the Pico's UART TX
 
     output wire [ 2:0] m_axi_awid,
-    output wire [30:0] m_axi_awaddr,
+    output wire [31:0] m_axi_awaddr,
     output wire [ 7:0] m_axi_awlen,
     output wire [ 2:0] m_axi_awsize,
     output wire [ 1:0] m_axi_awburst,
@@ -74,7 +74,7 @@ module virtio_input #(
     input  wire        m_axi_bvalid,
     output wire        m_axi_bready,
     output wire [ 2:0] m_axi_arid,
-    output wire [30:0] m_axi_araddr,
+    output wire [31:0] m_axi_araddr,
     output wire [ 7:0] m_axi_arlen,
     output wire [ 2:0] m_axi_arsize,
     output wire [ 1:0] m_axi_arburst,
@@ -394,7 +394,7 @@ module virtio_input #(
    wire        dma_cmd_ready, dma_rsp_valid, dma_rsp_error;
    wire [63:0] dma_rsp_rdata;
    reg         dma_cmd_valid, dma_cmd_write;
-   reg  [30:0] dma_cmd_addr;
+   reg  [31:0] dma_cmd_addr;
    reg  [63:0] dma_cmd_wdata;
    reg  [ 7:0] dma_cmd_wstrb;
    axi_single_beat_master dma_master (
@@ -417,8 +417,9 @@ module virtio_input #(
       .m_axi_rid(m_axi_rid), .m_axi_rdata(m_axi_rdata), .m_axi_rresp(m_axi_rresp),
       .m_axi_rlast(m_axi_rlast), .m_axi_rvalid(m_axi_rvalid), .m_axi_rready(m_axi_rready));
 
+`include "dram_window.vh"
    function q_ok(input ready, input [31:0] num, input [63:0] d, input [63:0] a, input [63:0] u);
-      q_ok = ready && num != 32'd0 && d[63:32] == 32'd0 && a[63:32] == 32'd0 && u[63:32] == 32'd0;
+      q_ok = ready && num != 32'd0 && dram_ok(d) && dram_ok(a) && dram_ok(u);
    endfunction
    wire q0_ok = driver_ok && q_ok(q0_ready, q0_num, q0_desc, q0_driver, q0_device);
    wire q1_ok = driver_ok && q_ok(q1_ready, q1_num, q1_desc, q1_driver, q1_device);
@@ -439,31 +440,27 @@ module virtio_input #(
    reg [15:0] head;
    reg        ev_from_hid;        // the event being written is the HID line's (else the terminal's)
    reg [63:0] buf_addr;
-   reg [30:0] buf_axi;
-   // The queue being served, latched as the engine picks it, in AXI address bits: q_ok has
-   // shown the upper halves zero, and every ring lives in DRAM, so the arithmetic is mod 2^31
-   // (what axi_a would have truncated to anyway). Muxing the two queues and adding in 64 bits on
-   // the way to dma_cmd_addr was 16 logic levels, a failing ui_clk path (2026-10-04).
-   reg  [30:0] q_desc, q_driver, q_device;
+   reg [31:0] buf_axi;
+   // The queue being served, latched as the engine picks it, as AXI addresses: q_ok has shown
+   // every ring inside DRAM, so the ring arithmetic is 32-bit and no 64-bit add or queue mux
+   // lies on the way to dma_cmd_addr.
+   reg  [31:0] q_desc, q_driver, q_device;
    reg  [15:0] q_mask;
    wire [15:0] last     = eq ? last1 : last0;
    wire [15:0] used     = eq ? used1 : used0;
-   wire [30:0] ring_a   = q_driver + 31'd4 + {14'd0, last & q_mask, 1'b0};
-   wire [30:0] used_a   = q_device + 31'd4 + {12'd0, used & q_mask, 3'd0};
-   wire [30:0] uidx_a   = q_device + 31'd2;
-   wire [30:0] desc_a   = q_desc + {11'd0, head & q_mask, 4'd0};
+   wire [31:0] ring_a   = q_driver + 32'd4 + {14'd0, last & q_mask, 1'b0};
+   wire [31:0] used_a   = q_device + 32'd4 + {12'd0, used & q_mask, 3'd0};
+   wire [31:0] uidx_a   = q_device + 32'd2;
+   wire [31:0] desc_a   = q_desc + {11'd0, head & q_mask, 4'd0};
    function [15:0] get16(input [63:0] d, input [2:0] off);
       get16 = d[{off, 3'd0} +: 16];
-   endfunction
-   function [30:0] axi_a(input [63:0] a);       // DRAM physical address -> AXI, as virtio_blk
-      axi_a = a[63:31] <= 33'd1 ? a[30:0] : 31'd0;
    endfunction
    task pick(input which);                       // serve queue `which` from the next state on
       begin
          eq       <= which;
-         q_desc   <= axi_a(which ? q1_desc   : q0_desc);
-         q_driver <= axi_a(which ? q1_driver : q0_driver);
-         q_device <= axi_a(which ? q1_device : q0_device);
+         q_desc   <= dram_axi(which ? q1_desc   : q0_desc);
+         q_driver <= dram_axi(which ? q1_driver : q0_driver);
+         q_device <= dram_axi(which ? q1_device : q0_device);
          q_mask   <= (which ? q1_num[15:0] : q0_num[15:0]) - 16'd1;
       end
    endtask
@@ -529,18 +526,18 @@ module virtio_input #(
                            issued <= 1'b1;
                         end
                      end else if (dma_rsp_valid) begin
-                        issued <= 1'b0;  buf_addr <= dma_rsp_rdata;  buf_axi <= axi_a(dma_rsp_rdata);  es <= E_DINFO;
+                        issued <= 1'b0;  buf_addr <= dma_rsp_rdata;  buf_axi <= dram_axi(dma_rsp_rdata);  es <= E_DINFO;
                      end
             E_DINFO: if (!issued) begin
                         if (dma_cmd_ready) begin
                            dma_cmd_valid <= 1'b1;  dma_cmd_write <= 1'b0;
-                           dma_cmd_addr <= desc_a + 31'd8;
+                           dma_cmd_addr <= desc_a + 32'd8;
                            issued <= 1'b1;
                         end
                      end else if (dma_rsp_valid) begin
                         // {next, flags, len}: a device-writable buffer of at least one event.
-                        if (dma_rsp_rdata[31:0] < 32'd8 || !dma_rsp_rdata[33] || buf_addr[2:0] != 3'd0)
-                           $fatal(1, "virtio_input: event buffer %h len %0d flags %h is not one aligned, writable event",
+                        if (dma_rsp_rdata[31:0] < 32'd8 || !dma_rsp_rdata[33] || buf_addr[2:0] != 3'd0 || !dram_ok(buf_addr))
+                           $fatal(1, "virtio_input: event buffer %h len %0d flags %h is not one aligned, writable event in DRAM",
                                   buf_addr, dma_rsp_rdata[31:0], dma_rsp_rdata[47:32]);
                         issued <= 1'b0;  es <= E_EVENT;
                      end
@@ -562,7 +559,7 @@ module virtio_input #(
                      end else if (dma_rsp_valid) begin issued <= 1'b0;  es <= E_USED_LEN; end
             E_USED_LEN: if (!issued) begin
                         if (dma_cmd_ready) begin
-                           dma_cmd_valid <= 1'b1;  dma_cmd_write <= 1'b1;  dma_cmd_addr <= used_a + 31'd4;
+                           dma_cmd_valid <= 1'b1;  dma_cmd_write <= 1'b1;  dma_cmd_addr <= used_a + 32'd4;
                            dma_cmd_wdata <= {2{eq ? 32'd0 : 32'd8}};  dma_cmd_wstrb <= 8'h0f << used_a[2:0] ^ 8'hff;
                            issued <= 1'b1;
                         end
