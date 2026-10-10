@@ -19,7 +19,14 @@ write_cfgmem -force -format mcs -size 64 -interface SPIx4 -loadbit "up 0x0 $bitf
 
 open_hw_manager
 connect_hw_server -allow_non_jtag
-open_hw_target
+# JTAG=<cable serial> picks the cable when several are attached (program.tcl says how).
+if {[info exists env(JTAG)] && $env(JTAG) ne ""} {
+    set tgt [get_hw_targets -quiet "*/$env(JTAG)"]
+    if {[llength $tgt] != 1} { error "JTAG=$env(JTAG) matches [llength $tgt] targets among: [get_hw_targets]" }
+    open_hw_target $tgt
+} else {
+    open_hw_target
+}
 set dev [lindex [get_hw_devices] 0]
 current_hw_device $dev
 refresh_hw_device -update_hw_probes false $dev

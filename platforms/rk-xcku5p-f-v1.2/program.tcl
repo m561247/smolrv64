@@ -15,7 +15,16 @@ puts "Programming with: $bitfile"
 
 open_hw_manager
 connect_hw_server -allow_non_jtag
-open_hw_target
+# JTAG=<cable serial> (the environment) picks the cable when several are attached; unset, the
+# only one. The cables must carry distinct serials (program_ftdi): hw_server shows cables that
+# share one as a single target.
+if {[info exists env(JTAG)] && $env(JTAG) ne ""} {
+    set tgt [get_hw_targets -quiet "*/$env(JTAG)"]
+    if {[llength $tgt] != 1} { error "JTAG=$env(JTAG) matches [llength $tgt] targets among: [get_hw_targets]" }
+    open_hw_target $tgt
+} else {
+    open_hw_target
+}
 
 set dev [lindex [get_hw_devices] 0]
 current_hw_device $dev

@@ -29,8 +29,15 @@ REPO=$(pwd); PLAT=$REPO/platforms/rk-xcku5p-f-v1.2; UB=$REPO/workloads/ubuntu
 # screenlog.0) lives in ONE checkout's workloads/ubuntu -- the main one, which `git worktree list`
 # prints first. A gate run from a worktree reads the console there (gate V4, 2026-09-05: "BOARD:
 # FAIL (upload)" with the bitstream already on the board) and still boots its own tree.
-CON=$UB/screenlog.0
+CON=${CON:-$UB/screenlog.0}
 [ -f "$CON" ] || CON=$(git -C "$REPO" worktree list | head -1 | awk '{print $1}')/workloads/ubuntu/screenlog.0
+# With several boards on one host, CON (the console log) and SCREEN (the `screen` session on
+# that console's tty) name the board under test; JTAG=<cable serial> reaches `make program`.
+# Unset, the first screen session, as with one board.
+SCREEN=${SCREEN:-$(screen -ls | awk '/\t[0-9]+\./ {print $1; exit}')}
+# The board's address is read off ITS console (the kernel's IP-Config line, from byte $1 on),
+# never off the host's NFS peer list, which names every board.
+con_ip() { tail -c +$(( ${1:-0} + 1 )) "$CON" | tr -d '\r' | grep -aoE 'ipaddr=192\.168\.1\.[0-9]+' | tail -1 | cut -d= -f2; }
 RES=${1:?result dir}; BOOT_WAIT=${BOOT_WAIT:-1800}; mkdir -p "$RES"
 # The board boots with the graphics console scanning out (ubuntu-boot.sh VGA): its memory
 # traffic is part of the machine every bitstream is judged on.
@@ -47,7 +54,7 @@ stress() {
    [ "${STRESS_S:-900}" -gt 0 ] || { echo "stress: skipped (STRESS_S=0)"; return 0; }
    local i rc pre_d pre_c faults; ip=""            # ip stays visible: the integrity log is read after
    for i in $(seq 1 40); do
-      ip=$(ss -tan 2>/dev/null | awk '$1=="ESTAB" && $4 ~ /:2049$/ {print $5}' | grep -o '192\.168\.1\.[0-9]*' | sort -u | head -1)
+      ip=$(con_ip "${PRE:-0}")
       [ -n "$ip" ] && timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no tommy@$ip true 2>/dev/null && break
       sleep 10
    done
@@ -87,7 +94,7 @@ PRE=$(wc -c < "$CON")
 # Never program over a benchmark: a board that answers ssh and runs Geekbench is in use.
 # FORCE_PROGRAM=1 overrides.
 if [ -z "${FORCE_PROGRAM:-}" ]; then
-   for c in $(ss -tan 2>/dev/null | awk '$1=="ESTAB" && $4 ~ /:2049$/ {print $5}' | grep -o '192\.168\.1\.[0-9]*' | sort -u); do
+   for c in $(con_ip 0); do
       if timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no tommy@$c 'pgrep -f "[g]eekbench"' >/dev/null 2>&1; then
          echo "BOARD: REFUSED (Geekbench is running on $c; FORCE_PROGRAM=1 to program anyway)"; exit 2
       fi
@@ -95,8 +102,9 @@ if [ -z "${FORCE_PROGRAM:-}" ]; then
 fi
 # Halt the board's Linux before programming: reconfiguring the FPGA under a running system cuts
 # the SD card off mid-transfer, and a card left that way answers commands but sends no data until
-# it is power-cycled. Board peers only: a Simmerv guest on the same NFS root reports "SmooolRV64".
-for c in $(ss -tan 2>/dev/null | awk '$1=="ESTAB" && $4 ~ /:2049$/ {print $5}' | grep -o '192\.168\.1\.[0-9]*' | sort -u); do
+# it is power-cycled. This board only (the last address its console printed), and only when what
+# answers there is a board: a Simmerv guest on the same NFS root reports "SmooolRV64".
+for c in $(con_ip 0); do
    m=$(timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no tommy@$c 'tr -d "\0" < /proc/device-tree/model' 2>/dev/null)
    case "$m" in "SmolRV64 "*)
       echo "halting $c ($m)"
@@ -119,7 +127,7 @@ done
 echo "banner: rtl=${RTL_BANNER:-?}"
 # The monitor waits at its prompt; a carriage return makes sure the line it is reading is empty
 # before the upload below.
-screen -S "$(screen -ls | awk '/\t[0-9]+\./ {print $1; exit}')" -X stuff $'\r'
+screen -S "$SCREEN" -X stuff $'\r'
 # A TRAILING '+' MEANS THE BITSTREAM IS NOT THAT COMMIT. The monitor appends it from the
 # build-id's source-dirty word; this gate used to grep only [0-9a-f] and silently drop it,
 # so a dirty build was reported -- and remembered -- as the commit it was built on top of.
@@ -129,7 +137,7 @@ case "${RTL_BANNER:-}" in
    *+) echo "WARNING: the loaded bitstream is a DIRTY tree (${RTL_BANNER}) -- its verdict belongs to no commit" ;;
 esac
 export RTL_BANNER
-( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs >/dev/null 2>&1; LOG="$CON" timeout 3000 ./ubuntu-boot.sh ) > "$RES/upload.log" 2>&1 \
+( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs >/dev/null 2>&1; LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
    || { echo "BOARD: FAIL (upload)"; tail -3 "$RES/upload.log"; exit 1; }
 fi
 echo "booting, watching past byte $PRE"
