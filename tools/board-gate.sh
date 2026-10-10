@@ -66,8 +66,10 @@ stress() {
    [ "$got" = "$want" ] || { echo "BOARD: FAIL (the board's device tree says riscv,isa=$got, this tree's $want)"; return 1; }
    pre_d=$(timeout 20 ssh -o BatchMode=yes tommy@$ip 'dmesg | wc -l' 2>/dev/null); pre_c=$(wc -c < "$CON")
    echo "stress: $ip, ${STRESS_S:-900}s of Geekbench (dmesg lines before: $pre_d)"
+   # Geekbench is its own session (setsid) so the budget's end kills the whole process group:
+   # a plain `timeout` signals the parent and leaves its workers running on the board.
    timeout $(( ${STRESS_S:-900} + 120 )) ssh -o BatchMode=yes -o ServerAliveInterval=30 tommy@$ip \
-      "cd ~/Geekbench-5.4.1-LinuxRISCVPreview && timeout ${STRESS_S:-900} ./geekbench_riscv64 > /var/tmp/gate-stress.log 2>&1; echo RC=\$?; dmesg | tail -n +$((pre_d+1)) | grep -E 'Oops|BUG:|Unable to handle|unhandled signal|segfault|cause:|is not a head|NETDEV WATCHDOG'" > "$RES/stress.log" 2>&1
+      "cd ~/Geekbench-5.4.1-LinuxRISCVPreview && setsid ./geekbench_riscv64 > /var/tmp/gate-stress.log 2>&1 & P=\$!; t=0; while kill -0 \$P 2>/dev/null && [ \$t -lt ${STRESS_S:-900} ]; do sleep 5; t=\$((t+5)); done; if kill -0 \$P 2>/dev/null; then kill -- -\$P; sleep 5; kill -9 -- -\$P 2>/dev/null; RC=124; else wait \$P; RC=\$?; fi; echo RC=\$RC; dmesg | tail -n +$((pre_d+1)) | grep -E 'Oops|BUG:|Unable to handle|unhandled signal|segfault|cause:|is not a head|NETDEV WATCHDOG'" > "$RES/stress.log" 2>&1
    rc=$(grep -o 'RC=[0-9]*' "$RES/stress.log" | tail -1 | cut -d= -f2)
    faults=$(( $(grep -cE 'Oops|BUG:|Unable to handle|unhandled signal|segfault|cause:|is not a head|NETDEV WATCHDOG' "$RES/stress.log") ))
    faults=$(( faults + $(tail -c +$((pre_c+1)) "$CON" | tr -d '\r' | grep -acE "$BAD") ))
