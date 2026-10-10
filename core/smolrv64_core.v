@@ -54,6 +54,9 @@
 `ifndef SMOLRV64_FW
  `define SMOLRV64_FW (2*`SMOLRV64_IW)  // fetch width: instructions into the decoupling queue per cycle (IW..8)
 `endif
+`ifndef SMOLRV64_MDSPEC
+ `define SMOLRV64_MDSPEC 1             // memory-dependence speculation: 0 never, 1 predicted by the wait table, 2 always
+`endif
 `ifndef SMOLRV64_QD
  `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif
@@ -1505,6 +1508,7 @@ module smolrv64_core
       // THE ALIAS TEST LIVES HERE, not at issue: smolrv64_lq exports its entries, smolrv64_sq keeps
       // a conflict matrix updated wherever an address arrives, and issue reads a flop.
       .l_off(lq_e_off), .l_size(lq_e_size), .l_tag(lq_e_tag), .l_av(lq_e_av),
+      .l_wt(lq_e_wt), .l_acc(lq_e_acc), .l_unk_q(sq_l_unk_q), .l_viol(sq_l_viol), .l_res_c(sq_l_res_c), .l_res_a(sq_l_res_a),
       .l_fill(m_lq_fill), .l_fill_ix(m_lq_idx),
       .l_fill_off(m_addr[11:0]), .l_fill_size(m_mem_size), .l_fill_flt(lsu_xo_flt),
       .l_block(sq_l_block_live), .l_block_q(lq_e_block), .l_older(sq_l_older),
@@ -1529,7 +1533,10 @@ module smolrv64_core
    wire [LQ_N*12-1:0]  lq_e_off;
    wire [LQ_N*2-1:0]   lq_e_size;
    wire [LQ_N*SQ_TB-1:0] lq_e_tag;
-   wire [LQ_N-1:0]     lq_e_av, lq_e_block;
+   wire [LQ_N-1:0]     lq_e_av, lq_e_block, lq_e_wt, lq_e_acc, sq_l_unk_q, sq_l_viol, sq_l_res_c, sq_l_res_a;
+   wire [LQ_N*8-1:0]   lq_e_pch;
+   wire                lq_f_rp;
+   wire                ld_wt;
    wire [SQ_TB-1:0]    lq_q_tag;
    wire [RN_PBITS-1:0] lq_l_prd;
    wire [5:0]          lq_l_rd;
@@ -1543,11 +1550,43 @@ module smolrv64_core
    // a load behind a store in the same cycle captures the tag AFTER that store's
    wire [SQ_TB-1:0] ld_sqtag = sq_d_tag + {{SQ_IB{1'b0}}, gld_behind_st};
 
+   // THE MEMORY-DEPENDENCE WAIT TABLE: a 2-bit saturating counter per load-PC hash. A load waits for
+   // older stores' unknown addresses while its counter is 2 or 3, and goes ahead of them below.
+   // A replay sets the counter to 2. The store queue reports, for every load, the cycle the last
+   // unknown older address comes in and whether the load overlapped it: an overlap counts up (the
+   // wait was needed), a miss counts down. So a load that aliases rarely is soon speculating again,
+   // and one that aliases often keeps waiting. One event trains per cycle (a hint: the rest drop).
+   localparam integer MDW_B = 8;
+   reg  [2*(1 << MDW_B)-1:0] mdw;
+   reg  [21:0]               mdw_age;
+   initial begin mdw = {(2*(1 << MDW_B)){1'b0}}; mdw_age = 22'd0; end
+   wire                      rp_fire;                           // a replay redirects now (below)
+   wire [PCW-1:0]            sy_pc_w;
+   wire [LQ_N-1:0]           md_ev = sq_l_res_c | sq_l_res_a;   // a load's resolution
+   reg  [LQ_IB-1:0]          md_i;
+   integer                   mdk;
+   always @* begin
+      md_i = {LQ_IB{1'b0}};
+      for (mdk = LQ_N - 1; mdk >= 0; mdk = mdk - 1) if (md_ev[mdk]) md_i = mdk[LQ_IB-1:0];
+   end
+   wire [MDW_B-1:0]          md_p   = lq_e_pch[md_i*8 +: 8];
+   wire [1:0]                md_cur = mdw[2*md_p +: 2];
+   wire [1:0]                md_new = sq_l_res_a[md_i] ? ((md_cur == 2'd3) ? 2'd3 : md_cur + 2'd1)
+                                                       : ((md_cur == 2'd0) ? 2'd0 : md_cur - 2'd1);
+   wire [MDW_B-1:0]          rp_p   = sy_pc_w[MDW_B:1];
+   assign ld_wt = (`SMOLRV64_MDSPEC == 0) ? 1'b1 : (`SMOLRV64_MDSPEC == 2) ? 1'b0 : mdw[2*gld_pc[MDW_B:1] + 1];
+   always @(posedge clk) begin
+      mdw_age <= reset ? 22'd0 : mdw_age + 22'd1;
+      if (|md_ev) mdw[2*md_p +: 2] <= md_new;
+      if (rp_fire) mdw[2*rp_p +: 2] <= 2'd2;                    // after the training arm: a replay wins
+      if (reset | (&mdw_age)) mdw <= {(2*(1 << MDW_B)){1'b0}};  // now and then, forget
+   end
+
    smolrv64_lq #(.NENT(LQ_N), .IDXB(LQ_IB), .PAW(56), .PBITS(RN_PBITS),
              .ROBB(ROB_IDXB), .SQIB(SQ_TB), .SEQW(SEQW), .LRAM_BASE(LBASE), .LRAM_LG2(LRAM_LG2)) u_lq
      (.clk(clk), .reset(reset),
       .d_alloc(d_ld_alloc), .d_rob(gld_rob), .d_prd(gld_prd),
-      .d_rd(gld_rd), .d_rd_v(gld_rdv), .d_sqtag(ld_sqtag),
+      .d_rd(gld_rd), .d_rd_v(gld_rdv), .d_sqtag(ld_sqtag), .d_wt(ld_wt),
       .d_pc(gld_pc), .d_seq(gld_seq),
       .d_ready(lq_d_ready), .d_ready2(lq_d_ready2), .d_idx(lq_d_idx),
       .a_v(m_lq_fill), .a_sent(lsu_xo_early), .a_idx(m_lq_idx),
@@ -1555,6 +1594,7 @@ module smolrv64_core
       .a_size(m_mem_size),
       .a_signed(m_mem_signed), .a_fp(m_is_fp), .a_unc(lsu_xo_unc), .a_mem(lsu_xo_mem),
       .e_off(lq_e_off), .e_size(lq_e_size), .e_tag(lq_e_tag), .e_av(lq_e_av),
+      .e_wt(lq_e_wt), .e_pch(lq_e_pch), .e_acc(lq_e_acc), .unk_q(sq_l_unk_q), .viol(sq_l_viol),
       .e_block(lq_e_block), .x_block(sq_ld_block), .q_tag(lq_q_tag),
       .b_idx(m_lq_idx), .b_ok(lq_b_ok),
       .x_v(lq_x_v), .x_idx(lq_x_idx), .x_pa(lq_x_pa), .x_size(lq_x_size),
@@ -1564,7 +1604,7 @@ module smolrv64_core
       .k_v(lq_k_v), .k_idx(lq_k_idx), .k_va(lq_k_va),
       .w_v(lsu_wk_done & ~wk_st), .w_idx(wk_lk_li), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
-      .f_v(lq_f_v), .f_idx(lq_f_idx), .f_rob(lq_f_rob), .f_fc(lq_f_fc), .f_pc(lq_f_pc), .f_seq(lq_f_seq),
+      .f_v(lq_f_v), .f_idx(lq_f_idx), .f_rp(lq_f_rp), .f_rob(lq_f_rob), .f_fc(lq_f_fc), .f_pc(lq_f_pc), .f_seq(lq_f_seq),
       .x_devwait(lq_x_devwait), .occupancy(lq_occ), .av_any(lq_av_any), .e_dprd(lq_e_dprd), .uf_any(lq_uf_any), .ar(la_v), .pk_v(lq_pk_v), .pk_idx(lq_pk_idx), .pk_seq(lq_pk_seq), .rob_head(rob_head_idx), .flush(redirect),
       .kd_v(rob_kd_v), .kd(rob_kd), .kmask(lq_kmask));
 
@@ -1647,12 +1687,16 @@ module smolrv64_core
    // exactly this -- not a private path to the ROB.
    // Commit port k is column k of the head row. The head's kill: a trap's done is latched (no
    // live dTLB here). Behind the head, M's op retires only from the head.
-   wire rc_tkill = (m_valid & m_done_red & m_trap) | sy_trap;
+   // A load flagged for replay is done, so it would retire the cycle it becomes the head: it is held
+   // from the cycle the queue reports it (qf_lq) until the SYSQ's replay redirects.
+   wire rp_hold;                         // (assigned with the SYSQ below)
+   wire rc_tkill = (m_valid & m_done_red & m_trap) | sy_trap | rp_hold;
    generate for (gs = 0; gs < IW; gs = gs + 1) begin: rc
       localparam [ROB_CB-1:0] K = gs;
       assign rc_idx[gs]  = {rob_head_idx[ROB_IDXB-1:ROB_CB], K};
       assign rc_f[gs]    = rc_rdv[gs] & rc_rd[gs*6+5];     // writes an f-register
-      assign rc_kill[gs] = (rob_head_idx[ROB_CB-1:0] == K) ? rc_tkill : m_valid & (m_rob_idx == rc_idx[gs]);
+      assign rc_kill[gs] = ((rob_head_idx[ROB_CB-1:0] == K) ? rc_tkill : m_valid & (m_rob_idx == rc_idx[gs]))
+                         | (lq_f_v & lq_f_rp & (lq_f_rob == rc_idx[gs]));   // a load flagged for replay never retires
    end endgenerate
    smolrv64_rob #(.ROWS(ROB_ROWS), .IDXB(ROB_IDXB), .PBITS(RN_PBITS), .IW(IW), .NW(ROB_NW), .IRR_FWD({{(ROB_NW-4){1'b0}}, 4'b1000})) u_rob   // w_v[3]: sq_k_take
      (.clk(clk), .reset(reset),
@@ -1665,7 +1709,7 @@ module smolrv64_core
       .h_fin(cf_red_fire | (m_red_fire & ~m_trap) | (sy_done & sy_red)),   // the head completes and flushes (a trap never commits)
       .c_kill(rc_kill), .c_valid(rc_v), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd), .c_noret(rc_noret),
       .flush(redirect), .empty(rob_empty), .occ_n(rob_occ), .head_idx(rob_head_idx),
-      .irr_idx(rob_irr_idx), .irr_v(rob_irr_v),
+      .irr_idx(rob_irr_idx), .irr_v(rob_irr_v), .rp_v(lq_f_v & lq_f_rp), .rp_ix(lq_f_rob),
       .d_pold(rn_poldv),
       // the walk starts the cycle after the resolve, from the registered branch
       .k_v(fr_set_q), .k_idx(fr_rob),
@@ -2070,10 +2114,11 @@ module smolrv64_core
    reg                sy_xt;     // the op traps at dispatch (fetch fault, illegal): csr_file's xtrap
    reg                sy_fn;     // a FENCE or FENCE.I: no csr_file action...
    reg                sy_fi;     // ...and FENCE.I flushes the caches and refetches after itself
+   reg                sy_rp;     // ...and a REPLAY (a load that read before an older store overlapping it) refetches the load
    reg [3:0]          sy_xcause;
    reg [63:0]         sy_xtval;
    reg                sy_qf;     // the trap is a queue entry's translation fault (the op is a load or store)
-   initial begin sy_v = 1'b0; sy_head_q = 1'b0; sy_xt = 1'b0; sy_fn = 1'b0; sy_fi = 1'b0; sy_qf = 1'b0; sy_instret = 1'b0; end
+   initial begin sy_v = 1'b0; sy_head_q = 1'b0; sy_xt = 1'b0; sy_fn = 1'b0; sy_fi = 1'b0; sy_rp = 1'b0; sy_qf = 1'b0; sy_instret = 1'b0; end
    // A QUEUE ENTRY WHOSE TRANSLATION FAULTED TRAPS FROM HERE. It never completes (a load is never
    // sent, a store never commits), so its op reaches the ROB head and stays; its record then loads
    // the SYSQ as a trap from dispatch does, and fires through sy_fire, the one trap gate. The SYSQ
@@ -2091,7 +2136,7 @@ module smolrv64_core
    end
    wire qf_sq = sq_f_v & (sq_f_rob == rob_head_idx) & ~rob_empty;
    wire qf_lq = lq_f_v & (lq_f_rob == rob_head_idx) & ~rob_empty;
-   reg                qfr_v;
+   reg                qfr_v, qfr_rp;
    reg [ROB_IDXB-1:0] qfr_rob;
    reg [3:0]          qfr_fc;
    reg [63:0]         qfr_va;
@@ -2100,6 +2145,7 @@ module smolrv64_core
    initial qfr_v = 1'b0;
    always @(posedge clk) begin
       qfr_v   <= ~reset & ~redirect & (qf_sq | qf_lq);
+      qfr_rp  <= qf_lq & lq_f_rp;
       qfr_rob <= qf_sq ? sq_f_rob : lq_f_rob;
       qfr_fc  <= qf_sq ? sq_f_fc  : lq_f_fc;
       qfr_va  <= qf_sq ? fva_s[sq_k_idx] : fva_l[lq_f_idx];   // the faulting load; the faulting store is the first uncommitted
@@ -2115,8 +2161,15 @@ module smolrv64_core
    wire sy_xfire   = sy_fire & sy_xt;                    // ...a trap from dispatch: csr_file's xtrap
    // csr_file leaves its xtrap input out of redir_valid/redir_is_trap (a combinational loop
    // otherwise), so a trap from dispatch is its own redirect here, as M's data fault is.
-   wire sy_red     = sy_fire & (csr_redir_v | sy_xt | sy_fi);  // trap, xret, illegal CSR, fence.i: a redirect
-   wire sy_trap    = sy_fire & (csr_redir_trap | sy_xt);  // ...that is an exception: kill, no result
+   wire sy_red     = sy_fire & (csr_redir_v | sy_xt | sy_fi | sy_rp);  // trap, xret, illegal CSR, fence.i, a replay: a redirect
+   wire sy_trap    = sy_fire & (csr_redir_trap | sy_xt | sy_rp);  // ...that is an exception or a replay: kill, no result
+   assign rp_fire  = sy_fire & sy_rp;
+`ifndef SYNTHESIS
+   reg [31:0] rp_cnt;  initial rp_cnt = 32'd0;      // replays (MEMDEP counters in the bench's report)
+   always @(posedge clk) if (rp_fire) rp_cnt <= rp_cnt + 32'd1;
+`endif
+   assign rp_hold  = (qf_lq & lq_f_rp) | (qfr_v & qfr_rp) | (sy_v & sy_rp);
+   assign sy_pc_w  = sy_pc;
    wire sy_done    = sy_fire & ~sy_trap;                 // completes through lane A's landing slot
    // the CSR read's value into lane A. A CSR op that csr_file traps writes its register too: the
    // trap flushes every reader, and the write and its wake stay clear of csr_file's decision.
@@ -2132,7 +2185,7 @@ module smolrv64_core
          sy_instret <= qf_is_csr & ((qf_imm[11:0] == 12'hC02) | (qf_imm[11:0] == 12'hB02));
          sy_src <= qf_csr_func[2] ? {59'b0, qf_imm[16:12]} : xf_rs1;
          sy_pc <= qf_pc; sy_seq <= qf_seq; sy_insn <= qf_insn;
-         sy_xt <= j_istrap;
+         sy_xt <= j_istrap;  sy_rp <= 1'b0;
          sy_fn <= ~j_istrap & (qf_insn[6:2] == 5'b00011);
          sy_fi <= ~j_istrap & (qf_insn[6:2] == 5'b00011) & qf_insn[12];
          sy_xcause <= qf_fault ? qf_fault_cause : 4'd2;
@@ -2145,7 +2198,7 @@ module smolrv64_core
          sy_instret <= 1'b0;
          sy_pc  <= {{(PCW-39){qfr_pc[38]}}, qfr_pc};
          sy_seq <= qfr_seq;
-         sy_xt <= 1'b1;  sy_fn <= 1'b0;  sy_fi <= 1'b0;  sy_qf <= 1'b1;
+         sy_xt <= ~qfr_rp;  sy_rp <= qfr_rp;  sy_fn <= 1'b0;  sy_fi <= 1'b0;  sy_qf <= 1'b1;
          sy_xcause <= qfr_fc;
          sy_xtval  <= qfr_va;
       end
@@ -2765,7 +2818,7 @@ module smolrv64_core
       // unit's redirect and trap-target logic -- with the full m_done, build D of 2026-09-04
       // had 1357 near-critical endpoints starting at m_addr: dTLB compare -> lsu_done ->
       // m_done -> upd_valid -> mepc/priv -> the vectored trap-target adder -> fe_red_tgt_q.
-      .upd_valid(sy_fire & ~sy_xt & ~sy_fn), .upd_is_csr(sy_is_csr), .upd_func(sy_func),   // the SYSQ's flops (C3 step 3)
+      .upd_valid(sy_fire & ~sy_xt & ~sy_fn & ~sy_rp), .upd_is_csr(sy_is_csr), .upd_func(sy_func),   // the SYSQ's flops (C3 step 3)
       .upd_addr(sy_addr),
       .upd_src(sy_src),
       .upd_pc(sy_pc));
@@ -3098,7 +3151,8 @@ module smolrv64_core
    assign fe_red_pulse = m_red_fire | sy_red | fr_set | dec_red;
    assign fe_red_tgt   = (m_red_fire | sy_red) ? redirect_target : fr_set ? cf_target     : dec_red_tgt;
    assign fe_red_seq   = (m_red_fire | sy_red) ? redirect_seq    : fr_set ? (cf_seq + 1'b1) : dec_red_seq;
-   assign redirect_target  = (sy_fire & sy_fi) ? (sy_pc + 64'd4)           // fence.i: refetch after it
+   assign redirect_target  = (sy_fire & sy_rp) ? sy_pc                      // a replay: the load again
+                           : (sy_fire & sy_fi) ? (sy_pc + 64'd4)           // fence.i: refetch after it
                            : (csr_red | sy_red) ? csr_redir_tgt
                            :           (m_pc + (m_rvc ? 64'd2 : 64'd4));
    assign redirect_is_trap = (m_red_fire & m_trap) | sy_trap;

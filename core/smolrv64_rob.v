@@ -81,6 +81,11 @@ module smolrv64_rob
     // entry is settled. A store is committable exactly when this pointer reaches it.
     output wire [IDXB-1:0]        irr_idx,
     output wire                   irr_v,        // ...and that entry exists
+    // An entry that is DONE but must still replay (a load that read before an older store that
+    // overlaps it): the pointer stops at it, so nothing younger -- a store -- becomes irrevocable
+    // ahead of the replay that will squash it.
+    input  wire                   rp_v,
+    input  wire [IDXB-1:0]        rp_ix,
 
     // ---- the walk: from the tail back to a mispredicted branch, a row a cycle ----
     // k_v names the branch (a later k_v names an older one: the walk goes on to it). Each cycle
@@ -165,7 +170,7 @@ module smolrv64_rob
          for (q = 0; q < NW; q = q + 1)
             if (IRR_FWD[q] && w_v[q] && (w_ix[q*IDXB +: IDXB] == ix)) fw = 1'b1;
       end
-      assign ir_wait[gic] = v[ix] & ~done[ix] & ~fw & (gic >= irr[CB-1:0]);
+      assign ir_wait[gic] = v[ix] & ((~done[ix] & ~fw) | (rp_v & (ix == rp_ix))) & (gic >= irr[CB-1:0]);
    end endgenerate
    reg  [IDXB:0] irr_step;
    integer       ick;

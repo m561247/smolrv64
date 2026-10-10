@@ -47,6 +47,9 @@ module tb;
    // the walker and trap ports: every fill here is translated, so they stay quiet
    wire             lk_v, sk_v, lf_v, sf_v;
    wire [IDXB-1:0]  lf_idx;
+   wire             lf_rp;
+   wire [NENT-1:0]  e_wt, e_acc, sq_unk_q, sq_viol, sq_res_c, sq_res_a;
+   wire [NENT*8-1:0] e_pch;
    wire [IDXB-1:0]  lk_idx, sk_idx;
    wire [38:0]      lk_va, sk_va, lf_pc, sf_pc;
    wire [ROBB-1:0]  lf_rob, sf_rob;
@@ -78,15 +81,15 @@ module tb;
    smolrv64_lq #(.DRAM_BASE(56'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1)) u_lq
      (.clk(clk),.reset(reset),
       .d_alloc(lq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(lq_d_rob),.d_prd(lq_d_prd),.d_rd(lq_d_rd),.d_rd_v(lq_d_rd_v),
-      .d_sqtag(lq_d_sqtag),.d_ready(lq_d_ready),.d_ready2(lq_d_ready2),.d_idx(lq_d_idx),
+      .d_sqtag(lq_d_sqtag),.d_wt(1'b1),.d_ready(lq_d_ready),.d_ready2(lq_d_ready2),.d_idx(lq_d_idx),
       .a_v(lq_a_v),.a_sent(lq_a_sent),.a_idx(lq_a_idx),.a_pa(lq_a_pa),.a_va(39'(lq_a_pa)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(lq_a_size),
       .a_signed(lq_a_signed),.a_fp(lq_a_fp),.a_unc(lq_a_unc),
-      .e_off(e_off),.e_size(e_size),.e_tag(e_tag),.e_av(e_av),.e_block(e_block),.x_block(lq_x_block),
+      .e_off(e_off),.e_size(e_size),.e_tag(e_tag),.e_av(e_av),.e_wt(e_wt),.e_pch(e_pch),.e_acc(e_acc),.unk_q(sq_unk_q),.viol(sq_viol),.e_block(e_block),.x_block(lq_x_block),
       .q_tag(lq_q_tag),.b_idx(lq_b_idx),.b_ok(lq_b_ok),
       .x_v(lq_x_v),.x_idx(lq_x_idx),.x_pa(lq_x_pa),.x_size(lq_x_size),.x_signed(lq_x_signed),
       .x_fp(lq_x_fp),.x_unc(lq_x_unc), .x_head(lq_x_head),.x_devwait(lq_x_devwait),.x_take(lq_x_take),
       .l_v(lq_l_v),.l_idx(lq_l_idx),.l_prd(lq_l_prd),.l_rd(lq_l_rd),.l_rd_v(lq_l_rd_v),.l_rob(lq_l_rob),
-      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_idx(lf_idx),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(lq_kmask_nc),
+      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_idx(lf_idx),.f_rp(lf_rp),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(lq_kmask_nc),
       // every bench address is DRAM (speculates freely), so the device head-gate is never taken
       .a_mem(1'b1),.rob_head({ROBB{1'b0}}));
 
@@ -101,10 +104,10 @@ module tb;
       .c_v(sq_c_v),.c_rob(sq_c_rob),.c_addr(sq_c_addr),.c_data(sq_c_data),.c_size(sq_c_size),.c_unc(sq_c_unc),
       .c_take(sq_c_take),
       .kc_v(sq_kc_v),.kc_rob(sq_kc_rob),.kc_addr(sq_kc_addr),.kc_data(sq_kc_data),.kc_size(sq_kc_size),.k_take(sq_k_take),
-      .l_off(e_off),.l_size(e_size),.l_tag(e_tag),.l_av(e_av),
+      .l_off(e_off),.l_size(e_size),.l_tag(e_tag),.l_av(e_av),.l_wt(e_wt),.l_acc(e_acc),.l_unk_q(sq_unk_q),.l_viol(sq_viol),.l_res_c(sq_res_c),.l_res_a(sq_res_a),
       .l_fill(lq_a_v),.l_fill_ix(lq_a_idx),.l_fill_off(lq_a_pa[11:0]),.l_fill_size(lq_a_size), .l_fill_flt(1'b0),
       .l_block(e_block),.l_block_unk_q(sq_l_block_unk_q),.l_block_q(l_block_q),.l_older(e_older),.ld_tag(lq_q_tag),.ld_older(ld_older),
-      .k_v(sk_v),.k_idx(sk_idx),.k_va(sk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(sf_v),.f_rob(sf_rob),.f_fc(sf_fc),.f_pc(sf_pc),.f_seq(sf_seq),.occupancy(sq_occ),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(sq_kmask_nc));
+      .k_v(sk_v),.k_idx(sk_idx),.k_va(sk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(sf_v),.f_rob(sf_rob),.f_fc(sf_fc),.f_pc(sf_pc),.f_seq(sf_seq),.occupancy(sq_occ),.flush(flush),.kd_v(sq_kd_v),.kd(sq_kd),.kmask(sq_kmask_nc));
 
    integer pass=0, fail=0;
    task chk(input [255:0] nm, input got, input exp);
@@ -114,6 +117,8 @@ module tb;
    task step; begin @(posedge clk); #1; end endtask
    // program-order dispatch helpers: a load captures the store-seqno the queue hands out NOW
    reg [IDXB-1:0] L0, L1, S0, S1, S2, S3;
+   reg              sq_kd_v = 0;
+   reg [(1<<ROBB)-1:0] sq_kd = 0;
    task disp_store(input [PBITS-1:0] dp, input [ROBB-1:0] rob, output [IDXB-1:0] ix);
       begin sq_d_dpreg=dp; sq_d_rob=rob; sq_d_alloc=1; ix=sq_d_idx; dp_of[ix]=dp; step; sq_d_alloc=0; #1; end
    endtask
@@ -340,6 +345,22 @@ module tb;
       chk("9w released after all four commit", lq_x_v && !ld_older, 1'b1);
       take; land(L0);
       chk("9w drained", lq_occ==0 && sq_occ==0, 1'b1);
+
+      // ---- 14. the data reads come in the order ADDRESSES arrive, not program order (the
+      // out-of-order fill): the younger store's address is first, it is picked, the older one's
+      // arrives a cycle later and is picked in the very cycle the younger one is killed. The
+      // older store must still get its data (a cancel keyed to the previous pick lost it, and the
+      // store then sat at the ROB head forever waiting for a value no one would send). ----
+      disp_store(9'd11, 4'd3, S0); disp_store(9'd12, 4'd4, S1);
+      rfv[9'd11] = 64'hAA11; rfv[9'd12] = 64'hBB22;
+      sq_a_v=1; sq_a_idx=S1; sq_a_addr=56'hC100; sq_a_size=2; step; sq_a_v=0;       // S1's address; S1 is picked next
+      sq_a_v=1; sq_a_idx=S0; sq_a_addr=56'hC000; sq_a_size=2; step; sq_a_v=0;       // S0's address; S1 lands, S0 is picked at the next edge
+      sq_kd_v=1; sq_kd[4'd4]=1; step; sq_kd_v=0; sq_kd=0; #1;                       // ...in the cycle S1 dies
+      step; step;
+      chk("14 the older store got its data", sq_kc_v && sq_c_data==64'hAA11, 1'b1);
+      chk("14 the younger store died", sq_occ==1, 1'b1);
+      commit;
+      chk("14 drained", sq_occ==0, 1'b1);
 
       // ---- 10. EVERY attribute presented at fill comes back at take (rule B7) ----
       // The uncached bit was never carried (2026-09-04): the port hardwired it to 0 and a

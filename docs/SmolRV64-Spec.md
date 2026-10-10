@@ -536,7 +536,9 @@ no longer restart, and everything older than the pointer is settled. A store is 
 when the pointer reaches its slot: `smolrv64_core` fires `sq_k_take` for the store queue's first
 uncommitted entry when its ROB index equals `irr_idx` and the entry has address and data;
 that commit is the write that sets the store's `done`, the head retires it like any other
-op, and the queue drains it to the cache behind retirement (§8). The head therefore no
+op, and the queue drains it to the cache behind retirement (§8). The pointer also stops at a
+load flagged for replay (§8), done or not: nothing younger -- a store -- may become irrevocable
+ahead of the replay that squashes it. The head therefore no
 longer sits on every store for the ~6 cycles the cache takes. The pointer is conservative
 on purpose: it stops at ANY not-done entry, a load in flight or an FP op included, although
 neither can restart -- letting a store commit past an older load that has not read yet
@@ -1161,6 +1163,31 @@ set in the stage register.
   Camera unmoved -- because releasing M lets the following non-memory instructions execute
   while the data is in flight, and that is worth more than the latency it costs. The queue's
   two cycles are not overhead; one of them is.
+- **Loads go ahead of older stores whose addresses are unknown, and replay when one overlaps
+  (memory-dependence speculation).** A load whose wait bit is clear is not blocked by older stores
+  with no address; only a known overlap blocks it. The store queue keeps its per-load overlap
+  matrix `conf`, and a load that has REACHED memory (sent, or landed and watched) while an older
+  live store overlaps it is flagged for replay (`l_viol`): evaluated every cycle from the matrix,
+  and in the very cycle a store's address arrives against it (`arr_ov`, the same compare that
+  writes the matrix), so the flag is a flop by the time that store can commit. The registered
+  block copy rises in that edge too, so a load never starts on a stale block.
+  - *Watching.* A load that lands while an older store's address is unknown stays in the load
+    queue (`lnd`, address valid) until the last such address is in and showed no overlap; a
+    flagged one stays until it replays. Everything else leaves at its landing.
+  - *Replay.* The flagged load is reported through the queue-fault path (`f_rp`) as a record the
+    SYSQ takes when the load is the ROB head: `sy_rp`, no trap and no CSR (`csr_file` never sees
+    it), a redirect to the load's own PC with its own seq, and the retire of its row held from the
+    cycle it is flagged (`rc_kill` per column, `rp_hold` at the head). The load re-executes behind
+    the stores it conflicted with. The irrevocable pointer stops at it meanwhile.
+  - *The wait table.* `mdw`: a 2-bit saturating counter per load-PC hash (PC[8:1], 256 entries),
+    forgotten every 4 M cycles. A load waits for older unknown addresses when its counter is 2 or
+    3. A replay sets it to 2. The store queue reports, for every load, the cycle the last unknown
+    older address comes in and whether the load overlapped it (`l_res_a`, `l_res_c`): overlap
+    counts up, no overlap counts down, one event a cycle. A load that aliases rarely goes back to
+    speculating after one clear resolution; one that aliases often keeps waiting.
+  - *Measured* (lockstep, IW=3, rvbench): replaying costs ~28 cycles, a wait about as much, so the
+    table waits only after a replay. Dhrystone never replays; rsort 85-119 times in 94-103 K cycles.
+    `SMOLRV64_MDSPEC` selects never (0), the table (1), always (2).
 - A load's fault is decided **before the access starts** (by M for the address-only faults, by the
   walker into the entry for a page fault, above): for an FSM-starting access
   `mis_flt` and `xl_flt` are qualified by `xl_f = req_valid & ~req_xlate & (st == S_IDLE)`,
@@ -1448,6 +1475,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `u_iq_i` entry | `smolrv64_iq` | 10 | 2+2×9 = 20 | 200 | flops | integer, slot A's, `NSRC`=2 (§6.1) |
 | `u_iq_i2`, `u_iq_i3` entry | `smolrv64_iq` | 10 each | 2+2×10 = 22 | 220 each | flops | integer, slot B's and slot C's, `NSRC`=2 (§6.1) |
 | `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/418/1 | 547 | flops | the head-op register (§8) |
+| `mdw` | `smolrv64_core` | 256 | 2 | 512 | flops | the memory-dependence wait table: read at dispatch by the load's PC, written by a replay and by one training event a cycle (§8) |
 | `spl_ld`, `spl_st` | `smolrv64_core` | 16, 8 | 5+413 = 418 | 10 032 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at M's pick (§8) |
 | `la_va`, `sa_va`, `la_v`, `sa_v` | `smolrv64_core` | 16, 8 | 64/64/1/1 | 1 560 | flops | the lanes' arrivals: 3W (one per lane), read at M's pick (§8) |
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |

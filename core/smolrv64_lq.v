@@ -51,6 +51,7 @@ module smolrv64_lq
     parameter SQIB  = 3,               // store-seqno width (smolrv64_sq's IDXB)
     parameter VAW   = 39,              // Sv39: the VA an entry keeps beside its PA
     parameter SEQW  = 8,               // the op's sequence number (a trap restarts fetch at it)
+    parameter PCHB  = 8,               // bits of the load's PC the wait table is indexed by (PC[PCHB:1])
     // The memory map, for the D12 cross-check below only (smolrv64_lsu's LSU_DRAM_BASE / LRAM_*).
     // A unit bench with synthetic addresses declares everything memory: DRAM_BASE = 0.
     parameter [55:0] DRAM_BASE = 56'h8000_0000,
@@ -66,6 +67,7 @@ module smolrv64_lq
     input  wire [5:0]            d_rd,
     input  wire                  d_rd_v,
     input  wire [SQIB-1:0]       d_sqtag,     // store-seqno captured at the same dispatch
+    input  wire                  d_wt,        // the load's wait bit: it waits for older stores' unknown addresses
     input  wire [VAW-1:0]        d_pc,        // the load's PC and seq, for a trap from its translation
     input  wire [SEQW-1:0]       d_seq,
     output wire                  d_ready,
@@ -101,6 +103,11 @@ module smolrv64_lq
     output wire [NENT*2-1:0]     e_size,
     output wire [NENT*SQIB-1:0]  e_tag,
     output wire [NENT-1:0]       e_av,
+    output wire [NENT*PCHB-1:0]  e_pch,       // each entry's PC hash (the wait table's index)
+    output wire [NENT-1:0]       e_wt,        // each entry's wait bit...
+    output wire [NENT-1:0]       e_acc,       // ...and whether it has reached memory (sent, or landed and watched)
+    input  wire [NENT-1:0]       unk_q,       // smolrv64_sq: an older store's address is still unknown (registered)
+    input  wire [NENT-1:0]       viol,        // smolrv64_sq: it went ahead of an older store that overlaps it
     input  wire [NENT-1:0]       e_block,     // per entry: an older store aliases it
     output wire                  x_block,     // ...and the candidate is one, held right now
     output wire                  x_devwait,   // the candidate is a device load waiting to be the head (counters only)
@@ -156,7 +163,8 @@ module smolrv64_lq
     input  wire [3:0]            w_fc,
     // ---- a translation that faulted, at the candidate: it traps at the ROB head ----
     output wire                  f_v,
-    output wire [IDXB-1:0]       f_idx,       // the entry it is: the oldest one whose translation faulted
+    output wire [IDXB-1:0]       f_idx,       // the entry it is: the oldest one whose translation faulted or that must replay
+    output wire                  f_rp,        // ...a replay (it read before an older store that overlaps it), not a fault
     output wire [ROBB-1:0]       f_rob,
     output wire [3:0]            f_fc,
     output wire [VAW-1:0]        f_pc,
@@ -210,11 +218,15 @@ module smolrv64_lq
    // That stops being the same question once an entry can reach memory without ever being
    // the candidate (a_sent). Per entry it is exact, and it is what the landing assertion
    // below actually wants to know.
-   reg [NENT-1:0]        sent;                // handed to memory, data not back yet
+   reg [NENT-1:0]        sent;                // handed to memory, data not back yet (or landed and watched)
+   reg [NENT-1:0]        wt;                  // the load waits for older stores' unknown addresses
+   reg [NENT-1:0]        lnd;                 // landed, and still here: an older store's address is unknown
+   reg [NENT-1:0]        rpl;                 // sticky: it read before an older store that overlaps it
    reg [IDXB-1:0]        tail;
    reg [IDXB:0]          cnt;
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; sent = {NENT{1'b0}};
+                 wt = {NENT{1'b0}}; lnd = {NENT{1'b0}}; rpl = {NENT{1'b0}};
                  tail = {IDXB{1'b0}}; cnt = {(IDXB+1){1'b0}}; end
 
    // PROGRAM ORDER IS THE RING READ FROM THE TAIL: the slot at the tail is the oldest position,
@@ -241,11 +253,11 @@ module smolrv64_lq
    assign d_ready2  = (cnt <= NENT[IDXB:0] - 2) & ~v[tail] & ~v[tail1];
    assign d_idx     = tail;
    assign occupancy = cnt;
-   assign av_any    = |(v & av);
+   assign av_any    = |(v & av & ~lnd);
    genvar gd;
    generate
       for (gd = 0; gd < NENT; gd = gd + 1) begin : g_dprd
-         assign e_dprd[gd*PBITS +: PBITS] = v[gd] ? prd[gd] : {PBITS{1'b0}};
+         assign e_dprd[gd*PBITS +: PBITS] = (v[gd] & ~lnd[gd]) ? prd[gd] : {PBITS{1'b0}};
       end
    endgenerate
    assign uf_any    = |(v & ~av);
@@ -275,13 +287,14 @@ module smolrv64_lq
    // is walked oldest first, and a load whose translation faulted is never sent: it traps when
    // its op reaches the ROB head.
    wire [NENT-1:0] wlk_m = v & av & ~sent & ~tv;
-   wire [NENT-1:0] flt_m = v & av & ~sent & tv & flt;
+   wire [NENT-1:0] flt_m = (v & av & ~sent & tv & flt) | (v & rpl);
    assign k_v   = |wlk_m;
    assign k_idx = oldest(wlk_m);
    assign k_va  = va[k_idx];
    wire [IDXB-1:0] fi = oldest(flt_m);
    assign f_v   = |flt_m;
    assign f_idx = fi;
+   assign f_rp  = rpl[fi];
    assign f_rob = rob[fi];
    assign f_fc  = fc[fi];
    assign f_pc  = pc[fi];
@@ -301,6 +314,11 @@ module smolrv64_lq
       end
    endgenerate
    assign e_av = av;
+   assign e_wt = wt;
+   generate for (gd = 0; gd < NENT; gd = gd + 1) begin : g_pch
+      assign e_pch[gd*PCHB +: PCHB] = pc[gd][PCHB:1];
+   end endgenerate
+   assign e_acc = v & sent;
    wire [IDXB-1:0] xi = oldest(rdy_m);
    assign x_head  = head_m[xi];
    assign x_v     = |rdy_m;
@@ -348,31 +366,45 @@ module smolrv64_lq
    wire [IDXB-1:0]   kd0 = tail + k_off;
    assign kmask = kds;
    wire          k_any = |kmk;
-   reg  [IDXB:0] k_n;
-   integer       kn;
+   // WATCHING. A load that landed while an older store's address was still unknown stays (lnd,
+   // address valid) until that store's address is in and showed no overlap; one flagged for replay
+   // stays until it replays. Everything else leaves at its landing.
+   wire            lwatch = l_v & (unk_q[l_idx] | rpl[l_idx] | viol[l_idx]);
+   wire [NENT-1:0] wfree  = v & lnd & ~unk_q & ~rpl & ~viol;
+   // the entries that leave the live set this cycle (one popcount, so an entry counts once)
+   reg  [NENT-1:0] gone;
+   reg  [IDXB:0]   gone_n;
+   integer         gn;
    always @* begin
-      k_n = {(IDXB+1){1'b0}};
-      for (kn = 0; kn < NENT; kn = kn + 1) k_n = k_n + {{IDXB{1'b0}}, kmk[kn] & ~(l_v & (l_idx == kn[IDXB-1:0]))};
+      gone = wfree | kmk;
+      if (l_v & ~lwatch) gone[l_idx] = 1'b1;
+      gone_n = {(IDXB+1){1'b0}};
+      for (gn = 0; gn < NENT; gn = gn + 1) gone_n = gone_n + {{IDXB{1'b0}}, gone[gn]};
    end
 
    always @(posedge clk) begin
       if (reset) begin
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
+         lnd <= {NENT{1'b0}}; rpl <= {NENT{1'b0}};
          tail <= {IDXB{1'b0}};
          cnt <= {(IDXB+1){1'b0}};
       end else begin
          // Retiring the entry frees its slot; slot REUSE is governed by cnt and tail, so an
          // out-of-order response simply leaves the slot dead until tail comes round to it.
-         if (l_v) begin v[l_idx] <= 1'b0; av[l_idx] <= 1'b0; sent[l_idx] <= 1'b0; end
+         if (l_v & ~lwatch) begin v[l_idx] <= 1'b0; av[l_idx] <= 1'b0; sent[l_idx] <= 1'b0; end
+         if (l_v & lwatch)  lnd[l_idx] <= 1'b1;
+         for (kw = 0; kw < NENT; kw = kw + 1) begin
+            if (wfree[kw]) begin v[kw] <= 1'b0; av[kw] <= 1'b0; sent[kw] <= 1'b0; lnd[kw] <= 1'b0; end
+            if (viol[kw] & v[kw]) rpl[kw] <= 1'b1;
+         end
          if (x_v & x_take) sent[x_idx] <= 1'b1;
          if (d_alloc & d_ready) begin
-            v[tail] <= 1'b1; av[tail] <= 1'b0; sent[tail] <= 1'b0;
+            v[tail] <= 1'b1; av[tail] <= 1'b0; sent[tail] <= 1'b0;  lnd[tail] <= 1'b0;  rpl[tail] <= 1'b0;  wt[tail] <= d_wt;
             rob[tail] <= d_rob; prd[tail] <= d_prd; rdn[tail] <= d_rd;
             rdv[tail] <= d_rd_v; sqt[tail] <= d_sqtag;  pc[tail] <= d_pc;  sqn[tail] <= d_seq;
             tail <= tail + 1'b1;
          end
-         if ((d_alloc & d_ready) & ~l_v)      cnt <= cnt + 1'b1;
-         else if (~(d_alloc & d_ready) & l_v) cnt <= cnt - 1'b1;
+         cnt <= cnt + {{IDXB{1'b0}}, (d_alloc & d_ready)} - gone_n;
 
          if (a_v) begin
             pa[a_idx] <= a_pa;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;
@@ -392,15 +424,15 @@ module smolrv64_lq
          // allocates while it holds (asserted).
          if (k_any) begin
             for (kw = 0; kw < NENT; kw = kw + 1)
-               if (kmk[kw]) begin v[kw] <= 1'b0;  av[kw] <= 1'b0;  sent[kw] <= 1'b0; end
+               if (kmk[kw]) begin v[kw] <= 1'b0;  av[kw] <= 1'b0;  sent[kw] <= 1'b0;  lnd[kw] <= 1'b0;  rpl[kw] <= 1'b0; end
             tail <= kd0;
-            cnt <= cnt - k_n - {{IDXB{1'b0}}, l_v};
          end
          // The flush, ordered LAST: it wins over an allocation made in its cycle (dispatch
          // is not gated on the redirect since gate V3, 2026-09-05). Nothing older than the
          // redirecting op is in flight, so every entry is younger and dies.
          if (flush) begin
             v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
+            lnd <= {NENT{1'b0}}; rpl <= {NENT{1'b0}};
             tail <= {IDXB{1'b0}};
             cnt <= {(IDXB+1){1'b0}};
          end

@@ -611,6 +611,25 @@ enforces this for CBOs, and AMOs are serialized. The LSU asserts it at the start
 integrity bit 39). A queued access is a committed store or the LQ's head candidate
 (`pt_nonspec`).
 
+**D18. A pending action is cancelled by the entry it is FOR, not by the entry that happens to be in
+its pipeline register.** The store queue's data read is picked one cycle and lands the next. The
+kill cancelled a pending read with `rq_v & kmk[rq_idx]`, but `rq_idx` is the entry whose read
+lands THIS cycle; the read picked this cycle is `rp_idx`'s. While M filled in program order the
+picks went oldest first, so the two were one entry or the younger died with the older. Once M
+filled in arrival order, a younger store was picked, an older one picked behind it, and the
+younger one's kill cancelled the older one's read: its `rd` bit was already cleared, no
+writeback was coming, and the store sat at the ROB head with its address and no data for good.
+
+The hang surfaced 38.5 M cycles into the 300 M boot, and the training queue's 50,000-cycle
+watchdog named it; the random LQ/SQ bench had never produced a pick order that differed from
+age order together with a kill, and passed.
+
+The fix: the cancel keys on the pick (`rp_v & kmk[rp_idx]`), and `tb_smolrv64_lqsq` test 14
+drives exactly the interleaving (it fails on the old line). Two parts of the rule:
+- Every cancel of a pipelined action names the action's own entry, at the stage it is in.
+- An ordering a structure relies on (here: picks in age order) is asserted or tested when the
+  design change that produced the order is made, not left to whichever workload notices.
+
 ## E. Widths and lint
 
 **E1. The lint gate is `-Werror` on the load-bearing rules.**

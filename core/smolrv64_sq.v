@@ -126,6 +126,16 @@ module smolrv64_sq
     input  wire [LQN*2-1:0]      l_size,
     input  wire [LQN*(IDXB+1)-1:0] l_tag,     // each load's captured store-seqno
     input  wire [LQN-1:0]        l_av,
+    // MEMORY-DEPENDENCE SPECULATION: a load whose wait bit (l_wt) is clear goes ahead of older stores
+    // whose addresses are unknown; l_acc says a load has reached memory (sent, or landed and still
+    // watched), and l_viol flags one that did while an older live store overlaps it: the load read
+    // before that store, and must replay.
+    input  wire [LQN-1:0]        l_wt,
+    input  wire [LQN-1:0]        l_acc,
+    output wire [LQN-1:0]        l_unk_q,     // per entry, REGISTERED: an older store's address is unknown
+    output wire [LQN-1:0]        l_viol,      // per entry: it went ahead of an older store that overlaps it
+    output wire [LQN-1:0]        l_res_c,     // per entry, a pulse: the last unknown older address came in, and it did not overlap
+    output wire [LQN-1:0]        l_res_a,     // ...and it did (the load had to wait, or has replayed)
     input  wire                  l_fill,      // a load's address arrives this cycle...
     input  wire [LQIB-1:0]       l_fill_ix,   // ...into this entry
     input  wire [11:0]           l_fill_off,
@@ -381,7 +391,7 @@ module smolrv64_sq
          end
          // An older store whose address has not arrived cannot be compared, so it blocks --
          // conservative and correct, and the same rule the compare form used.
-         assign l_block[gl] = l_av[gl] & (|(oldm & (conf[gl] | ~av)));
+         assign l_block[gl] = l_av[gl] & (|(oldm & (conf[gl] | (~av & {NENT{l_wt[gl]}}))));
          // THE BLOCK, TOO, IS A REGISTER PER LOAD (plan item T1 (L) step 2, 2026-09-07). The
          // live l_block above fed the load queue's candidate select and so the LSU's start
          // and, through the shared completion term, the landing wake: gate W6's worst path
@@ -392,32 +402,48 @@ module smolrv64_sq
          // cycle), so that cycle computes it from the row being written (fill_row, against
          // av_next). A load is no candidate before its address is in, and the live form
          // stays as the oracle smolrv64_core asserts against.
+         // a store's address arriving this cycle against this load: the block RISES (an unknown
+         // address becoming a known overlap) in the same edge the matrix's bit does
+         wire arr_ov = l_av[gl] & a_v & oldm[a_idx]
+                     & ovl_ab(l_off[gl*12 +: 12], l_size[gl*2 +: 2], a_va[11:0], a_size);
          reg blk_q;  initial blk_q = 1'b0;
          always @(posedge clk)
             blk_q <= (l_fill & (l_fill_ix == gl[LQIB-1:0]))
-                   ? (|(oldm & (fill_row | ~av_next)))
-                   : (l_av[gl] & (|(oldm & (conf[gl] | ~av))));
+                   ? (|(oldm & (fill_row | (~av_next & {NENT{l_wt[gl]}}))))
+                   : ((l_av[gl] & (|(oldm & (conf[gl] | (~av & {NENT{l_wt[gl]}}))))) | arr_ov);
          assign l_block_q[gl] = blk_q;
          reg unk_q;  initial unk_q = 1'b0;      // MEM_ALIAS_UNK: the unknown-address arm alone, a cycle old
          always @(posedge clk) unk_q <= l_av[gl] & (|(oldm & ~av));
          assign l_block_unk_q[gl] = unk_q;
-`ifndef SYNTHESIS
-         // MEMORY-DEPENDENCE CENSUS: a load blocked by older stores whose addresses are unknown, at
-         // the cycle the last of them is known: did it alias one of its older stores? (a load that
-         // had gone ahead would have been right, or wrong)
+         assign l_unk_q[gl]       = unk_q;
+         // ...evaluated in two places that together leave no cycle uncovered: the matrix's bit (the
+         // store's address arrived earlier, or the load reached memory after it), and the store
+         // address ARRIVING this cycle against a load that already has (the flag is then a flop in
+         // the cycle the store's address is visible, before the store can commit and retire)
+         assign l_viol[gl]        = l_av[gl] & l_acc[gl] & ((|(oldm & conf[gl])) | arr_ov);
+         // RESOLUTION: the cycle the last older store with an unknown address gets one, the load
+         // learns whether it overlaps an older store. A pulse (registered), one of two: it did not
+         // (l_res_c) or it did (l_res_a) -- the training signal of the wait table, whether the load
+         // waited for that address or went ahead of it.
          wire unk_now = l_av[gl] & (|(oldm & ~av));
-         reg  was_unk;  reg [15:0] ubc;  reg r_c, r_a;  reg [15:0] r_cy;
-         initial begin was_unk = 1'b0; ubc = 16'd0; r_c = 1'b0; r_a = 1'b0; r_cy = 16'd0; end
+         reg  was_unk;  reg r_c, r_a;
+         initial begin was_unk = 1'b0; r_c = 1'b0; r_a = 1'b0; end
          always @(posedge clk) begin
             r_c <= 1'b0;  r_a <= 1'b0;
-            if (!l_av[gl] || reset) begin was_unk <= 1'b0;  ubc <= 16'd0; end
+            if (!l_av[gl] || reset) was_unk <= 1'b0;
             else begin
                was_unk <= unk_now;
-               if (unk_now) ubc <= ubc + 16'd1;
-               else if (was_unk) begin
-                  r_c <= ~(|(oldm & conf[gl]));  r_a <= |(oldm & conf[gl]);  r_cy <= ubc;  ubc <= 16'd0;
-               end
+               if (!unk_now && was_unk) begin r_c <= ~(|(oldm & conf[gl]));  r_a <= |(oldm & conf[gl]); end
             end
+         end
+         assign l_res_c[gl] = r_c;  assign l_res_a[gl] = r_a;
+`ifndef SYNTHESIS
+         reg [15:0] ubc;  reg [15:0] r_cy;
+         initial begin ubc = 16'd0; r_cy = 16'd0; end
+         always @(posedge clk) begin
+            if (!l_av[gl] || reset) ubc <= 16'd0;
+            else if (unk_now) ubc <= ubc + 16'd1;
+            else if (was_unk) begin r_cy <= ubc;  ubc <= 16'd0; end
          end
          assign dep_rc[gl] = r_c;  assign dep_ra[gl] = r_a;  assign dep_cy[gl*16 +: 16] = r_cy;
 `endif
@@ -565,7 +591,10 @@ module smolrv64_sq
          // per cell: a whole-row write would drop this cycle's column and row updates for the live
          for (li = 0; li < LQN; li = li + 1)
             for (k = 0; k < NENT; k = k + 1) if (kmk[k]) conf[li][k] <= 1'b0;
-         if (rq_v & kmk[rq_idx]) rq_v <= 1'b0;
+         // the read picked THIS cycle (it lands next) is cancelled when its entry dies; the one landing
+         // now (rq_idx) needs nothing, its entry dies with it. Picks come in the order addresses arrive,
+         // so a dying entry need not be the one just picked.
+         if (rp_v & kmk[rp_idx]) rq_v <= 1'b0;
          tailc <= tailc - k_n;
          cnt   <= cnt - k_n - {{IDXB{1'b0}}, (c_v & c_take)};
       end
