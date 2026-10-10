@@ -78,13 +78,19 @@ static void tick() {
 }
 
 // ---- vring layout (device addresses) --------------------------------------
+// The device sees guest physical addresses inside the DRAM window and emits the AXI address
+// PA ^ 0x8000_0000 (dram_window.vh): this bench's memory is keyed by that AXI address, so
+// its offsets below are what the device's bus carries, and GUEST + offset is what the
+// descriptors and queue registers carry.
+static const uint64_t GUEST = 0x80000000ull;
 static const uint32_t DESC = 0x2000, AVAIL = 0x3000, USED = 0x4000;
 static const uint32_t HDR = 0x5000, DATA = 0x6000, STATUS = 0x7000;
 static const uint16_t F_NEXT = 1, F_WRITE = 2;
 
 static void set_desc(int i, uint64_t addr, uint32_t len, uint16_t flags, uint16_t next) {
     uint8_t b[16];
-    for (int k=0;k<8;k++) b[k]=(uint8_t)(addr>>(8*k));
+    uint64_t pa = GUEST + addr;
+    for (int k=0;k<8;k++) b[k]=(uint8_t)(pa>>(8*k));
     for (int k=0;k<4;k++) b[8+k]=(uint8_t)(len>>(8*k));
     b[12]=(uint8_t)flags; b[13]=(uint8_t)(flags>>8);
     b[14]=(uint8_t)next;  b[15]=(uint8_t)(next>>8);
@@ -124,7 +130,7 @@ int main(int argc, char** argv) {
     dut->reset = 0;
 
     dut->queue_num = 8; dut->queue_ready = 1;
-    dut->queue_desc = DESC; dut->queue_driver = AVAIL; dut->queue_device = USED;
+    dut->queue_desc = GUEST + DESC; dut->queue_driver = GUEST + AVAIL; dut->queue_device = GUEST + USED;
     dut->device_status = 0x0f; // ACK|DRIVER|FEATURES_OK|DRIVER_OK
     for (int i = 0; i < 4; i++) tick();
 

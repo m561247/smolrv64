@@ -1815,7 +1815,7 @@ then `../../tools/pipeview/target/release/pipeview s.kanata sillyloop.elf`.
 | lint | `src/lint.sh` | `lint: clean` |
 | riscv-tests | `core/run-vl.sh` | `pass=240 fail=0` |
 | directed tests, for what riscv-tests never does (a misaligned AMO; a counter overflow, Sscofpmf) | `core/run-directed.sh` (after `run-vl.sh`) | `PASS` for every test in `core/directed/` |
-| unit benches of the shared blocks and devices, under Verilator | `src/run-tb.sh` | `tb pass=20 / 20` |
+| unit benches of the shared blocks and devices, under Verilator (the two C++-driven benches, the SD-SPI host and virtio_blk, included) | `src/run-tb.sh` | `tb pass=22 / 22` |
 | Linux lockstep vs simmerv | `CYC=300000000 core/run-cosim-linux.sh` | no assertion, no divergence; the retire count against `cosim-expected.txt`; every plain RAM store byte-exact (below) |
 | the D$ | `core/run-dcache-tb.sh` | `DCACHE-TB: 48 of 48 runs pass` (6 seeds × in-order/reordering memory × default, slow, fast-with-stores, remap-heavy; every outcome occurs; memory equals gold after every clean) |
 | `rv_cache`, both shapes (no longer instantiated) | `core/run-cache-tb.sh` | PASS at LAT=4/20/100/200 |
