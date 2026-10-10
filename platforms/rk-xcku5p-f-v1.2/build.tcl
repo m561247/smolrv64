@@ -273,9 +273,6 @@ if {1} {
         lappend vdefines "SMOLRV64_IW=3"
     }
 }
-set build_stamp [clock format [clock seconds] -format "%Y%m%d%H%M%S"]
-puts "Build stamp: $build_stamp"
-lappend vdefines "SMOLRV64_BUILD_STAMP=64'h$build_stamp"
 set git_commit 00000000
 if {[catch {exec git -C $repo_root rev-parse --short=8 HEAD} git_result] == 0} {
     set git_commit $git_result
@@ -290,6 +287,16 @@ puts "Git commit: $git_commit"
 puts "Source dirty: $source_dirty"
 lappend vdefines "SMOLRV64_GIT_COMMIT=32'h$git_commit"
 lappend vdefines "SMOLRV64_GIT_DIRTY=1'b$source_dirty"
+# The build stamp (rv_soc_top's BID_STAMP) is a constant in the netlist, so a stamp that differs
+# per build makes every build a different netlist with its own placement. A clean tree takes its
+# commit's date: two builds of one commit synthesize alike and their timing can be compared. A
+# dirty tree takes the wall clock; its netlist is nobody's reference.
+set build_stamp [clock format [clock seconds] -format "%Y%m%d%H%M%S"]
+if {!$source_dirty && [catch {exec git -C $repo_root log -1 --format=%cd --date=format:%Y%m%d%H%M%S HEAD} git_date] == 0} {
+    set build_stamp $git_date
+}
+puts "Build stamp: $build_stamp"
+lappend vdefines "SMOLRV64_BUILD_STAMP=64'h$build_stamp"
 # ILA_VIRTIO=1: insert an ILA on the MMIO clock-bridge ui-side (virtio-mmio access + read data),
 # sampled on ui_clk. Lets us capture the driver's DeviceFeaturesSel-write / DeviceFeatures-read
 # sequence on hardware and see what virtio actually returns (probe VERSION_1 -22 root-cause).
