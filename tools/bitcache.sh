@@ -12,8 +12,9 @@
 # A key is <commit12>[-d<diff8>]-iw<IW>-div<DIV8>-<placer>: the commit, a hash of the tree's
 # uncommitted changes to anything synthesized or used to build (src, core, the platform's sources
 # and scripts, the monitor), and the knobs the build used (the project file's defines, the
-# placer directive in impl_1's log). An entry holds the
-# bitstream, the routed timing summary, the build's defines, the diff of a dirty tree and meta.txt.
+# placer directive in impl_1's log). An entry holds the bitstream, the routed checkpoint (a probe
+# build that differs by a knob or an ILA places incrementally against it: INCR_DCP=<entry>/routed.dcp
+# make), the routed timing summary, the build's defines, the diff of a dirty tree and meta.txt.
 set -eu
 BITCACHE=${BITCACHE:-$HOME/bitcache}
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -76,6 +77,9 @@ put)
     mkdir -p "$d"
     cp "$bit" "$d/$PROJ.bit"
     [ -f "$rpt" ] && cp "$rpt" "$d/timing_summary.rpt"
+    dcp=$plat/$PROJ.runs/impl_1/${PROJ}_postroute_physopt.dcp
+    [ -f "$dcp" ] || dcp=$plat/$PROJ.runs/impl_1/${PROJ}_routed.dcp
+    [ -f "$dcp" ] && cp "$dcp" "$d/routed.dcp"
     grep -o 'Verilog_Define Name="[^"]*" Val="[^"]*"' "$plat/$PROJ.xpr" | sed 's/Verilog_Define Name="//; s/" Val="/=/; s/"$//; s/&apos;/'"'"'/g; s/&quot;/"/g' > "$d/defines.txt" || true
     st=$plat/$PROJ.runs/bitcache-start
     if [ -f "$st/tree" ]; then cp "$st/dirty.diff" "$d/dirty.diff"; commit=$(cat "$st/commit")

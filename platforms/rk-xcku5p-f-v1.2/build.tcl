@@ -548,6 +548,19 @@ if {$step in {impl bit}} {
     puts "Place directive: $place_directive   Route directive: $route_directive"
     set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $place_directive [get_runs impl_1]
     set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE $route_directive [get_runs impl_1]
+    # INCR_DCP=<routed checkpoint>: place and route incrementally against a banked build's
+    # checkpoint (tools/bitcache.sh keeps one per entry as routed.dcp), so a probe build that
+    # differs from it by a knob or an ILA keeps its placement and timing instead of taking a
+    # fresh draw from the placement spread. Cleared when unset: the project file would otherwise
+    # remember the last one.
+    if {[info exists env(INCR_DCP)] && $env(INCR_DCP) ne ""} {
+        set incr_dcp [file normalize $env(INCR_DCP)]
+        if {![file exists $incr_dcp]} { error "INCR_DCP=$incr_dcp: no such checkpoint" }
+        puts "Incremental implementation against: $incr_dcp"
+        set_property INCREMENTAL_CHECKPOINT $incr_dcp [get_runs impl_1]
+    } else {
+        set_property INCREMENTAL_CHECKPOINT "" [get_runs impl_1]
+    }
     if {![file exists $cvfpu_timing_hook]} {
         error "CVFPU timing hook missing: $cvfpu_timing_hook"
     }
