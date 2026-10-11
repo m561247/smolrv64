@@ -273,6 +273,16 @@ if {1} {
         lappend vdefines "SMOLRV64_IW=3"
     }
 }
+# VDEFS="NAME=VALUE NAME2=VALUE2": further Verilog defines, as the sim runners take them, for a
+# probe bitstream (SMOLRV64_MDSPEC=0: no memory-dependence speculation; SMOLRV64_SQB=4 ...).
+# They are part of what was built: the bitcache key and the banner's dirty mark see them.
+if {[info exists env(VDEFS)] && $env(VDEFS) ne ""} {
+    foreach d $env(VDEFS) {
+        regsub {^-D} $d {} d
+        puts "VDEFS: $d"
+        lappend vdefines $d
+    }
+}
 set git_commit 00000000
 if {[catch {exec git -C $repo_root rev-parse --short=8 HEAD} git_result] == 0} {
     set git_commit $git_result
