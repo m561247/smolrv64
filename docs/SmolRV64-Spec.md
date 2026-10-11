@@ -874,6 +874,12 @@ load wins, FP waits. Safe without a ROB walk because an FP op cannot trap (it re
 
 An FPU result and an in-core compare never land in the same cycle (the compare waits,
 `icr_land`), so each landing result writes its own op's `fflags` into that op's ROB slot.
+Every integer result of the F port -- an in-core compare, FCLASS or FMV.X, and the FPU's own
+FCVT to an integer register -- leaves through that one result register (`icr`), and it lands
+only while its lane's landing buffer has room (`lb_fe_room`, §8): the FE stream yields to
+the LD stream there. The FPU cannot hold a result, so the register is kept free for it: an
+FPU op with an integer destination starts only while no other is in flight and the register
+is empty, and no in-core op takes the register while one is in flight.
 
 ---
 
@@ -970,8 +976,14 @@ set in the stage register.
   destination (`few_int`, by its shard) takes its lane's landing buffer the same way, behind
   the buffer's own entries, the SYSQ and the load landing, and completes when it drains.
   SH_FE has no writer and no bank. A cycle can enqueue a load's and an FE result in the same
-  lane (two enqueue slots); the Top-Down `dep-fp` class finds the FE stream's destinations by
-  the F and MD stages' registers and the buffers' FE entries (`lb_fe`).
+  lane (two enqueue slots), but the FE stream yields to the buffer's room: an integer result
+  enters a lane's buffer only while it holds at most one entry (`lb_fe_room`, a flop from the
+  next occupancy), which bounds the buffer at three of its four entries -- the LD stream
+  cannot wait, and without the gate the two streams fill the buffer by one in every cycle both
+  land (Geekbench 5's N-Body epilogue, a run of column-0 loads under four compare results,
+  wrapped it and lost a landing). The divide's result waits the same way (`md_room`). The
+  Top-Down `dep-fp` class finds the FE stream's destinations by the F stage's, the result
+  register's and the MD stage's registers and the buffers' FE entries (`lb_fe`).
 - **The head ops run from the head-op register (5.2d-b step 3).** An AMO, LR/SC or CBO goes
   alone, so in slot A and lane A, whose adder generates its address and which reads its rs2 (an
   AMO's or SC's data). Both wait in the one-entry head-op register (`ho_*`), the op's record

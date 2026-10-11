@@ -512,6 +512,19 @@ module smolrv64_core
    wire                sy_lane_ok;                   // lane A's slot is free for the SYSQ
    // the landing buffers (defined with the LD stream): per lane, LBN entries
    localparam integer LBN = 4, LBB = 2;
+   // THE FE STREAM YIELDS TO THE BUFFER'S ROOM. Two streams push into a lane's buffer (the LD
+   // stream's load, the FE stream's integer result) and one entry a cycle drains, so without a
+   // gate the buffer grows by one in every cycle both land: Geekbench 5's N-Body epilogue (a run
+   // of loads dispatched one a group, so all in column 0, with four FLT results landing behind
+   // them) overflowed lane A's, and the landing the wrap overwrote never completed its ROB entry
+   // (2026-10-11). The LD stream cannot wait (the D$ delivers), so the FE stream does: an
+   // integer result enters a lane's buffer only while the buffer holds at most LBN-3 entries,
+   // which bounds the occupancy at LBN-1 (past the gate only the LD stream's push and one cycle
+   // without a drain -- the op selected as the buffer filled, or a multiply's slot -- add to
+   // it). Registered from the next occupancy, so the gate is a flop at its consumers.
+   reg  [NL-1:0]       lb_fe_room;
+   wire [NL-1:0]       lb_fe_room_n;
+   initial lb_fe_room = {NL{1'b1}};
    reg  [RN_PBITS-1:0] lb_prd [0:NL*LBN-1];
    reg  [63:0]         lb_dat [0:NL*LBN-1];
    reg  [ROB_IDXB-1:0] lb_rob [0:NL*LBN-1];
@@ -2043,7 +2056,9 @@ module smolrv64_core
    // and leaves when the FPU is not landing: the FPU cannot hold its result, this can.
    wire        md_kill = md_v & dead(md_rob);           // the kill: the divide is aborted
    wire        md_done = md_v & ~md_pend & div_done;
-   wire        md_wb   = md_pend & (~md_rd_v | ~fp_wb);   // the op completes (ROB)
+   // ...and, like every integer result of the F port, when its lane's buffer has room (lb_fe_room)
+   wire        md_room = lb_fe_room[md_prd[RN_IDXB +: 2]];
+   wire        md_wb   = md_pend & (~md_rd_v | (~fp_wb & md_room));   // the op completes (ROB)
    wire        md_wr   = md_wb & md_rd_v;                                    // ...and writes its register
    assign      md_advance = ~md_v | md_wb;
    // The divider starts a cycle after the issue, from registered operands: its start-cycle
@@ -2271,8 +2286,10 @@ module smolrv64_core
    // handed out again). Added as the unit accepts an op, removed as its result lands.
    localparam integer NFQ = 8;
    reg  [NFQ-1:0]      fq_v;
+   reg  [NFQ-1:0]      fq_int;             // the op writes an integer register (its result takes icr)
    reg  [ROB_IDXB-1:0] fq_rob [0:NFQ-1];
-   initial fq_v = {NFQ{1'b0}};
+   initial begin fq_v = {NFQ{1'b0}}; fq_int = {NFQ{1'b0}}; end
+   wire                fpu_int_inflight = |(fq_v & fq_int);
    reg  [NFQ-1:0]      fq_dead, fq_hit;
    reg  [3:0]          fq_free;
    integer             fqi;
@@ -2288,7 +2305,7 @@ module smolrv64_core
    always @(posedge clk) begin
       if (fp_res_valid)
          for (fqi = 0; fqi < NFQ; fqi = fqi + 1) if (fq_hit[fqi]) fq_v[fqi] <= 1'b0;
-      if (fp_disp) begin fq_v[fq_free[2:0]] <= 1'b1;  fq_rob[fq_free[2:0]] <= f_rob; end
+      if (fp_disp) begin fq_v[fq_free[2:0]] <= 1'b1;  fq_rob[fq_free[2:0]] <= f_rob;  fq_int[fq_free[2:0]] <= f_int; end
       if (reset | redirect) fq_v <= {NFQ{1'b0}};      // the unit flushes with the redirect
    end
    always @(posedge clk) if (!reset) begin
@@ -2299,10 +2316,10 @@ module smolrv64_core
       if (fp_res_valid & ((fq_hit & (fq_hit - 1'b1)) != {NFQ{1'b0}}))
          $fatal(1, "smolrv64_core: two FPU ops in flight for rob %0d", fp_res_tag[RN_PBITS +: ROB_IDXB]);
    end
-   wire fp_complete = fp_res_valid | icr_v;             // a result lands: the FPU's, else the in-core one
-   wire [FTAGW-1:0] fl_tag    = fp_res_valid ? fp_res_tag    : icr_tag;
-   wire [63:0]      fl_data   = fp_res_valid ? fp_res_data   : icr_data;
-   wire [4:0]       fl_fflags = fp_res_valid ? fp_res_fflags : {icr_nv, 4'd0};
+   wire fp_complete = fp_go | icr_land;                  // a result lands: the FPU's f-register, else icr's
+   wire [FTAGW-1:0] fl_tag    = fp_go ? fp_res_tag    : icr_tag;
+   wire [63:0]      fl_data   = fp_go ? fp_res_data   : icr_data;
+   wire [4:0]       fl_fflags = fp_go ? fp_res_fflags : icr_fflags;
 
    // ============================================================== stage F (FP arith)
    // A one-entry execute stage parallel to M, fed by u_iq_f. An FP arith op is loaded here
@@ -2343,18 +2360,35 @@ module smolrv64_core
    // THE IN-CORE FP OPS (FSGNJ/N/X, FEQ/FLT/FLE, FCLASS, FMV both ways) run here in one cycle, off
    // the stage's operand registers, into a one-entry result register that lands through the
    // FPU's own landing (fp_land: the FE shard, the ROB port, the flags) in any cycle the FPU is
-   // not landing. The FPU keeps priority, so its handshake is unchanged; a waiting in-core
-   // result holds the stage.
+   // not landing an f-register. The FPU keeps priority, so its handshake is unchanged; a waiting
+   // in-core result holds the stage.
+   // EVERY INTEGER RESULT OF THE F PORT LEAVES THROUGH THIS REGISTER, the FPU's (an FCVT to an
+   // integer register, fp_ret_int) included, and lands only while its lane's landing buffer has
+   // room (lb_fe_room): the FE stream yields to the LD stream there. The FPU cannot hold a
+   // result, so the register is kept free for it: an FPU op with an integer destination starts
+   // only while no other is in flight and the register is empty, and no in-core op takes the
+   // register while one is in flight. One integer result on the F port at a time; the FPU's
+   // f-register results are never held, their slice always has room.
    wire        f_ic     = f_valid & ~ff_use_fpu;
-   wire        fp_start = f_valid & ff_use_fpu & ~redirect;
+   wire        f_int    = f_rd_v & ~ff_wrfp;                  // the op writes an integer register
+   wire        fp_start = f_valid & ff_use_fpu & ~redirect & ~(f_int & (icr_v | fpu_int_inflight));
    wire        fp_disp  = fp_start & fp_iss_ready;   // accepted by the unit this cycle
-   reg         icr_v, icr_nv;
+   reg         icr_v;
+   reg  [4:0]  icr_fflags;
    reg  [63:0] icr_data;
    reg  [FTAGW-1:0] icr_tag;
-   initial icr_v = 1'b0;
-   wire        icr_land  = icr_v & ~fp_res_valid;
-   wire        icr_take  = f_ic & ~redirect & (~icr_v | icr_land);
-   assign      f_advance = ~f_valid | fp_disp | icr_take;
+   reg         icr_room;                     // its lane's buffer takes the result this cycle
+   initial begin icr_v = 1'b0; icr_room = 1'b1; end
+   wire        fp_ret_int = fp_res_valid & fp_res_tag[FTAGW-2] & ~fp_res_tag[RN_PBITS-1];   // rd_v, an integer shard
+   wire        fp_go      = fp_res_valid & ~fp_ret_int;      // the FPU lands an f-register itself
+   wire        icr_land   = icr_v & ~fp_go & icr_room;
+   wire        icr_take   = f_ic & ~redirect & ~fpu_int_inflight & (~icr_v | icr_land);
+   assign      f_advance  = ~f_valid | fp_disp | icr_take;
+   // the room flop follows the register's next occupant: the FPU's integer result, the in-core op
+   // taken, else what it holds; an f-register's result always has room
+   wire [FTAGW-1:0] icr_tag_n = fp_ret_int ? fp_res_tag : icr_take ? {1'b0, f_rd_v, f_rd, f_rob, f_prd} : icr_tag;
+   wire             icr_int_n = icr_tag_n[FTAGW-2] & ~icr_tag_n[RN_PBITS-1];
+   always @(posedge clk) icr_room <= reset | ~icr_int_n | lb_fe_room_n[icr_tag_n[RN_IDXB +: 2]];
    wire        fi_isd = f_insn[25];                  // 0=single 1=double
    wire [2:0]  fi_f3  = f_insn[14:12];
    wire [31:0] fi_u1  = unbox_s(f_rs1_val);          // FMV.X.W is a raw bit-move: never unboxed
@@ -2384,10 +2418,21 @@ module smolrv64_core
       if (icr_take) begin
          icr_v <= 1'b1;  icr_data <= fi_res;
          icr_tag <= {1'b0, f_rd_v, f_rd, f_rob, f_prd};   // the FPU's tag layout, never re-boxed
-         icr_nv <= (ff_cls == 3'd2) & (fi_isd ? fi_cd[1] : fi_cs[1]);
+         icr_fflags <= {(ff_cls == 3'd2) & (fi_isd ? fi_cd[1] : fi_cs[1]), 4'd0};
+      end
+      // the FPU's integer result: the register is free for it (fp_start, icr_take); a dead one goes nowhere
+      if (fp_ret_int & ~dead(fp_res_tag[RN_PBITS +: ROB_IDXB])) begin
+         icr_v <= 1'b1;  icr_data <= fp_res_data;  icr_tag <= fp_res_tag;  icr_fflags <= fp_res_fflags;
       end
       // younger than the redirecting head: wrong-path. Ordered last, on the valid bit alone (rule I11)
       if (reset | redirect) icr_v <= 1'b0;
+   end
+   always @(posedge clk) if (!reset) begin
+      if (fp_ret_int & icr_v & ~icr_land)
+         $fatal(1, "smolrv64_core: the FPU's integer result (rob %0d) finds the F port's result register held (rob %0d)",
+                fp_res_tag[RN_PBITS +: ROB_IDXB], icr_tag[RN_PBITS +: ROB_IDXB]);
+      if (fp_ret_int & icr_take)
+         $fatal(1, "smolrv64_core: an in-core op takes the F port's result register as the FPU's integer result arrives");
    end
 
    always @(posedge clk) begin
@@ -2591,11 +2636,12 @@ module smolrv64_core
    end
    wire dep_ld    = no_issue & ((rf_blk_vq & ld_dst(rf_blk_pq)) | dep_ld_l);
    // An f-register (FP slices: an FP op's or an FP load's), or an FP op's or divide's integer
-   // result: in the F stage, in the MD stage, or waiting in a lane's landing buffer.
+   // result: in the F stage, in the F port's result register, in the MD stage, or waiting in a
+   // lane's landing buffer.
    function automatic fe_dst(input [RN_PBITS-1:0] p);
       integer k;
       begin
-         fe_dst = (p[RN_PBITS-1:RN_IDXB] >= SH_F0) | (f_valid & (f_prd == p))
+         fe_dst = (p[RN_PBITS-1:RN_IDXB] >= SH_F0) | (f_valid & (f_prd == p)) | (icr_v & (icr_tag[RN_PBITS-1:0] == p))
                 | (md_v & md_rd_v & (md_prd == p));
          for (k = 0; k < NL*LBN; k = k + 1)
             if ((lb_live_fe[k*RN_PBITS +: RN_PBITS] == p) & (p != {RN_PBITS{1'b0}})) fe_dst = 1'b1;
@@ -3442,6 +3488,14 @@ module smolrv64_core
    wire [NL-1:0] by2 = lb_drain & ~lb_any & ~rsv & ~pl & p2;
    wire [NL-1:0] en0 = p0 & ~by0;
    wire [NL-1:0] en2 = p2 & ~by2;
+   // the occupancy after this cycle, and whether the FE stream may push next cycle (lb_fe_room)
+   wire [LBB:0]  lb_n_n [0:NL-1];
+   genvar gln;
+   generate for (gln = 0; gln < NL; gln = gln + 1) begin: g_ln
+      assign lb_n_n[gln] = lb_n[gln] + {{LBB{1'b0}}, en0[gln]} + {{LBB{1'b0}}, en2[gln]}
+                                     - {{LBB{1'b0}}, lb_drain[gln] & lb_any[gln]};
+      assign lb_fe_room_n[gln] = (lb_n_n[gln] <= LBN - 3);
+   end endgenerate
    // the drained entry of each lane, {wr, cmp, prd, dat, rob} (a wire per lane: rule F4)
    wire [2+RN_PBITS+64+ROB_IDXB-1:0] lp [0:NL-1];
    wire [LBB-1:0]                    lb_t2 [0:NL-1];         // the FE stream's slot, after the LD's
@@ -3473,15 +3527,20 @@ module smolrv64_core
          end
          lb_t[lbi] <= lb_t[lbi] + {{(LBB-1){1'b0}}, en0[lbi]} + {{(LBB-1){1'b0}}, en2[lbi]};
          if (lb_drain[lbi] & lb_any[lbi]) lb_h[lbi] <= lb_h[lbi] + 1'b1;
-         lb_n[lbi] <= lb_n[lbi] + {{LBB{1'b0}}, en0[lbi]} + {{LBB{1'b0}}, en2[lbi]}
-                                - {{LBB{1'b0}}, lb_drain[lbi] & lb_any[lbi]};
-         if (reset | redirect) begin lb_h[lbi] <= 0; lb_t[lbi] <= 0; lb_n[lbi] <= 0; end   // flush last (rule I11)
+         lb_n[lbi] <= lb_n_n[lbi];
+         lb_fe_room[lbi] <= lb_fe_room_n[lbi];
+         if (reset | redirect) begin lb_h[lbi] <= 0; lb_t[lbi] <= 0; lb_n[lbi] <= 0; lb_fe_room[lbi] <= 1'b1; end   // flush last (rule I11)
       end
    end
    always @(posedge clk) if (!reset) begin
-      for (lbi = 0; lbi < NL; lbi = lbi + 1)
-         if ({1'b0, lb_n[lbi]} + en0[lbi] + en2[lbi] - (lb_drain[lbi] & lb_any[lbi]) > LBN)
+      for (lbi = 0; lbi < NL; lbi = lbi + 1) begin
+         if (lb_n_n[lbi] > LBN)
             $fatal(1, "smolrv64_core: lane %0d's landing buffer overflows", lbi);
+         // the FE stream's gate (lb_fe_room) is what keeps the buffer from filling: a push past it
+         // is the overflow a cycle early
+         if (en2[lbi] & ~lb_fe_room[lbi])
+            $fatal(1, "smolrv64_core: the FE stream pushed into lane %0d's landing buffer at %0d entries", lbi, lb_n[lbi]);
+      end
       if (sp_v & ~lb_drain[0])
          $fatal(1, "smolrv64_core: the SYSQ fired without lane A's slot");
       if (kchk)

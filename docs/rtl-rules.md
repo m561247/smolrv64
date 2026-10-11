@@ -379,6 +379,22 @@ that task's f-registers at the next context switch. A lockstep from a Geekbench 
 checkpoint caught it at the kernel's `sstatus` read (Clean against Dirty), inside
 Speech Recognition, the subtest that miscompares on the board.
 
+**C7. A buffer fed by more than one stream back-pressures every stream that can wait.**
+A size argument made from drain rates ("a free cycle comes within two") is not a bound
+when two producers can each push every cycle and one consumer drains one: the occupancy
+grows by one in every cycle both land, for as long as both land. The lanes' landing
+buffers (`lb_*`, 4 entries) took the LD stream's load and the FE stream's integer result
+with no gate on either; Geekbench 5's N-Body epilogue -- loads dispatched one a group, all
+column 0, landing one a cycle, with four FLT results landing behind them in consecutive
+cycles -- wrapped lane A's buffer and the overwritten landing never completed its ROB entry
+(the 2 GiB board, 2026-10-11, ~17 minutes into the subtest, no cosim ever reached the
+shape). The stream that cannot wait (the D$ delivers the load) keeps its path; every other
+stream yields to the buffer's room (`lb_fe_room`: the FE stream pushes only at <= LBN-3
+entries, which bounds the buffer at LBN-1), and the always-on invariant is on the GATE (a
+push past it), not only on the overflow it prevents -- the overflow check had been there
+and no sim ever tripped it, because the shape needs a timing coincidence the gate makes
+irrelevant.
+
 **D1. One epoch mechanism, not one per engine.**
 A global epoch bumps on redirect / sfence / checkpoint close. Every
 long-latency engine latches the epoch it started in. A result delivers only on

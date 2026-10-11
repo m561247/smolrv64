@@ -165,12 +165,32 @@ module tb;
       end
       if (!done)
          $display("RISCV-TEST TIMEOUT after %0d cycles (pc~%h) retires=%0d", ncyc, imem_addr, nret);
+      $display("LANEBUF peak occupancy per lane: %0d %0d %0d (of %0d), cycles at >=3: %0d",
+               lbpk[0], lbpk[1], lbpk[2], dut.LBN, lb3);
       // Without this the clock keeps toggling after the verdict is printed, stdout is never
       // flushed, and the process never exits: every test "hangs" at 100% CPU with NO output.
       // cb02868 lost it to a line-range `sed -i '134,149d'` that was one line too long while
       // removing debug $displays -- a deleted line leaves no trace, so re-reading the region
       // looked fine. Diff a line-range edit; do not eyeball it.
       $finish;
+   end
+
+   // the lanes' landing buffers: the peak occupancy and the cycles near full (the overflow
+   // assertion is the core's; this says how close a run came). +lbtrace=<n> prints lane A's
+   // pushes and drains for the first n cycles (from +lbfrom=<cycle>) a stream lands or its buffer holds an entry.
+   integer lbpk [0:2], lb3, lbk, lbtrace = 0, lbcyc = 0, lbfrom = 0;
+   initial begin lbpk[0] = 0; lbpk[1] = 0; lbpk[2] = 0; lb3 = 0; if ($value$plusargs("lbtrace=%d", lbtrace)) ; if ($value$plusargs("lbfrom=%d", lbfrom)) ; end
+   always @(posedge clk) if (!reset) begin
+      lbcyc = lbcyc + 1;
+      for (lbk = 0; lbk < 3; lbk = lbk + 1)
+         if (dut.lb_n[lbk] > lbpk[lbk]) lbpk[lbk] = dut.lb_n[lbk];
+      if (dut.lb_n[0] >= 3 || dut.lb_n[1] >= 3 || dut.lb_n[2] >= 3) lb3 = lb3 + 1;
+      if (lbtrace > 0 && (dut.lb_n[0] >= 1 || dut.p2[0] || dut.p0[0] || dut.pl[0]) && lbcyc >= lbfrom) begin
+         lbtrace = lbtrace - 1;
+         $display("[%0d] LB0 n=%0d en0=%b en2=%b by0=%b by2=%b p0=%b p2=%b drain=%b free=%b | ld_land=%b lq=%0d f_v=%b icr_v=%b fpres=%b fpbusy=%b | head=%0d d_take=%b",
+                  lbcyc, dut.lb_n[0], dut.en0[0], dut.en2[0], dut.by0[0], dut.by2[0], dut.p0[0], dut.p2[0], dut.lb_drain[0], dut.lb_free[0],
+                  dut.ld_land, dut.lq_occ, dut.f_valid, dut.icr_v, dut.fp_res_valid, dut.fpu_busy, dut.rob_head_idx, dut.d_take);
+      end
    end
 
    // apply stores after the monitor has seen them
