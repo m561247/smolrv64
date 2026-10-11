@@ -9,7 +9,9 @@
 // NFLIGHT are accepted so the core's instantiation elaborates; the stub holds one op at a time.
 module fp_unit #(parameter TAGW = 24,
                  parameter int unsigned PIPE_REGS = 4,
-                 parameter int unsigned NFLIGHT = 1)
+                 parameter int unsigned NFLIGHT = 1,
+                 parameter RDV_BIT = TAGW - 2,      // the tag's rd_v (the real unit's res_fp/res_int)
+                 parameter FSHARD_BIT = 0)          // the tag's shard MSB: set for an f-register
    (input  wire             clk,
     input  wire             reset,
     input  wire             iss_valid,
@@ -27,6 +29,8 @@ module fp_unit #(parameter TAGW = 24,
     output wire [63:0]      res_data,
     output wire [4:0]       res_fflags,
     output wire [TAGW-1:0]  res_tag,
+    output wire             res_fp,         // the result's kind, as the real unit reports it
+    output wire             res_int,
     input  wire             flush,
     output wire             busy,
     output wire             err,            // the real unit's integrity bit; the stub has none
@@ -84,6 +88,8 @@ module fp_unit #(parameter TAGW = 24,
    assign iss_ready  = ~busy;
    assign busy       = |v_pipe;                 // single-op-at-a-time, like the real unit gate
    assign res_valid  = v_pipe[LAT-1];
+   assign res_int    = res_valid &  (res_tag[RDV_BIT] & ~res_tag[FSHARD_BIT]);
+   assign res_fp     = res_valid & ~(res_tag[RDV_BIT] & ~res_tag[FSHARD_BIT]);
    assign res_data   = d_pipe[LAT-1];
    assign res_tag    = t_pipe[LAT-1];
    assign res_fflags = 5'd0;

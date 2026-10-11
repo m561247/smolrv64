@@ -15,6 +15,8 @@
 // clock crossing that does not exist. The FPU was 45% of all GB5 cycles at the time, and two
 // thirds of that was this handshake. (smolrv64_cvfpu itself left with the scalar core.)
 module fp_unit #(parameter TAGW = 24,
+                 parameter RDV_BIT = TAGW - 2,      // the tag's rd_v
+                 parameter FSHARD_BIT = 0,          // the tag's shard MSB: set for an f-register
                  parameter int unsigned PIPE_REGS = 4,
                  // OPS IN FLIGHT. fpnew is a PIPELINED unit (PipeRegs = PIPE_REGS), able to
                  // accept an op every cycle, but this wrapper held exactly one and so
@@ -52,6 +54,12 @@ module fp_unit #(parameter TAGW = 24,
     input  wire             flush,          // abort in-flight op(s) (squash)
     output wire             busy,
     output logic            err,            // integrity log (registered): an orphan or overwritten result
+    // the result's destination kind, flops beside res_valid: an f-register's (res_fp) or an
+    // integer register's (res_int, the tag's rd_v set and its register in an integer shard).
+    // The core's landing selects on these directly; a decode of the tag there would sit one
+    // level in front of the FE wake bus, which fans out to every scheduler entry.
+    output wire             res_fp,
+    output wire             res_int,
     output wire  [15:0]     dbg);           // wait state for the board's wedge ILA (core_dbg)
 
    localparam fpnew_pkg::fpu_features_t Features = fpnew_pkg::RV64D;
@@ -108,11 +116,11 @@ module fp_unit #(parameter TAGW = 24,
    logic [TAGW-1:0]      req_tag_q;
    localparam int unsigned FW = (NFLIGHT <= 1) ? 1 : $clog2(NFLIGHT + 1);
    logic [FW-1:0]        nflight_q;          // ops accepted by fpnew, not yet returned
-   logic                 out_valid_q;
+   logic                 out_valid_q, out_fp_q, out_int_q;
    logic [63:0]          result_q;
    logic [4:0]           fflags_q;
    logic [TAGW-1:0]      tag_q;
-   initial begin nflight_q = '0; out_valid_q = 1'b0; req_v_q = 1'b0; end
+   initial begin nflight_q = '0; out_valid_q = 1'b0; out_fp_q = 1'b0; out_int_q = 1'b0; req_v_q = 1'b0; end
 
    // Still REGISTERS ONLY. fpnew's in_ready_o is combinational in in_valid_i and
    // exec_shard.v feeds iss_ready into its issue decision, so exposing it closes a loop --
@@ -131,6 +139,8 @@ module fp_unit #(parameter TAGW = 24,
    wire   fpn_valid  = req_v_q | fire;
    wire   fpn_take   = fpn_valid & fpn_in_ready;
    assign res_valid  = out_valid_q;
+   assign res_fp     = out_fp_q;
+   assign res_int    = out_int_q;
    assign res_data   = result_q;
    assign res_fflags = fflags_q;
    assign res_tag    = tag_q;
@@ -145,9 +155,9 @@ module fp_unit #(parameter TAGW = 24,
    end
    always_ff @(posedge clk) begin
       if (reset | flush) begin
-         req_v_q <= 1'b0; nflight_q <= '0; out_valid_q <= 1'b0;
+         req_v_q <= 1'b0; nflight_q <= '0; out_valid_q <= 1'b0; out_fp_q <= 1'b0; out_int_q <= 1'b0;
       end else begin
-         if (out_valid_q & res_ready) out_valid_q <= 1'b0;
+         if (out_valid_q & res_ready) begin out_valid_q <= 1'b0; out_fp_q <= 1'b0; out_int_q <= 1'b0; end
          if (fpn_take) req_v_q <= 1'b0;
          if (fire & ~fpn_in_ready) req_v_q <= 1'b1;   // fpnew declined: hold it here
          // NOT ALL OPS ARE PIPELINED. NONCOMP (MINMAX/SGNJ/CMP/CLASSIFY) and parts of CONV
@@ -162,6 +172,8 @@ module fp_unit #(parameter TAGW = 24,
          else if (fpn_take & ~fpn_out_valid) nflight_q <= nflight_q + 1'b1;
          if (fpn_out_valid) begin
             out_valid_q <= 1'b1;
+            out_int_q   <= fpn_tag[RDV_BIT] & ~fpn_tag[FSHARD_BIT];
+            out_fp_q    <= ~(fpn_tag[RDV_BIT] & ~fpn_tag[FSHARD_BIT]);
             result_q    <= fpn_result;
             fflags_q    <= {fpn_status.NV, fpn_status.DZ, fpn_status.OF,
                             fpn_status.UF, fpn_status.NX};

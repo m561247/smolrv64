@@ -2056,8 +2056,13 @@ module smolrv64_core
    // and leaves when the FPU is not landing: the FPU cannot hold its result, this can.
    wire        md_kill = md_v & dead(md_rob);           // the kill: the divide is aborted
    wire        md_done = md_v & ~md_pend & div_done;
-   // ...and, like every integer result of the F port, when its lane's buffer has room (lb_fe_room)
-   wire        md_room = lb_fe_room[md_prd[RN_IDXB +: 2]];
+   // ...and, like every integer result of the F port, when its lane's buffer has room (lb_fe_room):
+   // a flop that follows the stage's register, so md_wb stays one level (it is in the F/C
+   // scheduler's unit_busy through md_advance)
+   reg         md_room;
+   initial md_room = 1'b1;
+   wire [RN_PBITS-1:0] md_prd_n = iss_md ? qf_prd : md_prd;
+   always @(posedge clk) md_room <= reset | lb_fe_room_n[md_prd_n[RN_IDXB +: 2]];
    wire        md_wb   = md_pend & (~md_rd_v | (~fp_wb & md_room));   // the op completes (ROB)
    wire        md_wr   = md_wb & md_rd_v;                                    // ...and writes its register
    assign      md_advance = ~md_v | md_wb;
@@ -2248,7 +2253,7 @@ module smolrv64_core
       unbox_s = (x[63:32]==32'hffffffff) ? x[31:0] : 32'h7fc00000; endfunction
 
 
-   wire        fp_iss_ready, fp_res_valid, fpu_busy;
+   wire        fp_iss_ready, fp_res_valid, fp_res_fp, fp_res_int, fpu_busy;
    wire [63:0] fp_res_data;
    wire [4:0]  fp_res_fflags;
    localparam integer FTAGW = 2 + 6 + ROB_IDXB + RN_PBITS;   // dst32, rd_v, rd, rob, prd
@@ -2260,7 +2265,7 @@ module smolrv64_core
    // than be matched against "the one in flight".
    // PIPE_REGS 5 (fp_unit's default is 4): fpnew's own datapath was a 25-level, -0.51 ns
    // family at IW=3. One more cycle of FP latency; the integer side does not pay.
-   fp_unit #(.TAGW(FTAGW), .NFLIGHT(4), .PIPE_REGS(5)) u_fpu
+   fp_unit #(.TAGW(FTAGW), .NFLIGHT(4), .PIPE_REGS(5), .RDV_BIT(FTAGW-2), .FSHARD_BIT(RN_PBITS-1)) u_fpu
      (.clk(clk), .reset(reset),
       .iss_valid(fp_start), .iss_ready(fp_iss_ready),
       .iss_op(ff_op), .iss_op_mod(ff_mod), .iss_src_fmt(ff_src), .iss_dst_fmt(ff_dst),
@@ -2279,17 +2284,22 @@ module smolrv64_core
       // redirect fires only when its op is the ROB head, so everything older has already
       // committed, and anything in flight is younger by construction. If head_block goes
       // (work list P2), this needs an age or epoch tag instead.
-      .res_fflags(fp_res_fflags), .res_tag(fp_res_tag), .flush(redirect), .busy(fpu_busy), .err(fpu_err), .dbg(fpu_dbg));
+      .res_fflags(fp_res_fflags), .res_tag(fp_res_tag), .res_fp(fp_res_fp), .res_int(fp_res_int),
+      .flush(redirect), .busy(fpu_busy), .err(fpu_err), .dbg(fpu_dbg));
 
    // THE FPU'S OPS IN FLIGHT, by ROB index: fpnew has no per-op kill, so a dead op in it holds the
    // release until its result has landed (in its own register, before the walk's registers are
    // handed out again). Added as the unit accepts an op, removed as its result lands.
    localparam integer NFQ = 8;
    reg  [NFQ-1:0]      fq_v;
-   reg  [NFQ-1:0]      fq_int;             // the op writes an integer register (its result takes icr)
    reg  [ROB_IDXB-1:0] fq_rob [0:NFQ-1];
-   initial begin fq_v = {NFQ{1'b0}}; fq_int = {NFQ{1'b0}}; end
-   wire                fpu_int_inflight = |(fq_v & fq_int);
+   initial fq_v = {NFQ{1'b0}};
+   // an op with an integer destination is in the unit (its result takes icr): one flop, set as
+   // the unit accepts it, cleared as its result arrives -- a flop, because it gates the F stage's
+   // issue and the F port's drain (f_advance -> the F/C scheduler's unit_busy)
+   reg                 fpu_int_inflight;
+   initial fpu_int_inflight = 1'b0;
+   always @(posedge clk) fpu_int_inflight <= ~reset & ~redirect & ((fpu_int_inflight & ~fp_ret_int) | (fp_disp & f_int));
    reg  [NFQ-1:0]      fq_dead, fq_hit;
    reg  [3:0]          fq_free;
    integer             fqi;
@@ -2305,7 +2315,7 @@ module smolrv64_core
    always @(posedge clk) begin
       if (fp_res_valid)
          for (fqi = 0; fqi < NFQ; fqi = fqi + 1) if (fq_hit[fqi]) fq_v[fqi] <= 1'b0;
-      if (fp_disp) begin fq_v[fq_free[2:0]] <= 1'b1;  fq_rob[fq_free[2:0]] <= f_rob;  fq_int[fq_free[2:0]] <= f_int; end
+      if (fp_disp) begin fq_v[fq_free[2:0]] <= 1'b1;  fq_rob[fq_free[2:0]] <= f_rob; end
       if (reset | redirect) fq_v <= {NFQ{1'b0}};      // the unit flushes with the redirect
    end
    always @(posedge clk) if (!reset) begin
@@ -2379,8 +2389,8 @@ module smolrv64_core
    reg  [FTAGW-1:0] icr_tag;
    reg         icr_room;                     // its lane's buffer takes the result this cycle
    initial begin icr_v = 1'b0; icr_room = 1'b1; end
-   wire        fp_ret_int = fp_res_valid & fp_res_tag[FTAGW-2] & ~fp_res_tag[RN_PBITS-1];   // rd_v, an integer shard
-   wire        fp_go      = fp_res_valid & ~fp_ret_int;      // the FPU lands an f-register itself
+   wire        fp_ret_int = fp_res_int;                      // the unit's integer result (a flop)
+   wire        fp_go      = fp_res_fp;                       // the FPU lands an f-register itself (a flop)
    wire        icr_land   = icr_v & ~fp_go & icr_room;
    wire        icr_take   = f_ic & ~redirect & ~fpu_int_inflight & (~icr_v | icr_land);
    assign      f_advance  = ~f_valid | fp_disp | icr_take;
