@@ -22,6 +22,12 @@ ap.add_argument('--seed', type=int, default=1)
 ap.add_argument('--ops', type=int, default=200000)
 ap.add_argument('--misaligned-megapage', action='store_true',
                 help='the first remap installs a 64 KiB-aligned megapage: both models must page-fault there')
+ap.add_argument('--chase', action='store_true',
+                help='pointer-chasing mix: the region past the pointer page is 64-byte nodes whose first word '
+                     'is the next node (a random functional graph: short cycles are common), walked in runs of '
+                     'dependent loads with read-modify-writes of the nodes\' other words and FP math between -- '
+                     'the Barnes-Hut shape of GB5 N-Body (loads whose addresses come from loads, stores a '
+                     'later load of the same node forwards from); random stores never touch a node\'s first word')
 ap.add_argument('--fpmix', action='store_true',
                 help='FP-dense mix: FP arithmetic chains, real call/return through the stack, unpredictable '
                      'branches -- the 3-wide FP-shard + control-flow pattern of GB6 PDF Renderer (2026-09-21)')
@@ -34,7 +40,7 @@ ALIASES = [IDENT, W0, W1]
 PTRS = 512                             # the pointer page (region offset 0..4095)
 XREGS = list(range(5, 32))             # x5..x31: the integer value pool
 BASES = [5, 6, 7]                      # x5-x7: chunk bases; x28 the aligned scratch; x29 the pointer
-VALS = [r for r in XREGS if r not in (5, 6, 7, 28, 29)]
+VALS = [r for r in XREGS if r not in (5, 6, 7, 28, 29, 30)]   # x30: --chase's previous-node register
 FREGS = list(range(32))
 
 out = []
@@ -46,7 +52,19 @@ def e(s): out.append('        ' + s)
 ptrs = [R.choice(ALIASES) + R.randrange(4096, REGION - 4096, 8) for _ in range(PTRS)]
 e('.section .rodata'); e('.globl region_init'); e('.align 3'); out.append('region_init:')
 for p in ptrs: e(f'.quad 0x{p:x}')
-for _ in range((REGION - 4096) // 8): e(f'.quad 0x{R.getrandbits(64):x}')
+NODES = (REGION - 4096) // 64
+if a.chase:
+    # node i at region offset 4096 + 64*i: word 0 the next node's address (identity or W0 alias: W1 remaps),
+    # words 1..7 data. Short cycles are the point: a node revisited a few loads later finds its own
+    # stores still in the store queue.
+    nxt = [R.randrange(NODES) if R.random() < 0.5 else (i + R.randint(1, 4)) % NODES for i in range(NODES)]
+    for i in range(0, NODES - 1, 2):     # a third of the nodes pair up: A -> B -> A, the tightest revisit
+        if R.random() < 0.33: nxt[i], nxt[i + 1] = i + 1, i
+    for i in range(NODES):
+        e(f'.quad 0x{R.choice([IDENT, W0]) + 4096 + 64 * nxt[i]:x}')
+        for _ in range(7): e(f'.quad 0x{R.getrandbits(64):x}')
+else:
+    for _ in range((REGION - 4096) // 8): e(f'.quad 0x{R.getrandbits(64):x}')
 e('.text')
 NSUB = 4
 FPOPS3 = ['fadd', 'fsub', 'fmul', 'fmin', 'fmax', 'fsgnj', 'fsgnjn', 'fsgnjx']
@@ -101,27 +119,32 @@ AMO = ['amoadd', 'amoswap', 'amoxor', 'amoand', 'amoor', 'amomin', 'amomax', 'am
 def off_for(size, aligned):
     """an offset inside the 4 KiB chunk (base+2048 +/- 2 KiB), natural alignment or any byte (a straddle stays in the region)"""
     return R.randrange(-2048, 2048 - size + 1, size if aligned else 1)
+def off_for_store(size, aligned):
+    """a store's offset: in --chase it stays inside words 1..7 of a 64-byte node (never the next pointer)"""
+    if not a.chase: return off_for(size, aligned)
+    node = R.randrange(-2048, 2048, 64)          # a node's start, relative to the base (base+2048 is node-aligned)
+    return node + R.randrange(8, 64 - size + 1, size if aligned else 1)
 
 def load(base):
     op, sz = R.choice(LD)
     e(f'{op} x{R.choice(VALS)}, {off_for(sz, R.random() < 0.7)}(x{base})')
 def store(base):
     op, sz = R.choice(ST)
-    e(f'{op} x{R.choice(VALS)}, {off_for(sz, R.random() < 0.7)}(x{base})')
+    e(f'{op} x{R.choice(VALS)}, {off_for_store(sz, R.random() < 0.7)}(x{base})')
 def fload(base):
     op, sz = R.choice([('flw', 4), ('fld', 8)])
     e(f'{op} f{R.choice(FREGS)}, {off_for(sz, R.random() < 0.8)}(x{base})')
 def fstore(base):
     op, sz = R.choice([('fsw', 4), ('fsd', 8)])
-    e(f'{op} f{R.choice(FREGS)}, {off_for(sz, R.random() < 0.8)}(x{base})')
+    e(f'{op} f{R.choice(FREGS)}, {off_for_store(sz, R.random() < 0.8)}(x{base})')
 def amo(base):
     w = R.choice(['w', 'd']); sz = 4 if w == 'w' else 8
-    e(f'addi x28, x{base}, {off_for(sz, True)}')
+    e(f'addi x28, x{base}, {off_for_store(sz, True)}')
     e(f'{R.choice(AMO)}.{w} x{R.choice(VALS)}, x{R.choice(VALS)}, (x28)')
 def lrsc(base):
     w = R.choice(['w', 'd']); sz = 4 if w == 'w' else 8
     d, s = R.choice(VALS), R.choice(VALS)
-    e(f'addi x28, x{base}, {off_for(sz, True)}')
+    e(f'addi x28, x{base}, {off_for_store(sz, True)}')
     e(f'lr.{w} x{d}, (x28)')
     e(f'addi x{d}, x{d}, {R.randrange(-16, 16)}')
     e(f'sc.{w} x{s}, x{d}, (x28)')       # no memory op in between: both models succeed
@@ -153,7 +176,7 @@ def pointer_chase():
     e(f'ld x29, {idx * 8 - 2048}(x28)')
     room = 4096 - (ptrs[idx] & 0xfff)   # a misaligned access may not leave the page: the DUT raises
     for _ in range(R.randint(1, 3)):     # address-misaligned for a page straddle (documented), by design
-        op, sz = R.choice(LD + ST)
+        op, sz = R.choice(LD if a.chase else LD + ST)   # --chase: a store here could hit a node's next pointer
         off = R.randrange(0, min(2048, room) - sz + 1, sz if R.random() < 0.7 else 1)
         e(f'{op} x{R.choice(VALS)}, {off}(x29)')
 def fences():
@@ -168,6 +191,32 @@ def remap(state):
     e('sd x29, 0(x28)'); e('sfence.vma')
     # after a remap the W1 bases point into the other page: plain RAM, zero-initialised, still checkable
 
+def chase_walk():
+    """--chase: start at a random node and follow next pointers 2-8 times; at each node a
+    read-modify-write of one of its data words (integer or FP, with FP math between), so a node
+    reached again a few loads later finds its own store in the store queue"""
+    e(f'li x29, 0x{R.choice([IDENT, W0]) + 4096 + 64 * R.randrange(NODES):x}')
+    if R.random() < 0.5: e('cbo.flush (x29)')   # the first pointer load misses: the addresses behind it wait
+    e('mv x30, x29')                              # x30: the node before the current one
+    for _ in range(R.randint(2, 8)):
+        e('ld x29, 0(x29)')
+        w = R.randrange(8, 64, 8)
+        # a younger load with a KNOWN address to the word the pending store may write (on a 2-cycle
+        # x30 is the node the pointer load returns): the shape that makes the speculation replay
+        if R.random() < 0.6: e(f'ld x{R.choice(VALS)}, {w}(x30)')
+        if R.random() < 0.5:
+            f1, f2 = R.choice(FREGS), R.choice(FREGS)
+            e(f'fld f{f1}, {w}(x29)')
+            e(f'{R.choice(["fadd", "fmul", "fsub"])}.d f{f1}, f{f1}, f{f2}')
+            if R.random() < 0.3: e(f'fsqrt.d f{f1}, f{f1}')
+            e(f'fsd f{f1}, {w}(x29)')
+        else:
+            x = R.choice(VALS)
+            e(f'ld x{x}, {w}(x29)')
+            e(f'addi x{x}, x{x}, {R.randint(1, 7)}')
+            e(f'sd x{x}, {w}(x29)')
+        e('mv x30, x29')
+        if R.random() < 0.3: fpalu()
 def call():
     e(f'call sub_{R.randrange(NSUB)}')          # auipc+jalr through ra: unlimited reach, and the indirect-jump path real calls take
 def branch():
@@ -179,7 +228,10 @@ def branch():
         else: alu()
     out.append('1:')
 state = {'half': 0}
-if a.fpmix:
+if a.chase:
+    MIX = [(chase_walk, 30), (fpalu, 15), (fload, 6), (fstore, 6), (load, 10), (store, 8), (alu, 10),
+           (branch, 6), (amo, 2), (lrsc, 1), (fences, 0.5), (pointer_chase, 3), (remap, 0.2)]
+elif a.fpmix:
     MIX = [(fpalu, 40), (fload, 7), (fstore, 6), (call, 8), (branch, 10), (alu, 12), (load, 8), (store, 6),
            (pointer_chase, 2), (fences, 0.5)]
 else:
