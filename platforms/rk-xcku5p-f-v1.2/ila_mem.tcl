@@ -20,7 +20,8 @@ if {![file exists $ltx]} { error "debug_nets.ltx not found: $ltx\nBuild+program 
 
 open_hw_manager
 connect_hw_server -allow_non_jtag
-open_hw_target
+source [file join $here hw_target.tcl]
+open_board_target   ;# JTAG=<cable serial> picks the board (hw_target.tcl)
 set dev [lindex [get_hw_devices xcku5p*] 0]
 current_hw_device $dev
 set_property PROBES.FILE      $ltx $dev

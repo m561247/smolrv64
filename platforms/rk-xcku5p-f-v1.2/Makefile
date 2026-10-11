@@ -180,8 +180,8 @@ cdc:
 	$(VIVADO) $(VFLAGS) -source report_cdc.tcl
 
 # Headless ILA capture of the CURRENT (frozen) hardware state over JTAG. Requires a bit built
-# with an ILA_* flag already programmed and the board wedged. Writes a CSV next to the script.
-# CSV=<path> overrides the output. No GUI. See ila_capture.tcl.
+# with an ILA_* flag already programmed and the board wedged. Writes one CSV per ILA next to the
+# script, <CSV>_<instance>.csv. CSV=<path> overrides the base. No GUI. See ila_capture.tcl.
 ila-capture:
 	$(VIVADO) $(VFLAGS) -source ila_capture.tcl $(if $(CSV),-tclargs $(CSV),)
 
