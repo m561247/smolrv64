@@ -211,13 +211,18 @@ module smolrv64_predictor
    reg  [PCW-1:0]  ek;
    reg  [YEW-1:0]  ck;
    integer         k;
+   // The pair is 16-byte aligned (sa_q is ra), so halfword k's address is sa_q with k in bits
+   // [3:1] and its BTB tag is the pair's: no adder in front of the compares.
+   wire [TAGW-1:0] stag = btag(sa_q);
+   reg  [PCW-1:0]  ak;
    always @* begin
-      hv = 8'd0;  hy = 8'd0;  hd1 = 8'd0;
+      hv = 8'd0;  hy = 8'd0;  hd1 = 8'd0;  ak = sa_q;
       for (k = 0; k < 8; k = k + 1) begin
          ek     = bq[k];
          ck     = yq[k];
-         hv[k]  = ~np_q & (k[2:0] >= sk_q) & (ek[EW-1 -: TAGW] == btag(sa_q + 2*k));
-         hy[k]  = ~ek[TGTW+2] & (ck[YEW-1 -: YTAGW] == ytagf(sa_q + 2*k));
+         ak[3:1] = k[2:0];
+         hv[k]  = ~np_q & (k[2:0] >= sk_q) & (ek[EW-1 -: TAGW] == stag);
+         hy[k]  = ~ek[TGTW+2] & (ck[YEW-1 -: YTAGW] == ytagf(ak));
          hd1[k] = ek[TGTW+2] | (hy[k] ? ck[1] : ek[TGTW+1]);
       end
    end
@@ -239,7 +244,8 @@ module smolrv64_predictor
       for (k = 0; k < 8; k = k + 1) if (coh[k]) hk = k[2:0];
       e   = cut ? bq[hk] : {EW{1'b0}};
    end
-   wire [PCW-1:0]  h    = sa_q + {60'd0, hk, 1'b0};             // its address
+   wire [PCW-1:0]  h    = {sa_q[PCW-1:4], hk, 1'b0};               // its address (the pair's, plus the halfword)
+   wire [PCW-1:0]  sa16 = sa_q + 64'd16;                            // the next pair (an adder from a register)
    wire [2:0]      ety  = e[TGTW +: 3];
    wire [TGTW-1:0] etg  = e[TGTW-1:0];
    wire            dir  = cut & hd1[hk];
@@ -248,9 +254,11 @@ module smolrv64_predictor
    assign p_end = hk;
    assign p_mk  = mkv;
    wire            tk   = dir;                                     // the pair ends at a taken mark
-   wire [PCW-1:0]  ftc  = h + 64'd2;                               // the halfword after the CTI
+   // the halfword after the CTI: the next one of this pair, or the next pair (no adder behind
+   // the mark: the mark's position is the loop's latest signal)
+   wire [PCW-1:0]  ftc  = (hk == 3'd7) ? sa16 : {sa_q[PCW-1:4], hk + 3'd1, 1'b0};
    wire [PCW-1:0]  tgt  = ret ? ras[ras_ptr] : {{(PCW-TGTW-1){etg[TGTW-1]}}, etg, 1'b0};
-   wire [PCW-1:0]  p_nx = tk ? tgt : cut ? ftc : sa_q + 64'd16;
+   wire [PCW-1:0]  p_nx = tk ? tgt : cut ? ftc : sa16;
    wire [RASB-1:0] rsp_post = (tk & call) ? ras_ptr + 1'b1 : (tk & ret) ? ras_ptr - 1'b1 : ras_ptr;
    wire [GHL-1:0]  ghr_post = tk ? phist_step(ghr, h) : ghr;
    // each mark's entry: the ending one's prediction, a not-taken one's details, the pair's pre-state
@@ -330,8 +338,11 @@ module smolrv64_predictor
    genvar gb;
    wire [1:0]      bc_rd [0:7];
    wire [YEW-1:0]  yc_rd [0:7];
+   // The BTB banks are distributed RAM: their read is the predictor's loop (the rows read for
+   // this pair -> the marks -> the next pair's address -> the rows read for it), and a block
+   // RAM's clock-to-out is a third of the period before the first compare.
    generate for (gb = 0; gb < 8; gb = gb + 1) begin : bank
-      reg [EW-1:0]  btb [0:NB-1];
+      (* ram_style = "distributed" *) reg [EW-1:0]  btb [0:NB-1];
       reg [1:0]     bc  [0:NB-1];             // a conditional's bimodal counter (the entry's type
                                               // field carries only conditional-or-not for it)
       reg [YEW-1:0] yc  [0:NY-1];

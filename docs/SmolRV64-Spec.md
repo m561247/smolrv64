@@ -352,7 +352,7 @@ frontend reaches 214.6 MHz (196.5 with the ring alone).
 
 | structure | size | organisation | storage |
 |---|---|---|---|
-| BTB | **2048 entries** (`BTBB`=11), 8 halfword banks of 256 | 12-bit tag + 3-bit type + 38-bit target | block RAM, read as the stream moves |
+| BTB | **2048 entries** (`BTBB`=11), 8 halfword banks of 256 | 12-bit tag + 3-bit type + 38-bit target | distributed RAM (the read is in the predictor's loop), read as the stream moves |
 | YAGS corrector | 2048 entries (`YBITS`=11), 8 halfword banks | 8-bit tag + 2-bit counter | distributed RAM, read as the stream moves |
 | GHR | 11 bits (`GHL`) | path history | flops |
 | RAS | 8 entries (`RASB`=3) | call/return stack | flops |
@@ -1518,7 +1518,7 @@ queue's commit, the second ALU); the only yield left is M's, to a landing load o
 
 | array | module | shape | width | bits | storage |
 |---|---|---|---|---|---|
-| `bank[b].btb` | `smolrv64_predictor` | 8 x 256 | 53 | 108 544 | block RAM, read as the stream moves |
+| `bank[b].btb` | `smolrv64_predictor` | 8 x 256 | 53 | 108 544 | distributed RAM (its read is the predictor's loop), read as the stream moves |
 | `bank[b].yc` | `smolrv64_predictor` | 8 x 256 | 10 | 20 480 | distributed RAM, read as the stream moves |
 | `ras` | `smolrv64_predictor` | 8 | 64 | 512 | flops |
 | `bank[b].bc` | `smolrv64_predictor` | 8 x 256 | 2 | 4 096 | distributed RAM, read as the stream moves and by training |
