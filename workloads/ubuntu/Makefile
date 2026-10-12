@@ -13,8 +13,10 @@
 # in nothing else. Keep this equal to the DIV8 src/lint.sh checks and the one the bit is
 # built with (`make bit ... PROBE_CLK_DIV8=48`).
 DIV8  ?= 48
+RTL   ?=                 # the model string's RTL id (the loaded bitstream's banner); the tree's commit when empty
 DTC   ?= dtc
 GEN   := ../../tools/check-dts-timebase.py
+GENRTL := $(if $(RTL),--rtl=$(RTL),)
 TMPL  := ubuntu-nfs.dts.in
 
 %.dtb: %.dts
@@ -24,14 +26,14 @@ TMPL  := ubuntu-nfs.dts.in
 dtbs: ubuntu-nfs.dtb ubuntu-nfs-166.dtb ubuntu-nfs-polled.dtb ubuntu-sd.dtb ubuntu-nfs-4g.dtb ubuntu-sd-4g.dtb
 
 ubuntu-nfs.dts: $(TMPL) $(GEN)          # the one to boot
-	$(GEN) --gen $(DIV8) $(TMPL) $@
+	$(GEN) --gen $(GENRTL) $(DIV8) $(TMPL) $@
 ubuntu-nfs-166.dts: $(TMPL) $(GEN)      # kept for the name; identical while DIV8=48
-	$(GEN) --gen 48 $(TMPL) $@
+	$(GEN) --gen $(GENRTL) 48 $(TMPL) $@
 ubuntu-nfs-polled.dts: $(TMPL) $(GEN)   # UART polled instead of interrupt-driven
-	$(GEN) --gen $(DIV8) --polled $(TMPL) $@
+	$(GEN) --gen $(GENRTL) $(DIV8) --polled $(TMPL) $@
 ubuntu-sd.dts: $(TMPL) $(GEN)           # root on the SD card's first partition, not NFS
-	$(GEN) --gen $(DIV8) --sd-root $(TMPL) $@
+	$(GEN) --gen $(GENRTL) $(DIV8) --sd-root $(TMPL) $@
 ubuntu-nfs-4g.dts: $(TMPL) $(GEN)       # 4 GiB: only for a board with 16 Gb DDR4 parts
-	$(GEN) --gen $(DIV8) --4g $(TMPL) $@
+	$(GEN) --gen $(GENRTL) $(DIV8) --4g $(TMPL) $@
 ubuntu-sd-4g.dts: $(TMPL) $(GEN)
-	$(GEN) --gen $(DIV8) --sd-root --4g $(TMPL) $@
+	$(GEN) --gen $(GENRTL) $(DIV8) --sd-root --4g $(TMPL) $@

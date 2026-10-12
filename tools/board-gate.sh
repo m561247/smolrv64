@@ -67,9 +67,12 @@ stress() {
    pre_d=$(timeout 20 ssh -o BatchMode=yes tommy@$ip 'dmesg | wc -l' 2>/dev/null); pre_c=$(wc -c < "$CON")
    echo "stress: $ip, ${STRESS_S:-900}s of Geekbench (dmesg lines before: $pre_d)"
    # Geekbench is its own session (setsid) so the budget's end kills the whole process group:
-   # a plain `timeout` signals the parent and leaves its workers running on the board.
+   # a plain `timeout` signals the parent and leaves its workers running on the board. The exec
+   # in a subshell makes \$! Geekbench's own pid (and so its group's): a bare `setsid cmd &` from
+   # a group leader forks, \$! names the setsid that already exited, and the kill reached nothing
+   # -- the 2026-10-11 gate left its Geekbench running beside the measured run for an hour.
    timeout $(( ${STRESS_S:-900} + 120 )) ssh -o BatchMode=yes -o ServerAliveInterval=30 tommy@$ip \
-      "cd ~/Geekbench-5.4.1-LinuxRISCVPreview && setsid ./geekbench_riscv64 > /var/tmp/gate-stress.log 2>&1 & P=\$!; t=0; while kill -0 \$P 2>/dev/null && [ \$t -lt ${STRESS_S:-900} ]; do sleep 5; t=\$((t+5)); done; if kill -0 \$P 2>/dev/null; then kill -- -\$P; sleep 5; kill -9 -- -\$P 2>/dev/null; RC=124; else wait \$P; RC=\$?; fi; echo RC=\$RC; dmesg | tail -n +$((pre_d+1)) | grep -E 'Oops|BUG:|Unable to handle|unhandled signal|segfault|cause:|is not a head|NETDEV WATCHDOG'" > "$RES/stress.log" 2>&1
+      "cd ~/Geekbench-5.4.1-LinuxRISCVPreview && ( exec setsid ./geekbench_riscv64 > /var/tmp/gate-stress.log 2>&1 ) & P=\$!; t=0; while kill -0 \$P 2>/dev/null && [ \$t -lt ${STRESS_S:-900} ]; do sleep 5; t=\$((t+5)); done; if kill -0 \$P 2>/dev/null; then kill -- -\$P; sleep 5; kill -9 -- -\$P 2>/dev/null; RC=124; else wait \$P; RC=\$?; fi; echo RC=\$RC; dmesg | tail -n +$((pre_d+1)) | grep -E 'Oops|BUG:|Unable to handle|unhandled signal|segfault|cause:|is not a head|NETDEV WATCHDOG'" > "$RES/stress.log" 2>&1
    rc=$(grep -o 'RC=[0-9]*' "$RES/stress.log" | tail -1 | cut -d= -f2)
    faults=$(( $(grep -cE 'Oops|BUG:|Unable to handle|unhandled signal|segfault|cause:|is not a head|NETDEV WATCHDOG' "$RES/stress.log") ))
    faults=$(( faults + $(tail -c +$((pre_c+1)) "$CON" | tr -d '\r' | grep -acE "$BAD") ))
@@ -139,7 +142,8 @@ case "${RTL_BANNER:-}" in
    *+) echo "WARNING: the loaded bitstream is a DIRTY tree (${RTL_BANNER}) -- its verdict belongs to no commit" ;;
 esac
 export RTL_BANNER
-( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs >/dev/null 2>&1; LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
+# the device tree's model string names the LOADED bitstream (its banner), never the tree's commit
+( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs RTL="${RTL_ID:-$RTL_BANNER}" >/dev/null 2>&1; LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
    || { echo "BOARD: FAIL (upload)"; tail -3 "$RES/upload.log"; exit 1; }
 fi
 echo "booting, watching past byte $PRE"
