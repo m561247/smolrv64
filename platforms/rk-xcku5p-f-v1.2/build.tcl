@@ -145,6 +145,16 @@ proc ensure_ip_products {} {
         set dcp [file join [get_property IP_OUTPUT_DIR $ip] $ip.dcp]
         if {[file exists $dcp]} continue
         puts "  IP $ip: output products missing ($dcp) -- regenerating."
+        # THE MEMORY CONTROLLER'S AXI DATA PORT IS THE PLATFORM'S 64 BITS (rk_xcku5p.v wires
+        # mig_wdata/m_axi_rdata [63:0]). Loading the custom part from ddr4_part.csv resets
+        # C0.DDR4_AxiDataWidth to the part's native 256, whatever the .xci says, so a
+        # regeneration in a fresh tree built a 256-bit port on 64-bit wires (three Synth 8-689
+        # warnings and a bitstream that cannot write DDR). It is set before every generate.
+        if {$ip eq "ddr4_0"} {
+            set_property CONFIG.C0.DDR4_AxiDataWidth 64 $ip
+            set w [get_property CONFIG.C0.DDR4_AxiDataWidth $ip]
+            if {$w != 64} { error "IP $ip: C0.DDR4_AxiDataWidth is $w after setting it to 64" }
+        }
         generate_target {instantiation_template synthesis} $ip
         synth_ip $ip
         if {![file exists $dcp]} {
@@ -506,6 +516,16 @@ if {$step in {synth impl bit}} {
                         [file join [get_property DIRECTORY [get_runs synth_1]] runme.log]} _rout]
     puts $_rout
     if {$_rc} { error "RAM inference regressed -- see above and docs/rtl-rules.md I7" }
+    # PORT WIDTH GATE. A connection narrower or wider than its port is only a warning to
+    # Vivado (Synth 8-689), and it is how a regenerated IP with the wrong port width reaches a
+    # bitstream (rule E3: a width mismatch across a hierarchy boundary is an error).
+    set _slog [file join [get_property DIRECTORY [get_runs synth_1]] runme.log]
+    set _fh [open $_slog r]; set _txt [read $_fh]; close $_fh
+    set _bad [regexp -all -inline -line {^.*\[Synth 8-689\].*$} $_txt]
+    if {[llength $_bad] > 0} {
+        foreach _l $_bad { puts $_l }
+        error "[llength $_bad] port width mismatches in synthesis (Synth 8-689) -- see above and docs/rtl-rules.md E3"
+    }
 }
 
 # Implementation — use Performance_ExplorePostRoutePhysOpt for timing closure
