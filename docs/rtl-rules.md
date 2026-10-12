@@ -1281,3 +1281,24 @@ combinational term. Data writes (LUTRAM payloads) simply land in slots the flush
 Corollary: an assertion that "nothing allocates in a redirect cycle" (the store queue had
 one) is an assertion that the critical path exists.
 
+**I12. Nothing reaches a scheduler's select that is not a flop in the scheduler's own
+cycle. A compare against a shared pointer is registered where the pointer lives.**
+`sy_at_head = sy_v & (sy_rob == rob_head_idx)` was one 6-bit compare, and it sat in lane 0's
+`unit_busy` and, through `sy_advance -> j_adv`, in the F/CTF/MD queue's: the ROB head's
+replicas travelled to the SYSQ, the compare ran there, and the result went on into the
+pick, the payload read and every lane's `pl`/`ps` enables -- 18 levels, 4.5 ns of route,
+and 1,300 of the worst 2,000 endpoints of the 2026-10-10 Explore build (-0.662 ns). The load
+queue's device-load gate was the same shape one level further out: the head compare picked
+the queue's candidate, the candidate started the LSU, and the start reached M's completion
+and from there every scheduler's hold -- 21 levels, ~3,000 endpoints at -0.64 ns in the
+2026-10-11 census. The shape that closes: the flag is a flop computed a cycle ahead from the
+next state on both sides, `sy_at_head <= sy_v_n & (sy_rob_n == rob_head_n_idx)` --
+cycle-exact, the ROB already holds its next head for its own pointer -- and what the select
+consumes is that flop, asserted equal to the live compare. (A flop of the live compare, one
+cycle late, also closes the family but costs every system op a cycle: 0.9% of a systemd
+boot; it is the right trade only where the waiter is rare, as a device load is.) The same
+holds for every pointer a scheduler must not act before (`irr`, `head`, a queue's fill
+pointer): the consumer takes a registered verdict, never the pointer. The census is the
+detector: a family whose source is a `*_reg_rep` of a pointer and whose destinations are
+`pl_reg`, `ps*_reg`, `e_r_reg` or `qval_reg` is this rule, whatever the compare in between.
+

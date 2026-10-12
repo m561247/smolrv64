@@ -75,6 +75,7 @@ module smolrv64_rob
     // register -- trap, redirect -- may act only when it IS this slot, or it would squash an
     // older op still in flight ahead of it.
     output wire [IDXB-1:0]        head_idx,
+    output wire [IDXB-1:0]        head_n_idx,   // the head after this cycle's commits (a flush aside)
     // THE IRREVOCABLE POINT: the oldest entry that is not done. Every op that can restart the
     // machine waits for the ROB head and sets `done` only when it has completed there, so an
     // entry that is done can no longer restart, and everything older than the first not-done
@@ -131,6 +132,7 @@ module smolrv64_rob
    assign empty    = (head == tail);
    assign occ_n    = occ;
    assign head_idx = hidx;
+   assign head_n_idx = head_n[IDXB-1:0];
    wire ready = (occ < ROWS_S);
    // slot k reads slot k-1: per-bit variables, so the chains are not loops to the simulator
    wire [IW-1:0]   cv /*verilator split_var*/;

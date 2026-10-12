@@ -556,17 +556,21 @@ module smolrv64_core
    // it is: the trapping instruction is YOUNGER than an outstanding load, and `flush` would
    // otherwise kill that older entry and lose its register write (head_block holds M; the LSU
    // starts a device access only then).
-   // EVERY "AT THE HEAD" DECISION IS A FLOP (this one, the SYSQ's sy_at_head, the load queue's
-   // hd): the compare is against the head register as it stands, so the flag is set the cycle
-   // AFTER the head arrives at the op and is never set while the op is not the head. The head
-   // register otherwise fans out into the queue's candidate pick, the LSU's start and M's
-   // completion, and from there into every scheduler's wake, hold and select -- the longest
-   // cone in the core. The op's identity follows M's handoff, so the flag is for the op M holds.
-   wire [ROB_IDXB-1:0] rob_head_idx;
+   // EVERY "AT THE HEAD" DECISION IS A FLOP (rule I12). M's (this one), the SYSQ's sy_at_head and
+   // the squash's fr_hd_q are computed a cycle ahead from the next state on both sides -- the
+   // op's next ROB index against the ROB's next head (rob_head_n_idx) -- so each is set in the
+   // cycle the op is the head, as a live compare would be (each asserted equal to it), and its
+   // consumers see one flop. The head register would otherwise fan out into the LSU's start and
+   // M's completion, and from there into every scheduler's wake, hold and select. The load
+   // queue's per-entry flag, which only a device load waits on, compares the head as it stands:
+   // a cycle late. The op's identity follows M's handoff, so the flag is for the op M holds.
+   wire [ROB_IDXB-1:0] rob_head_idx, rob_head_n_idx;
    reg                 m_at_head;
    initial m_at_head = 1'b0;
    always @(posedge clk)
-      m_at_head <= ~reset & (m_advance ? (rob_head_idx == m_go_rob) : (rob_head_idx == m_rob_idx));
+      m_at_head <= ~(reset | redirect) & ((m_advance ? m_go_rob : m_rob_idx) == rob_head_n_idx);
+   always @(posedge clk) if (!reset && m_valid && (m_at_head != (rob_head_idx == m_rob_idx)))
+      $fatal(1, "smolrv64_core: M's head flag %b disagrees with the head compare (m_rob=%0d head=%0d)", m_at_head, m_rob_idx, rob_head_idx);
    // the ROB's commit ports: k = 0 is the head, k the entry k behind it (rc_idx[k])
    wire [IW-1:0]          rc_v, rc_rdv, rc_noret, rc_kill, rc_f;
    wire [IW*6-1:0]        rc_rd;
@@ -877,6 +881,12 @@ module smolrv64_core
    wire [NL*RN_PBITS-1:0]    wkp_l;
    wire [NWB_C-1:0]          wkv  = {wk_fe, wk_ld, wkv_l};
    wire [NWB_C*RN_PBITS-1:0] wkp  = {wa_fe, wa_ld, wkp_l};
+   // What can wake an integer consumer: a lane's write, a load bypassed into a lane's slot
+   // (by0), an FP-pipe result bypassed into one (by2). The other halves of wk_ld and wk_fe
+   // are FP-destination writes, and they carry M's and the FPU's live completion cones (the
+   // dTLB compare behind M's done); an integer scheduler never matches them, so it never
+   // sees them (rule I12). The pending table, the FP queue and the store queue take all.
+   wire [NWB_C-1:0]          wkv_i = {(|by2), (|by0), wkv_l};
 
    wire rf_ready, rf_iss_v, rf_blk_v;  wire [IBF-1:0] rf_d_ent, rf_iss_ent;
    wire [ROB_IDXB-1:0] rf_iss_rob;
@@ -1108,6 +1118,14 @@ module smolrv64_core
          for (i = 0; i < NWB_C; i = i + 1) wk = wk | (wkv[i] & (wkp[i*RN_PBITS +: RN_PBITS] == p));
       end
    endfunction
+   function automatic wk_i;             // wk() over the integer wakes (wkv_i)
+      input [RN_PBITS-1:0] p;
+      integer i;
+      begin
+         wk_i = 1'b0;
+         for (i = 0; i < NWB_C; i = i + 1) wk_i = wk_i | (wkv_i[i] & (wkp[i*RN_PBITS +: RN_PBITS] == p));
+      end
+   endfunction
    // Stuck-cycle snoop: fresh wkv match of the stage's OWN pregs, ORed into its ready bits.
    wire [2:0] snp_f  = {wk(stg_ps_f[2*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[1*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[0*RN_PBITS +: RN_PBITS])};
    always @(posedge clk) begin
@@ -1179,7 +1197,7 @@ module smolrv64_core
       wire [RN_PBITS-1:0]  blk_pr;
       wire [IBI:0]         occ, free;
       wire                 mv = stg_v & ready;
-      wire [1:0]           snp = {wk(stg_ps[RN_PBITS +: RN_PBITS]), wk(stg_ps[0 +: RN_PBITS])};
+      wire [1:0]           snp = {wk_i(stg_ps[RN_PBITS +: RN_PBITS]), wk_i(stg_ps[0 +: RN_PBITS])};
       always @(posedge clk) begin
          if (reset) stg_v <= 1'b0;
          else begin
@@ -1201,7 +1219,7 @@ module smolrv64_core
         (.clk(clk),.reset(reset),
          .d_valid(mv),.d_ready(ready),.d_rob(stg_rob),
          .d_ps(stg_ps[2*RN_PBITS-1:0]),.d_r(stg_r),.d_prd(stg_prd),.d_long(lane_late(stg_pl[PL_INSN +: 32])),.d_ent(d_ent),
-         .wb_v(wkv),.wb_preg(wkp),
+         .wb_v(wkv_i),.wb_preg(wkp),
          // busy: the multiply's reserved slot, a waiting landing, and in lane 0 a system op at the ROB head
          .unit_busy(m1 | lb_any[gl] | ((gl == 0) & sy_at_head)),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
          .iss_take(iss_v),
@@ -1731,7 +1749,7 @@ module smolrv64_core
       .w_v(rob_wv), .w_ix(rob_wix),
       .h_fin(cf_red_fire | (m_red_fire & ~m_trap) | (sy_done & sy_red)),   // the head completes and flushes (a trap never commits)
       .c_kill(rc_kill), .c_valid(rc_v), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd), .c_noret(rc_noret),
-      .flush(redirect), .empty(rob_empty), .occ_n(rob_occ), .head_idx(rob_head_idx),
+      .flush(redirect), .empty(rob_empty), .occ_n(rob_occ), .head_idx(rob_head_idx), .head_n_idx(rob_head_n_idx),
       .irr_idx(rob_irr_idx), .irr_v(rob_irr_v), .rp_v(lq_f_v & lq_f_rp), .rp_ix(lq_f_rob),
       .d_pold(rn_poldv),
       // the walk starts the cycle after the resolve, from the registered branch
@@ -2184,18 +2202,19 @@ module smolrv64_core
    end
    // The faulting entry is the ROB head, so anything else in the SYSQ (a CSR op waiting for the
    // head) is younger and dies at the trap's redirect: the record takes the SYSQ from it.
-   // The SYSQ's "at the head" is a flop (see m_at_head): its op fires the cycle after the head
-   // reaches it, and the flag is clear for whatever the SYSQ holds next (an op that fires or
-   // dies leaves it clear; a record displaces only an op that is not the head). Asserted: the
-   // flag never outlives its entry and is never set while the op is not the head.
+   // The SYSQ's "at the head" (rule I12, see m_at_head): computed a cycle ahead from the SYSQ's
+   // next state (sy_v_n, sy_rob_n: the block below, mirrored) and the ROB's next head, so its op
+   // fires in the cycle it is the head; asserted equal to the live compare.
+   // The record loads once: not again while the SYSQ holds it (sy_qf), and over a CSR op, which
+   // is younger than the faulting head.
+   wire qf_in = qfr_v & ~(sy_v & sy_qf);
+   wire                sy_v_n   = ~(reset | redirect) & (qf_in | iss_sys | (sy_v & ~sy_fire & ~dead(sy_rob)));
+   wire [ROB_IDXB-1:0] sy_rob_n = qf_in ? qfr_rob : iss_sys ? j_rob : sy_rob;
    reg  sy_at_head;
    initial sy_at_head = 1'b0;
-   always @(posedge clk) sy_at_head <= ~reset & ~redirect & sy_v & ~sy_fire & (sy_rob == rob_head_idx);
-   always @(posedge clk) if (!reset && sy_at_head && !(sy_v && sy_rob == rob_head_idx))
-      $fatal(1, "smolrv64_core: the SYSQ's head flag is set with sy_v=%b sy_rob=%0d head=%0d", sy_v, sy_rob, rob_head_idx);
-   // The record loads once: not again while the SYSQ holds it (sy_qf; its own head flag is a
-   // cycle behind), and over a CSR op, which is younger than the faulting head.
-   wire qf_in = qfr_v & ~(sy_v & sy_qf);
+   always @(posedge clk) sy_at_head <= sy_v_n & (sy_rob_n == rob_head_n_idx);
+   always @(posedge clk) if (!reset && (sy_at_head != (sy_v && sy_rob == rob_head_idx)))
+      $fatal(1, "smolrv64_core: the SYSQ's head flag %b disagrees with sy_v=%b sy_rob=%0d head=%0d", sy_at_head, sy_v, sy_rob, rob_head_idx);
    reg  sy_instret;                     // a CSR op on instret/minstret, decoded as it enters
    wire sy_fire    = sy_at_head & sy_lane_ok & (~sy_instret | sy_head_q);   // its result takes lane A's slot
    wire sy_xfire   = sy_fire & sy_xt;                    // ...a trap from dispatch: csr_file's xtrap
@@ -3127,7 +3146,17 @@ module smolrv64_core
    wire m_red_ref  = m_valid & m_done     & csr_red;
    // The branch squash: the tracked mispredict has reached the ROB head. The head is unique, so
    // m_red_fire and cf_red_fire are mutually exclusive.
-   assign cf_red_fire = fr_v & (rob_head_idx == fr_rob);
+   // ...from a flop computed a cycle ahead from the restart's next state (fr_v_n, fr_rob_n: its
+   // block below, mirrored) and the ROB's next head (rule I12, see m_at_head): cf_red_fire is a
+   // redirect, and a redirect's cone reaches every flush arm. Asserted equal to the live compare.
+   wire                fr_v_n   = ~(reset | redirect) & ~fr_rel & (fr_v | fr_set);
+   wire [ROB_IDXB-1:0] fr_rob_n = (~(reset | redirect) & ~fr_rel & fr_set) ? cf_rob : fr_rob;
+   reg                 fr_hd_q;
+   initial fr_hd_q = 1'b0;
+   always @(posedge clk) fr_hd_q <= fr_v_n & (fr_rob_n == rob_head_n_idx);
+   always @(posedge clk) if (!reset && (fr_hd_q != (fr_v && rob_head_idx == fr_rob)))
+      $fatal(1, "smolrv64_core: the squash's head flag %b disagrees with fr_v=%b fr_rob=%0d head=%0d", fr_hd_q, fr_v, fr_rob, rob_head_idx);
+   assign cf_red_fire = fr_v & fr_hd_q;
    // the kill's age, restarting at each branch it is computed for (a later, older one included)
    always @(posedge clk) kd_age <= (reset | ~rob_kd_v | fr_set_q) ? 3'd0 : (kd_age == 3'd7) ? kd_age : kd_age + 3'd1;
    assign kchk = cf_red_fire & (kd_age >= KCHK) & ~fr_set_q;

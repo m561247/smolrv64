@@ -173,7 +173,7 @@ held a group until its room appeared and dispatched it in that cycle.
 | cause | meaning |
 |---|---|
 | unit not complete | LSU / mul / div / FPU still working |
-| `head_block` | the op is a trap, redirect, `fence.i`, CSR/SYSTEM, fault, or faulting memory op, and is **not yet the ROB head** (`m_at_head`, a flop: set the cycle after the head reaches M's op) |
+| `head_block` | the op is a trap, redirect, `fence.i`, CSR/SYSTEM, fault, or faulting memory op, and is **not yet the ROB head** (`m_at_head`, a flop computed a cycle ahead from M's and the ROB's next state: set in the cycle the head reaches M's op) |
 | `ld_land` | a non-blocking load is landing this cycle and takes the LD shard's write port + M's ROB completion port; M yields |
 | `fp_land` | same, for an FP result |
 
@@ -780,9 +780,12 @@ only `fmadd` has: 20 bits/entry against 29.
   lane's port (its ALU and multiply results, and what its landing buffer drains: a waiting
   landing or the SYSQ's result) and the two streams' (the LD stream -- a landing load or M's
   result -- and the FE stream -- the F stage's landing or a divide -- each an FP slice's
-  register or an integer one straight through a lane's write register). Every scheduler
-  watches all of them. A lane's port selects only on registers and the SYSQ's fire, so no
-  completion cone selects a lane's broadcast address.
+  register or an integer one straight through a lane's write register). The FP queue, the
+  pending table and the store queue watch all of them; an integer lane's queue watches the
+  lane ports and, of the two streams, only the writes bypassed into a lane's write register
+  (`by0`, `by2`) -- the streams' FP-slice writes can never name one of its sources, and they
+  carry M's and the FPU's live completion cones (rule I12). A lane's port selects only on
+  registers and the SYSQ's fire, so no completion cone selects a lane's broadcast address.
   A source not yet ready is also compared against the live ports **in its dispatch cycle**,
   because a producer broadcasts exactly once and would otherwise be missed forever.
 - **Select**: **fixed priority**, lowest entry index first. Age is not stored, not
@@ -894,12 +897,15 @@ and a CSR op dispatches without draining but only once the CSR op before it has 
 register `{rob, prd, rd_v, is_csr, func,
 addr, src (rs1 or zimm from the port's forwarded read), pc, seq, insn}` and its fire is from
 flops: `sy_fire = sy_at_head & sy_lane_ok & (~sy_instret | sy_head_q)`, where `sy_at_head` is
-the head compare registered (the op fires the cycle after the head reaches it, never before;
-asserted), `sy_lane_ok` lane A's slot free, and the instret read's second cycle at head (M1b)
-kept. Every "at the ROB head" decision in the core is such a flop -- M's `m_at_head`, the
-SYSQ's, the load queue's per-entry `hd` -- so the head register's fan-out ends at those flops
-instead of running through the queue's candidate pick, the LSU's start and M's completion into
-every scheduler's wake and hold. `csr_file`'s `raddr` and `upd_*` are the
+computed a cycle ahead from the SYSQ's and the ROB's next state, `sy_at_head <= sy_v_n &
+(sy_rob_n == rob_head_n_idx)`, so it is set in the cycle the op is the head, as a live compare
+would be (asserted equal), `sy_lane_ok` lane A's slot free (`lb_free[0] & ~lb_any[0]`: no
+landing waits for it), and the instret read's second cycle at head (M1b) kept. Every "at the
+ROB head" decision in the core is a flop (rule I12): M's `m_at_head` and the squash's
+`fr_hd_q` (behind `cf_red_fire`) are computed the same way, cycle-exact; the load queue's
+per-entry `hd`, which only a device load waits on, compares the head as it stands, a cycle
+late. The head register's fan-out ends at those flops instead of running through the queue's
+candidate pick, the LSU's start and M's completion into every scheduler's wake and hold. `csr_file`'s `raddr` and `upd_*` are the
 register's flops (step 2's lesson: a LUTRAM read in front of `csr_file`'s combinational redirect
 cost IW=3 its closure). The read's value goes to lane A's write slot (§8) and the completion to
 the ROB through lane A's port (M, whose op is younger then, does not complete while the SYSQ's op is the ROB head,
