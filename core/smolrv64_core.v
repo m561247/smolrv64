@@ -551,12 +551,21 @@ module smolrv64_core
    wire [CRW-1:0]      crd;               // the dispatch credits
    wire                fe_hd_v, fe_hd_take;   // the queue head: an instruction, and whether it pops
    wire [15:0]         fe_hd_gc;
-   // Whether the M instruction is the OLDEST in flight. Once M stops blocking, a trap or a
-   // redirect may only fire when it is: the trapping instruction is YOUNGER than an
-   // outstanding load, and `flush` would otherwise kill that older entry and lose its
-   // register write. Not consumed yet -- see the note above lsu_started.
+   // Whether the M instruction is the OLDEST in flight. A trap or a redirect may only fire when
+   // it is: the trapping instruction is YOUNGER than an outstanding load, and `flush` would
+   // otherwise kill that older entry and lose its register write (head_block holds M; the LSU
+   // starts a device access only then).
+   // EVERY "AT THE HEAD" DECISION IS A FLOP (this one, the SYSQ's sy_at_head, the load queue's
+   // hd): the compare is against the head register as it stands, so the flag is set the cycle
+   // AFTER the head arrives at the op and is never set while the op is not the head. The head
+   // register otherwise fans out into the queue's candidate pick, the LSU's start and M's
+   // completion, and from there into every scheduler's wake, hold and select -- the longest
+   // cone in the core. The op's identity follows M's handoff, so the flag is for the op M holds.
    wire [ROB_IDXB-1:0] rob_head_idx;
-   wire                m_at_head = (rob_head_idx == m_rob_idx);
+   reg                 m_at_head;
+   initial m_at_head = 1'b0;
+   always @(posedge clk)
+      m_at_head <= ~reset & (m_advance ? (rob_head_idx == m_go_rob) : (rob_head_idx == m_rob_idx));
    // the ROB's commit ports: k = 0 is the head, k the entry k behind it (rc_idx[k])
    wire [IW-1:0]          rc_v, rc_rdv, rc_noret, rc_kill, rc_f;
    wire [IW*6-1:0]        rc_rd;
@@ -1701,7 +1710,7 @@ module smolrv64_core
    // Commit port k is column k of the head row. The head's kill: a trap's done is latched (no
    // live dTLB here). Behind the head, M's op retires only from the head.
    // A load flagged for replay is done, so it would retire the cycle it becomes the head: it is held
-   // from the cycle the queue reports it (qf_lq) until the SYSQ's replay redirects.
+   // from the cycle the queue flags it (its column's term) until the SYSQ's replay redirects (rp_hold).
    wire rp_hold;                         // (assigned with the SYSQ below)
    wire rc_tkill = (m_valid & m_done_red & m_trap) | sy_trap | rp_hold;
    generate for (gs = 0; gs < IW; gs = gs + 1) begin: rc
@@ -2174,8 +2183,18 @@ module smolrv64_core
    end
    // The faulting entry is the ROB head, so anything else in the SYSQ (a CSR op waiting for the
    // head) is younger and dies at the trap's redirect: the record takes the SYSQ from it.
-   wire sy_at_head = sy_v & (sy_rob == rob_head_idx);
-   wire qf_in = qfr_v & ~sy_at_head;
+   // The SYSQ's "at the head" is a flop (see m_at_head): its op fires the cycle after the head
+   // reaches it, and the flag is clear for whatever the SYSQ holds next (an op that fires or
+   // dies leaves it clear; a record displaces only an op that is not the head). Asserted: the
+   // flag never outlives its entry and is never set while the op is not the head.
+   reg  sy_at_head;
+   initial sy_at_head = 1'b0;
+   always @(posedge clk) sy_at_head <= ~reset & ~redirect & sy_v & ~sy_fire & (sy_rob == rob_head_idx);
+   always @(posedge clk) if (!reset && sy_at_head && !(sy_v && sy_rob == rob_head_idx))
+      $fatal(1, "smolrv64_core: the SYSQ's head flag is set with sy_v=%b sy_rob=%0d head=%0d", sy_v, sy_rob, rob_head_idx);
+   // The record loads once: not again while the SYSQ holds it (sy_qf; its own head flag is a
+   // cycle behind), and over a CSR op, which is younger than the faulting head.
+   wire qf_in = qfr_v & ~(sy_v & sy_qf);
    reg  sy_instret;                     // a CSR op on instret/minstret, decoded as it enters
    wire sy_fire    = sy_at_head & sy_lane_ok & (~sy_instret | sy_head_q);   // its result takes lane A's slot
    wire sy_xfire   = sy_fire & sy_xt;                    // ...a trap from dispatch: csr_file's xtrap
@@ -2188,7 +2207,9 @@ module smolrv64_core
    reg [31:0] rp_cnt;  initial rp_cnt = 32'd0;      // replays (MEMDEP counters in the bench's report)
    always @(posedge clk) if (rp_fire) rp_cnt <= rp_cnt + 32'd1;
 `endif
-   assign rp_hold  = (qf_lq & lq_f_rp) | (qfr_v & qfr_rp) | (sy_v & sy_rp);
+   // ...through its record and the SYSQ; in the cycle the queue flags it, its own column's term
+   // in rc_kill holds it (the head column's is that term when the load is the head)
+   assign rp_hold  = (qfr_v & qfr_rp) | (sy_v & sy_rp);
    assign sy_pc_w  = sy_pc;
    wire sy_done    = sy_fire & ~sy_trap;                 // completes through lane A's landing slot
    // the CSR read's value into lane A. A CSR op that csr_file traps writes its register too: the

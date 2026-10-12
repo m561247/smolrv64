@@ -173,7 +173,7 @@ held a group until its room appeared and dispatched it in that cycle.
 | cause | meaning |
 |---|---|
 | unit not complete | LSU / mul / div / FPU still working |
-| `head_block` | the op is a trap, redirect, `fence.i`, CSR/SYSTEM, fault, or faulting memory op, and is **not yet the ROB head** |
+| `head_block` | the op is a trap, redirect, `fence.i`, CSR/SYSTEM, fault, or faulting memory op, and is **not yet the ROB head** (`m_at_head`, a flop: set the cycle after the head reaches M's op) |
 | `ld_land` | a non-blocking load is landing this cycle and takes the LD shard's write port + M's ROB completion port; M yields |
 | `fp_land` | same, for an FP result |
 
@@ -892,10 +892,14 @@ irqop pseudo-op) is dispatch class S, shares the F/CTF/MD queue and is its fourt
 and a CSR op dispatches without draining but only once the CSR op before it has fired
 (`csr_infl`: the SYSQ holds one, and the queue it comes through reorders). The SYSQ is one
 register `{rob, prd, rd_v, is_csr, func,
-addr, src (rs1 or zimm from the port's forwarded read), pc, seq, insn}` and its fire is a flop
-compare, `sy_fire = sy_at_head & ~port_yield & (~sy_instret | sy_head_q)` -- the same one yield
-gate M's dones use (`port_yield = ld_land | fp_land`, computed once), and the
-instret read's second cycle at head (M1b) kept. `csr_file`'s `raddr` and `upd_*` are the
+addr, src (rs1 or zimm from the port's forwarded read), pc, seq, insn}` and its fire is from
+flops: `sy_fire = sy_at_head & sy_lane_ok & (~sy_instret | sy_head_q)`, where `sy_at_head` is
+the head compare registered (the op fires the cycle after the head reaches it, never before;
+asserted), `sy_lane_ok` lane A's slot free, and the instret read's second cycle at head (M1b)
+kept. Every "at the ROB head" decision in the core is such a flop -- M's `m_at_head`, the
+SYSQ's, the load queue's per-entry `hd` -- so the head register's fan-out ends at those flops
+instead of running through the queue's candidate pick, the LSU's start and M's completion into
+every scheduler's wake and hold. `csr_file`'s `raddr` and `upd_*` are the
 register's flops (step 2's lesson: a LUTRAM read in front of `csr_file`'s combinational redirect
 cost IW=3 its closure). The read's value goes to lane A's write slot (§8) and the completion to
 the ROB through lane A's port (M, whose op is younger then, does not complete while the SYSQ's op is the ROB head,
@@ -1118,7 +1122,8 @@ set in the stage register.
   that day's routed checkpoint started at `u_sq/v_reg` for this reason alone. Rule I9.
 - **A queued load carries everything its access needs**: PA, size, sign, fp-ness, the
   Svpbmt uncached bit and the "DRAM/LRAM, idempotent" bit that licenses a speculative
-  access (`mem`; a device load waits for a LIVE ROB head, `x_head & ~rob_empty`), all written
+  access (`mem`; a device load waits for the ROB head: `hd`, the head compare registered per
+  entry, so it goes the cycle after the head reaches it), all written
   into `smolrv64_lq` at the translate pass FROM THE TRANSLATE'S OWN PA (`t_paddr`, rule D12: the
   LSU's `eff_pa` is the port's address in a cycle the port starts, and classifying the
   translating load by it sent device loads off the wrong path -- the board's dead NIC,
@@ -1189,7 +1194,8 @@ set in the stage register.
   - *Replay.* The flagged load is reported through the queue-fault path (`f_rp`) as a record the
     SYSQ takes when the load is the ROB head: `sy_rp`, no trap and no CSR (`csr_file` never sees
     it), a redirect to the load's own PC with its own seq, and the retire of its row held from the
-    cycle it is flagged (`rc_kill` per column, `rp_hold` at the head). The load re-executes behind
+    cycle it is flagged (`rc_kill`'s per-column term, then `rp_hold` through the record and the
+    SYSQ). The load re-executes behind
     the stores it conflicted with. The irrevocable pointer stops at it meanwhile.
   - *The wait table.* `mdw`: a 2-bit saturating counter per load-PC hash (PC[8:1], 256 entries),
     forgotten every 4 M cycles. A load waits for older unknown addresses when its counter is 2 or

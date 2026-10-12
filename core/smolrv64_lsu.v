@@ -319,6 +319,7 @@ module smolrv64_lsu
    // M's request fields describe the access only when it is M's: M may be empty, its fields left
    // from an older op, while the port starts one of its own
    wire        eff_cbo     = sel_pt ? 1'b0           : req_cbo;
+   wire        run_cbo     = ~src_pt & req_cbo;     // the RUNNING access is a CBO (the FSM past S_IDLE: its source is src_pt)
    wire        eff_amo     = sel_pt ? 1'b0           : req_amo;
    wire        eff_signed  = sel_pt ? pt_signed      : req_signed;
    wire        eff_fp      = sel_pt ? pt_fp          : req_fp;
@@ -529,11 +530,11 @@ module smolrv64_lsu
                         : st2_go ? (eff_st_data >> sh_up)
                                  : (eff_st_data << sh_dn);
    assign mem_wmask     = amo_go ? a_wmask
-                        : eff_cbo ? 8'd0                              // CBO carries no data
+                        : run_cbo ? 8'd0                              // CBO carries no data
                         : st2_go  ? (st_mask >> (4'd8 - {1'b0, boff_q}))
                                   : (st_mask << boff_q);
-   assign mem_wuncached = nc_q & ~eff_cbo;
-   assign mem_cbo       = st_go & eff_cbo;
+   assign mem_wuncached = nc_q & ~run_cbo;
+   assign mem_cbo       = st_go & run_cbo;
    assign mem_cbo_zero  = mem_cbo & req_cbo_zero;
    assign mem_cbo_keep  = mem_cbo & req_cbo_keep;
 
@@ -548,8 +549,12 @@ module smolrv64_lsu
    // completion (mem_wready): a cbo.flush must have reached memory before the doorbell store
    // behind it, and an NC store must be in DDR before a later device write can start the DMA
    // that reads it. Decided by the request's class, registered at start (nc_q, mem_q) or held
-   // by M (eff_cbo) -- never by which ack shows up, and never by an address decode.
-   wire st_fin   = (eff_cbo | nc_q) ? mem_wready : mem_q ? mem_wroom : mem_waccept;
+   // by M (run_cbo) -- never by which ack shows up, and never by an address decode.
+   // THE RUNNING ACCESS'S CLASS SELECTS ON src_pt, NOT sel_pt. A write ends with the FSM past
+   // S_IDLE, where sel_pt is src_pt; in S_IDLE sel_pt is pt_start, this cycle's NEW start, and
+   // a start inside st_fin puts the load queue's candidate pick (which reads the ROB head) in
+   // front of M's completion, and so of every scheduler's hold (done -> m_done -> m_advance).
+   wire st_fin   = (run_cbo | nc_q) ? mem_wready : mem_q ? mem_wroom : mem_waccept;
    // BACK-TO-BACK STORES WITHOUT THE TRIP THROUGH S_IDLE. A store to memory is taken in the
    // cycle it is presented with mem_wroom set, and in that cycle the next queued store, if any,
    // is loaded straight into S_ST: one store a cycle. mem_wroom is a register of the D$'s (its
@@ -675,11 +680,9 @@ module smolrv64_lsu
    assign done_acc = acc_done & ~own_pt;
    assign done     = fault | xo_any | done_acc;
    assign pt_done  = acc_done & own_pt;
-   // A LOAD'S LANDING FROM THE LOAD TERMS ALONE (plan item T1 (L) step 3, 2026-09-07). pt_done
-   // & ~pt_is_store is the same value, but its cone is all of acc_done, and the store terms'
-   // st_fin selects on eff_cbo, which selects on pt_start -- this cycle's NEW start -- so
-   // every landing wake began at pt_v: on 142 of gate W6's 200 worst paths. The load terms
-   // are the FSM state, the D$'s registered rvalid and xword_q. Asserted equal below.
+   // A LOAD'S LANDING FROM THE LOAD TERMS ALONE. pt_done & ~pt_is_store is the same value, but
+   // its cone is all of acc_done (the store and AMO terms, the D$'s write handshake); the load
+   // terms are the FSM state, the D$'s registered rvalid and xword_q. Asserted equal below.
    wire ld_fin = ((st == S_LD) & slow_rv & ~xword_q) | ((st == S_LD2) & slow_rv);
    assign pt_ld_done = ld_fin & own_pt & ~own_pt_st;
    // `!==` in the assertion (an X on either side is a defect too); `!=` in the err bit,

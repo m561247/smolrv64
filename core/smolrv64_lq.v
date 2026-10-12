@@ -275,14 +275,25 @@ module smolrv64_lq
    // device loads wait for the head, which orders them against everything older.
    // ...and NOT already sent: with every entry taken and none landed the ring wraps round to a
    // live, translated entry IN FLIGHT, and `v & av` would offer it a second time.
+   // "ITS OP IS THE ROB HEAD" IS A FLOP PER ENTRY (hd), compared against the head register as
+   // it stands: a device load goes the cycle after the head reaches it, and the flag is never
+   // set for an entry that is not the head -- a live entry at the head stays there until it
+   // lands, and a slot freed and refilled in one cycle is unfilled (av) for longer than the
+   // flag's one-cycle lag. The head register is otherwise in front of the candidate pick, and
+   // through the LSU's start, in front of M's completion and every scheduler's wake.
    wire [NENT-1:0] cand_m;
    wire [NENT-1:0] head_m;
+   reg  [NENT-1:0] hd;
+   initial hd = {NENT{1'b0}};
    genvar gc;
    generate for (gc = 0; gc < NENT; gc = gc + 1) begin : g_cand
       assign cand_m[gc] = v[gc] & av[gc] & ~sent[gc] & tv[gc] & ~flt[gc];
       assign head_m[gc] = (rob[gc] == rob_head);
    end endgenerate
-   wire [NENT-1:0] rdy_m = cand_m & ~e_block & (mem | head_m);
+   always @(posedge clk) hd <= reset ? {NENT{1'b0}} : (v & head_m);
+   always @(posedge clk) if (!reset && |(cand_m & hd & ~head_m))
+      $fatal(1, "smolrv64_lq: a candidate's head flag is set while its op is not the head (hd=%b head_m=%b cand=%b)", hd, head_m, cand_m);
+   wire [NENT-1:0] rdy_m = cand_m & ~e_block & (mem | hd);
    // THE WALKER AND THE TRAP READ THE OLDEST ENTRY THAT NEEDS THEM: an untranslated filled load
    // is walked oldest first, and a load whose translation faulted is never sent: it traps when
    // its op reaches the ROB head.
@@ -320,10 +331,10 @@ module smolrv64_lq
    end endgenerate
    assign e_acc = v & sent;
    wire [IDXB-1:0] xi = oldest(rdy_m);
-   assign x_head  = head_m[xi];
+   assign x_head  = hd[xi];
    assign x_v     = |rdy_m;
    assign x_block = |(cand_m & e_block);   // instrumentation only
-   assign x_devwait = |(cand_m & ~e_block & ~mem & ~head_m) & ~x_v;   // instrumentation only
+   assign x_devwait = |(cand_m & ~e_block & ~mem & ~hd) & ~x_v;   // instrumentation only
    assign x_idx   = xi;
    assign x_pa    = pa[xi];
    assign x_size  = sz[xi];
