@@ -143,8 +143,9 @@ case "${RTL_BANNER:-}" in
    *+) echo "WARNING: the loaded bitstream is a DIRTY tree (${RTL_BANNER}) -- its verdict belongs to no commit" ;;
 esac
 export RTL_BANNER
-# the device tree's model string names the LOADED bitstream (its banner), never the tree's commit
-( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs RTL="${RTL_ID:-$RTL_BANNER}" >/dev/null 2>&1; LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
+# every device tree's model string names the LOADED bitstream (its banner), never the tree's
+# commit: `make dtbs RTL=` for the variants, ubuntu-boot.sh again for the one it boots
+( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs RTL="$RTL_BANNER" >/dev/null 2>&1; LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
    || { echo "BOARD: FAIL (upload)"; tail -3 "$RES/upload.log"; exit 1; }
 fi
 echo "booting, watching past byte $PRE"
