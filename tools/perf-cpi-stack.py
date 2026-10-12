@@ -86,15 +86,18 @@ def load_names():
     return {"r%04x" % int(e["EventCode"], 16): e["EventName"] for e in cat}
 
 def parse(text, names):
-    """Pull counts out of perf's columnar output.  Tolerates thousands separators, the
-    trailing multiplex percentage, '<not counted>' and '<not supported>'."""
-    vals, unknown = {}, []
+    """Pull counts out of perf's columnar output, and each event's trailing multiplex
+    percentage.  Tolerates thousands separators, '<not counted>' and '<not supported>'."""
+    vals, unknown, mux = {}, [], {}
     for line in text.splitlines():
+        pm = re.search(r"\((\d[\d.]*)%\)\s*$", line)     # the multiplex share ends the line
         line = line.split("#")[0]                      # drop perf's derived-metric comment
         m = re.match(r"\s*([\d,.]+|<[^>]+>)\s+([A-Za-z_][\w.:-]*)\s*(\(\d[\d.]*%\))?\s*$", line)
         if not m:
             continue
         raw, ev = m.group(1), m.group(2)
+        if pm:
+            mux[ev] = float(pm.group(1))
         if raw.startswith("<"):
             vals[ev] = None
             continue
@@ -105,7 +108,7 @@ def parse(text, names):
         if key is None:
             unknown.append(ev); continue
         vals[key] = n
-    return vals, unknown
+    return vals, unknown, mux
 
 def topdown(v, width):
     """The closing top-down report. Returns False if the run has no TD_* events."""
@@ -163,8 +166,16 @@ def main():
         i = args.index("--width"); width = int(args[i + 1]); del args[i:i + 2]
     text = open(args[0]).read() if args else sys.stdin.read()
     names = load_names()
-    v, unknown = parse(text, names)
+    v, unknown, mux = parse(text, names)
     g = lambda k: (v.get(k) or 0)
+    # The events of one set fit the PMU (cycle, instret and 13 counters), so a share under 100%
+    # means another perf session held counters: the counts are scaled estimates and the
+    # rotation's SBI calls slowed the run (a loop beside `perf stat -a`: -19%, instructions +9%).
+    shared = [p for p in mux.values() if p < 98.0]
+    if shared:
+        print("  WARNING: %d events multiplexed (counted %.0f-%.0f%% of the run): every count is perf's\n"
+              "  scaled estimate, and the run shared the PMU with another perf session -- not\n"
+              "  comparable with an unshared run.\n" % (len(shared), min(shared), max(shared)))
 
     # FE_BUB is the sum of the FE_* causes.  perf-smol.sh's "cpi" set omits it to stay
     # inside 13 counters, so reconstruct it rather than reporting a hole.
