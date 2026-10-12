@@ -62,7 +62,7 @@
   {
     "EventName": "ST_FPU",
     "EventCode": "0x0303",
-    "BriefDescription": "a multiply in flight in a lane (occupancy) on the CVFPU, + X held for a pending FP result"
+    "BriefDescription": "M stalled on the CVFPU, + X held for a pending FP result"
   },
   {
     "EventName": "ST_DSP",

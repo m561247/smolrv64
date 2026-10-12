@@ -200,7 +200,7 @@ module csr_file
                       HPMEV_ST_MEM = 16'h0300,   // M stalled on the LSU, + X held for a pending load
                       HPMEV_ST_DIV = 16'h0301,   // the MD stage holds a divide (occupancy)
                       HPMEV_ST_MUL = 16'h0302,   // a multiply in flight in a lane (occupancy)
-                      HPMEV_ST_FPU = 16'h0303,   // ...on the CVFPU, + X held for a pending FP result
+                      HPMEV_ST_FPU = 16'h0303,   // M stalled on the CVFPU, + X held for a pending FP result
                       HPMEV_ST_DSP = 16'h0304,   // the queue head without a credit, not the ROB: the sum of ST_IQ..ST_SRZ
                       HPMEV_ST_ROB = 16'h0305,   // the queue head waits for ROB room
                       HPMEV_ST_IQ  = 16'h0306,   // the queue head: its scheduler has no credit
@@ -209,10 +209,10 @@ module csr_file
                       HPMEV_ST_LQ  = 16'h0309,   // the queue head: no load-queue credit
                       HPMEV_ST_SRZ = 16'h030a,   // the queue head: a serializing op drains or is in flight (the rest of ST_DSP)
                       HPMEV_FE_BUB = 16'h0310,   // X idle: frontend supplied no instruction
-                      HPMEV_FE_MMU = 16'h0311,   // ...because the iMMU was walking
-                      HPMEV_FE_IC  = 16'h0312,   // ...because the fetch window was empty
-                      HPMEV_FE_ALN = 16'h0313,   // ...had bytes but no complete instruction
-                      HPMEV_FE_QUE = 16'h0314,   // ...had an instruction; decoupling queue empty
+                      HPMEV_FE_MMU = 16'h0311,   // X idle: because the iMMU was walking
+                      HPMEV_FE_IC  = 16'h0312,   // X idle: because the fetch window was empty
+                      HPMEV_FE_ALN = 16'h0313,   // X idle: had bytes but no complete instruction
+                      HPMEV_FE_QUE = 16'h0314,   // X idle: had an instruction; decoupling queue empty
                       HPMEV_RED_BR = 16'h0006,   // Redirect: conditional branch mispredict
                       HPMEV_RED_JLR= 16'h0007,   // Redirect: indirect jump (jalr) target
                       HPMEV_RED_TRP= 16'h0008,   // Redirect: trap / exception / system op

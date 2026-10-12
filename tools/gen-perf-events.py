@@ -21,21 +21,13 @@ OUT  = ROOT / "docs" / "smolrv64-perf-events.json"
 # one event per line:  HPMEV_NAME = 16'hCODE,   // description
 EV = re.compile(r"HPMEV_(\w+)\s*=\s*16'h([0-9a-fA-F]{4})\s*[,;]\s*//\s*(.+?)\s*$", re.M)
 
-def expand(desc, prev):
-    """'...on the divider' continues the previous description rather than repeating it."""
-    if not desc.startswith("...") or not prev:
-        return desc
-    tail = desc[3:]
-    for sep in (" on the ", ": "):
-        if sep in prev:
-            head = prev.split(sep)[0]
-            return f"{head} {tail}" if sep == " on the " else f"{head}: {tail}"
-    return f"{prev} {tail}"
-
 def build():
-    events, prev = [], None
+    events = []
     for name, code, desc in EV.findall(SRC.read_text()):
-        desc = expand(desc, prev); prev = desc
+        # Each description stands alone: one that continues the line above ("...on the CVFPU")
+        # changes its meaning whenever that line is reworded.
+        if desc.startswith("..."):
+            sys.exit(f"{SRC}: HPMEV_{name}'s description \"{desc}\" continues the line above -- write it out whole")
         events.append({"EventName": name, "EventCode": f"0x{code.lower()}",
                        "BriefDescription": desc})
     if not events:
