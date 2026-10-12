@@ -50,12 +50,14 @@ run_one() {
    base=$(basename "$bin" .bin); elf="$TESTDIR/$base"
    th=$("$NM" "$elf" 2>/dev/null | awk '/ tohost$/{print $1}'); [ -z "$th" ] && th=80001000
    od -An -v -tx1 "$bin" > "$tmp/$base.hex"
-   local out
-   out=$("$BIN" +hex="$tmp/$base.hex" +tohost="$th" +cycles=$CYC 2>&1 | grep -E 'RISCV-TEST')
+   local full out
+   full=$("$BIN" +hex="$tmp/$base.hex" +tohost="$th" +cycles=$CYC 2>&1)
+   out=$(printf '%s\n' "$full" | grep -E 'RISCV-TEST')
    case "$out" in
       *PASS*)    printf "%-26s PASS\n"    "$base" ;;
       *TIMEOUT*) printf "%-26s TIMEOUT\n" "$base" ;;
-      *)         printf "%-26s %s\n" "$base" "${out#*RISCV-TEST }" ;;
+      # a failure names its cause on the same line: the verdict, or the assertion that ended the run
+      *)         printf "%-26s %s %s\n" "$base" "${out#*RISCV-TEST }" "$(printf '%s\n' "$full" | grep -a -E '%Fatal|%Error|Assertion' | head -1 | cut -c1-160)" ;;
    esac
 }
 # Batch of JOBS at a time. `wait -n` would be the natural throttle but macOS ships
