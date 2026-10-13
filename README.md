@@ -16,7 +16,7 @@ login prompt on the board with zero faults before it lands.
 
 | | |
 |---|---|
-| Geekbench 5.4.1, board, 2026-10-04 | **11** single-core (Integer 13, Crypto 1, Floating Point 8), **12** multi-core ([result 24688180](https://browser.geekbench.com/v5/cpu/24688180), [every subtest](workloads/gb5/result-2026-10-04.md)); the whole suite in 2 h 49 min at IPC 0.77 |
+| Geekbench 5.4.1, board, 2026-10-12 | **14** single-core (Integer 16, Crypto 2, Floating Point 11), **14** multi-core ([result 24713782](https://browser.geekbench.com/v5/cpu/24713782), [every subtest](workloads/gb5/result-2026-10-12.md)); the whole suite in 2 h 6 min at IPC 1.02 |
 | Geekbench 6.7.1, board, 2026-09-21 to 23 | 4 single-core, 4 multi-core ([result 19246188](https://browser.geekbench.com/v6/cpu/19246188)) |
 | `sha256sum` of a 30 MB file, board, 2026-09-25 | IPC 1.56 to 1.63 over three runs, 43 cycles per byte |
 | Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed three-wide; DDR4 at 333 MHz |

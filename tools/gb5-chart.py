@@ -28,7 +28,9 @@ def read(path):
 
 def svg(rows, title, subtitle):
     left, bar0, rowh, barmax, w = 150, 160, 18, 260, 640
-    ymax = max(10, 2 * -(-max(sc for sc, _ in rows.values()) // 2))   # the top score, rounded up to even
+    top = max(10, max(sc for sc, _ in rows.values()))
+    step = next(t for t in (2, 5, 10, 20, 50, 100) if barmax * t / top >= 24)   # labels 24 px apart
+    ymax = step * -(-top // step)                                   # the top score, up to a tick
     lines = [f'<text x="12" y="24" font-size="15" font-weight="bold">{title}</text>']
     for i, s in enumerate(subtitle):
         lines.append(f'<text x="12" y="{41+14*i}" fill="#555">{s}</text>')
@@ -45,7 +47,7 @@ def svg(rows, title, subtitle):
             lines.append(f'<text x="{bar0+barmax+30}" y="{y+13}" fill="#666">{rate}</text>')
             y += rowh
         y += 6
-    for s in range(0, ymax + 1, 2):
+    for s in range(0, ymax + 1, step):
         x = bar0 + s * barmax / ymax
         lines.append(f'<line x1="{x:.1f}" y1="{40+14*len(subtitle)}" x2="{x:.1f}" y2="{y}" stroke="#ddd"/>')
         lines.append(f'<text x="{x:.1f}" y="{y+14}" text-anchor="middle" fill="#555">{s}</text>')
