@@ -236,12 +236,14 @@ module smolrv64_sq
    // cycle in between the head's data is read through a bypass from that same copy. Every
    // observable is unchanged: dv, c_v and c_data have the values they had, on the cycle they
    // had them; only the data register's D input moved from an ALU output to a flop.
-   reg [NWB*64-1:0]      wb_q;            // last cycle's writeback data
+   // THE DATA READ LANDS THE SAME WAY: the value read from a register file this cycle is wb_q's
+   // slot NWB the cycle after, so the read's 64 bits reach one register, not every entry.
+   reg [(NWB+1)*64-1:0]  wb_q;            // last cycle's writeback data, and the data read's above it
    reg [NENT-1:0]        ld_v;            // entry k's data lands from wb_q this cycle
-   reg [2:0]             ld_w [0:NENT-1]; // ...from this port (NWB <= 8)
+   reg [2:0]             ld_w [0:NENT-1]; // ...from this slot (a writeback port, or NWB: the data read)
    integer               li2;
    initial begin ld_v = {NENT{1'b0}}; for (li2 = 0; li2 < NENT; li2 = li2 + 1) ld_w[li2] = 3'd0; end
-   initial if (NWB > 8) $fatal(1, "smolrv64_sq: ld_w holds a port index of at most 3 bits");
+   initial if (NWB > 7) $fatal(1, "smolrv64_sq: ld_w holds a slot index of at most 3 bits, NWB=%0d ports and the data read", NWB);
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; dv = {NENT{1'b0}}; rd = {NENT{1'b0}}; cmt = {NENT{1'b0}};
                  headc = {(IDXB+1){1'b0}}; tailc = {(IDXB+1){1'b0}}; kcc = {(IDXB+1){1'b0}};
@@ -524,8 +526,9 @@ module smolrv64_sq
             addr[a_idx] <= a_addr;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;  av[a_idx] <= 1'b1;
             unc[a_idx]  <= a_unc;  tv[a_idx] <= a_tv;  flt[a_idx] <= a_flt;  fc[a_idx] <= a_fc;
          end
-         // the data read: the pick is a register, the value lands the cycle it is read
-         if (rq_v & v[rq_idx]) begin data[rq_idx] <= r_data; dv[rq_idx] <= 1'b1; end
+         // the data read: the pick is a register, the value is in the cycle it is read (dv) and
+         // lands from wb_q the cycle after (ld_v, in the snoop loop below)
+         if (rq_v & v[rq_idx]) dv[rq_idx] <= 1'b1;
          rq_v <= rp_v;  rq_idx <= rp_idx;  rq_preg <= dpr[rp_idx];
          if (rp_v) rd[rp_idx] <= 1'b0;
          if (flush) rq_v <= 1'b0;                      // flush last (rule I11)
@@ -566,9 +569,10 @@ module smolrv64_sq
                   ld_v[k] <= 1'b1;  ld_w[k] <= w[2:0];
                   dv[k]   <= 1'b1;
                end
+            if (rq_v & v[k] & (rq_idx == k[IDXB-1:0])) begin ld_v[k] <= 1'b1;  ld_w[k] <= NWB[2:0]; end
          end
       end
-      wb_q <= wb_data;
+      wb_q <= {r_data, wb_data};
       for (k = 0; k < NENT; k = k + 1)
          if (ld_v[k]) data[k] <= wb_q[ld_w[k]*64 +: 64];
       // THE KILL, after every other arm (the snoop above included). A flush in its cycle (a trap
