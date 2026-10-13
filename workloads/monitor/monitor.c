@@ -336,7 +336,7 @@ static int uart_getc_tmo(uint64_t tmo, uint8_t *out)
 }
 
 /* Receive XMODEM-1K to addr.
- * Sends 'C' every ~1 s until the sender responds (up to ~30 s total).
+ * Sends 'C' every 200 ms until the sender responds, 30 times: a 6 s window.
  * Returns bytes written (always a multiple of block size — last block may
  * contain up to 1023 padding bytes), or (uint64_t)-1 on cancel/timeout. */
 static uint64_t xmodem1k_recv(uint64_t addr)
@@ -347,7 +347,7 @@ static uint64_t xmodem1k_recv(uint64_t addr)
     int next_blk = 1;
     uint8_t c;
 
-    /* Send 'C' with ~1-second retries until the sender starts */
+    /* Send 'C' every 200 ms until the sender starts, 30 times: 6 s */
     for (int tries = 30; tries > 0; tries--) {
         uart_putc(UART0_BASE, 'C');
         if (uart_getc_tmo(TIMEBASE_HZ / 5, &c))  /* 200 ms per poll */
