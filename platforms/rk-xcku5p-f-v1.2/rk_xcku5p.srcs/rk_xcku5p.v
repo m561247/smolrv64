@@ -1036,6 +1036,11 @@ module rk_xcku5p(
    // The board's MAC, from the FPGA's device DNA (below the VGA's DRP clock). virtio-net offers
    // it (VIRTIO_NET_F_MAC), so Linux and the monitor use the same address on every boot.
    reg  [47:0] net_mac = 48'd0;
+   // its config space: mac[0..5], then status (0: no VIRTIO_NET_F_STATUS). Like every device here
+   // it answers aligned to the access, the addressed byte in lane 0 (the core does not shift a
+   // device load): a byte read gets mac[k], a 32-bit read the four bytes from its address.
+   wire [63:0] net_cfg = {16'd0, net_mac[7:0], net_mac[15:8], net_mac[23:16], net_mac[31:24],
+                          net_mac[39:32], net_mac[47:40]} >> {ui_mmio_address[2:0], 3'b000};
 `ifndef NO_VIRTIO_NET
    virtio_mmio #(
       .DEVICE_ID(32'd1), /* Network device with a minimal TX-drop backend. */
@@ -1043,9 +1048,7 @@ module rk_xcku5p(
       .QUEUE_NUM_MAX(32'd256), /* virtio-net needs > MAX_SKB_FRAGS+2 (=19) TX slots */
       .QUEUE_COUNT(32'd2)
    ) virtio_net_inst(
-      // config: mac[0..5] at 0x100 as little-endian words, then status (0: no VIRTIO_NET_F_STATUS)
-      .config_read_data        (ui_mmio_address[11:2] == 10'h040 ? {net_mac[23:16], net_mac[31:24], net_mac[39:32], net_mac[47:40]}
-                              : ui_mmio_address[11:2] == 10'h041 ? {16'd0, net_mac[7:0], net_mac[15:8]} : 32'd0),
+      .config_read_data        (ui_mmio_address[11:3] == 9'h020 ? net_cfg[31:0] : 32'd0),   // 0x100..0x107
       .config_write            (),
       .config_offset           (),
       .config_write_data       (),

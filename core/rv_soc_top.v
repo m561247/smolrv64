@@ -457,8 +457,8 @@ module rv_soc_top #(
             :               scr; end end                                 // SCR
    endfunction
    wire [63:0] hpm_rdata;
-   // build-id: 32b words @ 0x1000_F0{00,04,08,0c,10,14}, replicated into both 64b lanes so the
-   // LSU extracts the correct half for the load offset (same trick as virtio above). The defines
+   // build-id: 32b words @ 0x1000_F0{00,04,08,0c,10,14}, each read 32-bit at its own address, so
+   // the addressed word is in lane 0, where an unshifted device load takes it. The defines
    // land in localparams first -- part-selecting a bare `define literal isn't legal in Vivado.
    localparam [63:0] BID_STAMP  = `SMOLRV64_BUILD_STAMP;
    localparam [31:0] BID_COMMIT = `SMOLRV64_GIT_COMMIT;
@@ -476,7 +476,7 @@ module rv_soc_top #(
    wire [63:0] dev_rdata = is_clint_r  ? clint_rdata
                          : is_uart_r   ? uart_rdata_q
                          : is_plic_r   ? plic_rdata
-                         : is_virtio_r ? {virtio_rdata, virtio_rdata}  // 32b reg replicated into both lanes: the LSU extracts the half for the load offset, so this is correct regardless of which lane it picks (all virtio-mmio regs are 32b, accessed 32b)
+                         : is_virtio_r ? {virtio_rdata, virtio_rdata}  // not delivered: virtio completes on vio_rack below
                          : is_buildid_r ? {build_id_word, build_id_word}
                          : is_fbdiag_r ? fbdiag_rdata
                          : is_hpm_r    ? hpm_rdata   : 64'd0;
@@ -575,7 +575,10 @@ module rv_soc_top #(
    // Strictly more robust, too -- the select no longer depends on mem_raddr still holding the
    // address the response belongs to (a response is matched by the requester's own bookkeeping,
    // not by an address; docs/rtl-rules.md).
-   wire [63:0]  raw_rdata  = vio_rack     ? {virtio_rdata, virtio_rdata}  // 32b reg, valid at virtio_rvalid
+   // A device answers aligned to the access, the addressed byte in lane 0: the LSU sends a device
+   // load's exact address and does not shift it (the UART's read, virtio-input's and virtio-net's
+   // config spaces build their data from the address; virtio's 32-bit registers are read whole).
+   wire [63:0]  raw_rdata  = vio_rack     ? {virtio_rdata, virtio_rdata}  // 32b, valid at virtio_rvalid
                            : dev_rvalid_q ? dev_rdata_q
                            :                dc_rd_data;
    // THE READ DOOR. The LSU presents a read for one cycle (dmem_ren) and may present the next one
