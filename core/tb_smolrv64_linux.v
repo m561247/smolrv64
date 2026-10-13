@@ -432,6 +432,17 @@ module tb;
    import "DPI-C" function void sd_readonly();
    always @(posedge clk) blk_miso <= sd_clock({31'd0, blk_sck}, {31'd0, blk_cs_n}, {31'd0, blk_mosi}) > 0 ? 1'b1 : 1'b0;
 
+   // ARCHITECTURAL CHECKPOINTS (docs/PLAN-2026-09-25-arch-checkpoints.md): +ckpt=<dir> loads the
+   // checkpoint's memory (its non-zero pages, from <dir>/mem.zst, src/ckpt_dpi.cpp) instead of
+   // +fw/+dtb/+initrd, and +lram=<hex> loads the restore stub into the boot SRAM, where a
+   // checkpoint build (TB_RESET_PC = 0x7000_0000) starts. The stub restores the registers, CSRs
+   // and devices and mret's to the checkpoint's PC and privilege.
+   import "DPI-C" context function longint ckpt_load(input string dir, input longint base, input longint nlines);
+   export "DPI-C" function ckpt_line;
+   function void ckpt_line(input longint idx, input bit [511:0] data);
+      lram[idx] = data;
+   endfunction
+
    // $fread fills a packed array MSB-first within each element, so each 64-byte line
    // comes out byte-reversed; swap it back to little-endian.
    task load_bin; input [8*256-1:0] fname; input [63:0] off;
@@ -500,6 +511,11 @@ module tb;
       endcase end endfunction
    initial for (pe = 0; pe < 47; pe = pe + 1) pev[pe] = 64'd0;
    reg [63:0] trace_from, trace_to;             // +trace_from/+trace_to, see the plusargs
+   // +measure_from=<retires>: the statistics count only from the cycle the retire count reaches
+   // it (`meas`), so a run restored from a checkpoint reports its warm window, not the cold
+   // start; the report at the end divides by the window's cycles and retires (mc, mr).
+   reg [63:0] meas_from, meas_c, meas_ret, mc, mr;
+   reg        meas;
    wire sb_dep    = dut.core.iq_blk_v;
    wire sb_recov  = dut.core.st_mem & dut.core.d_valid
                   & ~dut.core.d_is_mem & ~dut.core.d_is_amo & ~dut.core.d_is_serialize
@@ -534,7 +550,7 @@ module tb;
    // n_sqidle: the queue has a drainable head, the LSU is idle and does not start it;
    // n_sqwait: the queue has entries and none is drainable (unreleased, or no data yet).
    reg [63:0] n_stdoor, n_sqidle, n_sqwait;
-   always @(posedge clk) if (!reset) begin
+   always @(posedge clk) if (!reset && meas) begin
       if (dut.core.st_mem) n_stmem <= n_stmem + 1;
       if (sb_recov)        n_recov <= n_recov + 1;
       if (sb_blk_dep)      n_bdep  <= n_bdep  + 1;
@@ -570,8 +586,8 @@ module tb;
       if (dut.core.ld_land)                         n_ldland  <= n_ldland + 1;
    end
 
-   reg [8*256-1:0] fw, dtb, initrd, disk;
-   reg [63:0] ncyc, c, nret, last_ret;
+   reg [8*256-1:0] fw, dtb, initrd, disk, ckpt, lramf;
+   reg [63:0] ncyc, c, nret, last_ret, max_ret;
    integer    nrk;
    wire       trace_on = (c >= trace_from) && (c < trace_to);   // the tb-side trace window
 
@@ -598,7 +614,7 @@ module tb;
    reg [63:0] td_cnt [0:TD_N-1];
    integer tdi;
    initial for (tdi = 0; tdi < TD_N; tdi = tdi + 1) td_cnt[tdi] = 64'd0;
-   always @(posedge clk) if (!reset) td_cnt[td_k] <= td_cnt[td_k] + 64'd1;
+   always @(posedge clk) if (!reset && meas) td_cnt[td_k] <= td_cnt[td_k] + 64'd1;
 
    // ---- MEM-SIM: what the next memory-backend step could recover, printed with TOPDOWN-SIM ----
    // D$: cycles any fill is in flight and the MSHRs live over them, fills started, cycles a request
@@ -607,7 +623,7 @@ module tb;
    reg [63:0] ms_fill, ms_fills, ms_park, ms_stmem, ms_stmem_fill, ms_stmem_park, ms_live, ms_wbfull, ms_cln, ms_clnc;
    initial begin ms_fill = 0; ms_fills = 0; ms_park = 0; ms_stmem = 0; ms_stmem_fill = 0; ms_stmem_park = 0;
                  ms_live = 0; ms_wbfull = 0; ms_cln = 0; ms_clnc = 0; end
-   always @(posedge clk) if (!reset) begin : memsim
+   always @(posedge clk) if (!reset && meas) begin : memsim
       reg fv, park;
       fv   = (dut.u_dcache.ob_live != 0);
       park = dut.u_dcache.ob_wait;
@@ -656,7 +672,7 @@ module tb;
          end
       end
    endfunction
-   always @(negedge clk) if (!reset) begin : dispsim
+   always @(negedge clk) if (!reset && meas) begin : dispsim
       integer na, nb, nc, ia, ib, ic;
       // where the rules cut a group short of the available heads, and why; and the cycles the head
       // had an instruction but no credit for it (outside a freeze, a low shard or a serialisation)
@@ -711,7 +727,7 @@ module tb;
          else                                        ser_cls = 3'd6;
       end
    endfunction
-   always @(negedge clk) if (!reset) begin : sersim
+   always @(negedge clk) if (!reset && meas) begin : sersim
       reg [2:0] dk;
       dk = ser_cls(dut.core.d_insn, dut.core.d_is_amo, dut.core.d_is_csr, dut.core.d_is_fencei,
                    dut.core.d_illegal | dut.core.d_fault);
@@ -733,7 +749,7 @@ module tb;
    // the queue entries whose fault traps from the ROB head (D$ plan increment 5b).
    reg [63:0] xs_hit, xs_nopa, xs_wk, xs_wkf, xs_trap;
    initial begin xs_hit = 0; xs_nopa = 0; xs_wk = 0; xs_wkf = 0; xs_trap = 0; end
-   always @(negedge clk) if (!reset) begin
+   always @(negedge clk) if (!reset && meas) begin
       if (dut.core.u_lsu.xo_tv)  xs_hit  = xs_hit + 1;
       if (dut.core.u_lsu.xo_v & ~dut.core.u_lsu.xo_tv) xs_nopa = xs_nopa + 1;
       if (dut.core.lsu_wk_done)  begin xs_wk = xs_wk + 1; if (dut.core.lsu_wk_flt) xs_wkf = xs_wkf + 1; end
@@ -754,7 +770,7 @@ module tb;
    reg [5:0]  im_wp;
    reg [63:0] im_n, im_waste;
    initial begin im_v = 0; im_u = 0; im_wp = 0; im_n = 0; im_waste = 0; end
-   always @(negedge clk) if (!reset) begin
+   always @(negedge clk) if (!reset && meas) begin
       for (iwi = 0; iwi < 64; iwi = iwi + 1)
          for (iwk = 0; iwk < dut.core.IW; iwk = iwk + 1)
             if (im_v[iwi] && retire[iwk] && dut.core.cs_pc[dut.core.rc_idx[iwk]][38:6] == im_ln[iwi])
@@ -765,7 +781,7 @@ module tb;
          im_wp = im_wp + 1; im_n = im_n + 1;
       end
    end
-   always @(negedge clk) if (!reset) begin
+   always @(negedge clk) if (!reset && meas) begin
       for (iwi = 0; iwi < 32; iwi = iwi + 1)
          for (iwk = 0; iwk < dut.core.IW; iwk = iwk + 1)
             if (iw_v[iwi] && retire[iwk] && dut.core.cs_pc[dut.core.rc_idx[iwk]][38:12] == iw_pg[iwi])
@@ -776,7 +792,7 @@ module tb;
          iw_wp = iw_wp + 1; iw_n = iw_n + 1;
       end
    end
-   always @(posedge clk) if (!reset && dut.core.fe.u_ring.rg_cnt == 0 && !dut.core.fe.u_ring.freeze) begin
+   always @(posedge clk) if (!reset && meas && dut.core.fe.u_ring.rg_cnt == 0 && !dut.core.fe.u_ring.freeze) begin
       if (!dut.core.fe.u_ring.xlate_ok)                               fe_mmu  <= fe_mmu + 1;
       else if (!dut.core.fe.u_ring.inpg)                              fe_page <= fe_page + 1;
       else if (dut.core.fe.u_ring.ic_req & ~dut.core.fe.u_ring.ic_ack) fe_door <= fe_door + 1;
@@ -789,13 +805,13 @@ module tb;
    // at a full queue.
    reg [63:0] tr_n, tr_drops;
    initial begin tr_n = 0; tr_drops = 0; end
-   always @(posedge clk) if (!reset) begin
+   always @(posedge clk) if (!reset && meas) begin
       if (dut.core.res_v) tr_n <= tr_n + 1;
       tr_drops <= tr_drops + 64'(dut.core.tr_drop);
    end
    wire fr_open = ~dut.core.fe.u_ring.freeze & dut.core.fe.u_ring.xlate_ok & dut.core.fe.u_ring.inpg;
    wire fr_rej  = dut.core.fe.f_rej;
-   always @(posedge clk) if (!reset) begin
+   always @(posedge clk) if (!reset && meas) begin
       if (dut.core.fe.u_ring.rq_acc) begin
          fr_req <= fr_req + 1;  fr_hw <= fr_hw + dut.core.fe.u_ring.rq_n;
       end
@@ -883,15 +899,26 @@ module tb;
       // `ifdef` traces read the same two plusargs themselves (rule G6).
       if (!$value$plusargs("trace_from=%d", trace_from)) trace_from = 64'd0;
       if (!$value$plusargs("trace_to=%d",   trace_to))   trace_to   = 64'hFFFF_FFFF_FFFF_FFFF;
-      if (!$value$plusargs("fw=%s", fw))   begin $display("FATAL: +fw");  $finish; end
-      if (!$value$plusargs("dtb=%s", dtb)) begin $display("FATAL: +dtb"); $finish; end
       if ($value$plusargs("cycles=%d", ncyc)) ;
-      off_dtb = OFF_DTB_DEF; off_initrd = OFF_INITRD_DEF;
-      if ($value$plusargs("dtb_off=%h",    off_dtb))    ;
-      if ($value$plusargs("initrd_off=%h", off_initrd)) ;
-      load_bin(fw,  OFF_FW);
-      load_bin(dtb, off_dtb);
-      if ($value$plusargs("initrd=%s", initrd)) load_bin(initrd, off_initrd);
+      if (!$value$plusargs("max_retires=%d", max_ret)) max_ret = 64'd0;   // 0: no retire bound
+      if (!$value$plusargs("measure_from=%d", meas_from)) meas_from = 64'd0;
+      meas = (meas_from == 64'd0);  meas_c = 64'd0;  meas_ret = 64'd0;
+      if ($value$plusargs("lram=%s", lramf)) begin
+         $readmemh(lramf, dut.lmem);
+         $display("[core-linux: boot SRAM loaded from %0s]", lramf);
+      end
+      if ($value$plusargs("ckpt=%s", ckpt)) begin
+         if (ckpt_load(ckpt, BASE, NLINES) < 0) begin $display("FATAL: +ckpt=%0s", ckpt); $finish; end
+      end else begin
+         if (!$value$plusargs("fw=%s", fw))   begin $display("FATAL: +fw");  $finish; end
+         if (!$value$plusargs("dtb=%s", dtb)) begin $display("FATAL: +dtb"); $finish; end
+         off_dtb = OFF_DTB_DEF; off_initrd = OFF_INITRD_DEF;
+         if ($value$plusargs("dtb_off=%h",    off_dtb))    ;
+         if ($value$plusargs("initrd_off=%h", off_initrd)) ;
+         load_bin(fw,  OFF_FW);
+         load_bin(dtb, off_dtb);
+         if ($value$plusargs("initrd=%s", initrd)) load_bin(initrd, off_initrd);
+      end
       if ($value$plusargs("disk=%s", disk)) begin
          sd_attach(disk);
          if ($test$plusargs("disk_ro")) begin sd_readonly(); $display("[sd: SNAPSHOT mode -- image writes stay in RAM]"); end
@@ -901,9 +928,13 @@ module tb;
 
       reset = 1; @(negedge clk); @(negedge clk); reset = 0;
       // +cycles=0 runs unbounded (stop with an external interrupt / timeout wrapper)
-      for (c = 0; ((ncyc == 0) || (c < ncyc)) && !tohost_done; c = c + 1) begin
+      for (c = 0; ((ncyc == 0) || (c < ncyc)) && !tohost_done && ((max_ret == 0) || (nret < max_ret)); c = c + 1) begin
          @(negedge clk);
                   for (nrk = 0; nrk < `SMOLRV64_IW; nrk = nrk + 1) nret = nret + retire[nrk];
+                  if (!meas && (nret >= meas_from)) begin
+                     meas = 1'b1;  meas_c = c + 1;  meas_ret = nret;
+                     $display("MEASURE-FROM retire %0d at cycle %0d: the statistics start here", nret, c + 1);
+                  end
                   // A HANG IS A FAILURE AT ONCE: nothing in the machine waits a million cycles (WFI
                   // completes, an idle kernel retires), so a run that stops retiring stops here.
                   if (|retire) last_ret = c;
@@ -917,9 +948,11 @@ module tb;
                   end
                   // B3 (2026-09-17): the CPI stack from the RTL's own event bus, so the same tool
                   // (tools/perf-cpi-stack.py) grades a simulation and a board run.
-                  for (pe = 0; pe < 44; pe = pe + 1) if (dut.core.hpm_ev_q[pe]) pev[pe] = pev[pe] + 1;
-                  pev[44] = pev[44] + dut.core.hpm_lqocc_q;  pev[45] = pev[45] + dut.core.hpm_sqocc_q;
-                  pev[46] = pev[46] + dut.core.hpm_disp_q;
+                  if (meas) begin
+                     for (pe = 0; pe < 44; pe = pe + 1) if (dut.core.hpm_ev_q[pe]) pev[pe] = pev[pe] + 1;
+                     pev[44] = pev[44] + dut.core.hpm_lqocc_q;  pev[45] = pev[45] + dut.core.hpm_sqocc_q;
+                     pev[46] = pev[46] + dut.core.hpm_disp_q;
+                  end
          if ((c % 1000000) == 0)
             $display("[c=%0d retires=%0d va=%h pa=%h prv=%0d satp=%h inj=%0d uirq=%0d seip=%0d ier=%h]",
                      c, nret, dut.core.fe.u_fetch.pc_q, dut.imem_addr, dut.core.mmu_priv,
@@ -927,12 +960,18 @@ module tb;
       end
       if (tohost_done)
          $display("TOHOST exit=%0d after %0d cycles (retires=%0d pc~%h)", tohost_code, c, nret, dut.imem_addr);
+      else if ((max_ret != 0) && (nret >= max_ret))
+         $display("RETIRE-LIMIT after %0d cycles (retires=%0d pc~%h)", c, nret, dut.imem_addr);
       else
          $display("INO-LINUX TIMEOUT after %0d cycles (retires=%0d pc~%h)", ncyc, nret,
                   dut.imem_addr);
       $display("[blk: dma rd=%0d wr=%0d]", n_dma_rd, n_dma_wr);   // virtio-blk beats (B6); 0/0 without +disk
       $display("[dma-agent: bursts=%0d]", dma_ctr);   // B4 memrand; 0 without +dma_rand
       // B3: perf-stat text, the shape tools/perf-cpi-stack.py parses (`<count> r<code>`).
+      mc = c - meas_c;  mr = nret - meas_ret;
+      if (meas_from != 0)
+         $display("MEASURE window: %0d retires in %0d cycles, IPC %0.3f (the statistics below count the window; WALK-SIM and MEMDEP the whole run)",
+                  mr, mc, $itor(mr) / $itor(mc));
       $display("TOPDOWN-SIM: every cycle in exactly one cause (docs/SmolRV64-Spec.md 11.2)");
       begin : td_totals
          reg [63:0] tsum;  tsum = 64'd0;
@@ -940,8 +979,8 @@ module tb;
          for (tdi = 0; tdi < TD_N; tdi = tdi + 1)
             if (td_cnt[tdi] != 0)
                $display("TOPDOWN-SIM  %14s %12d  %6.2f%%", td_name(tdi), td_cnt[tdi],
-                        100.0 * $itor(td_cnt[tdi]) / $itor(c));
-         if (tsum != c) $display("TOPDOWN-SIM  NOT CLOSED: %0d counted vs %0d cycles", tsum, c);
+                        100.0 * $itor(td_cnt[tdi]) / $itor(mc));
+         if (tsum != mc) $display("TOPDOWN-SIM  NOT CLOSED: %0d counted vs %0d cycles", tsum, mc);
          else           $display("TOPDOWN-SIM  closed: %0d cycles", tsum);
       end
       $display("FETCH-SIM bundles=%0d held=%0d | none: redirect=%0d freeze=%0d itlb=%0d page=%0d pq-full=%0d ring-full=%0d icache-busy=%0d icache-wait=%0d straddle=%0d reject=%0d bytes-late=%0d align=%0d",
@@ -969,8 +1008,8 @@ module tb;
                ms_stmem, ms_stmem_fill, ms_stmem_park);
       if (kan_on) $fclose(kf);
       $display("perf-stat-sim: begin");
-      $display("%0d cycles", c);           // the cycles actually run (== +cycles unless +tohost ended it)
-      $display("%0d instructions", nret);
+      $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run
+      $display("%0d instructions", mr);
       for (pe = 0; pe < 47; pe = pe + 1) $display("%0d r%04h", pev[pe], pcode(pe));
       $display("perf-stat-sim: end");
 
@@ -981,12 +1020,12 @@ module tb;
                n_ldstart, n_ldreord,
                n_ldstart ? (100*n_ldreord)/n_ldstart : 0,
                n_ldstart ? ((1000*n_ldreord)/n_ldstart)%10 : 0,
-               n_ldblk, (100*n_ldblk)/c, ((1000*n_ldblk)/c)%10,
-               n_sqocc/c, ((100*n_sqocc)/c)%100, n_sqfull);
+               n_ldblk, (100*n_ldblk)/mc, ((1000*n_ldblk)/mc)%10,
+               n_sqocc/mc, ((100*n_sqocc)/mc)%100, n_sqfull);
       $display("SB-SIZING cycles=%0d retires=%0d st_mem=%0d (%0d.%02d%% of cycles)",
-               c, nret, n_stmem, (n_stmem*100)/c, ((n_stmem*10000)/c)%100);
+               mc, mr, n_stmem, (n_stmem*100)/mc, ((n_stmem*10000)/mc)%100);
       $display("SB-SIZING   recoverable   %10d  %0d.%02d%% of cycles, %0d%% of st_mem",
-               n_recov, (n_recov*100)/c, ((n_recov*10000)/c)%100, (n_recov*100)/n_stmem);
+               n_recov, (n_recov*100)/mc, ((n_recov*10000)/mc)%100, (n_recov*100)/n_stmem);
       $display("SB-SIZING   blk next-is-mem%9d  %0d%% of st_mem   (needs a load queue, not a scoreboard)",
                n_bmem, (n_bmem*100)/n_stmem);
       $display("SB-SIZING   blk dependence %9d  %0d%% of st_mem   (irreducible: it wants the value)",
@@ -1004,8 +1043,8 @@ module tb;
       $display("SB-STORE  at the D$ door unaccepted=%0d  drainable but LSU idle=%0d  queued, none drainable=%0d  (sq full at dispatch=%0d)",
                n_stdoor, n_sqidle, n_sqwait, n_sqfull);
       $display("SB-SIZING   FLOOR %0d.%02d%% of cycles / CEILING %0d.%02d%% (floor + queue-ready X-empty)",
-               (n_recov*100)/c, ((n_recov*10000)/c)%100,
-               ((n_recov+n_nov_qrdy)*100)/c, (((n_recov+n_nov_qrdy)*10000)/c)%100);
+               (n_recov*100)/mc, ((n_recov*10000)/mc)%100,
+               ((n_recov+n_nov_qrdy)*100)/mc, (((n_recov+n_nov_qrdy)*10000)/mc)%100);
       $finish;
    end
 endmodule

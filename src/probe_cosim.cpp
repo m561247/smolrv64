@@ -34,6 +34,13 @@ SimmervCtx* g_ctx   = nullptr;
 bool        g_inited = false;
 uint64_t    g_seqno = 0;
 
+// +ckpt=<dir> (docs/PLAN-2026-09-25-arch-checkpoints.md): the reference restores the
+// checkpoint's own snapshot, and the DUT's restore stub, which runs from the boot SRAM
+// (rv_soc_top's LBASE, 256 KiB), is not compared: its retires are dropped until the first one
+// outside it, which is the checkpoint's first instruction.
+constexpr uint64_t BOOT_SRAM_BASE = 0x7000'0000, BOOT_SRAM_BYTES = 256 << 10;
+bool        g_in_stub = false;
+
 struct RingEntry { SimmervRetire dut; SimmervRetire ref; bool valid; };
 constexpr size_t RING_N = 65536;   // widened for +tracepc window dumps (was 320)
 RingEntry g_ring[RING_N] = {};
@@ -116,6 +123,12 @@ void cosim_init() {
                  (int)COSIM_MEM_SIZE_LG2);
     g_ctx = simmerv_create(MEM_BYTES);
     if (!g_ctx) { std::fprintf(stderr, "cosim: simmerv_create failed\n"); std::abort(); }
+    if (const char* ck = plusarg("ckpt")) {
+        if (simmerv_load_ckpt(g_ctx, ck) != 0) std::abort();
+        g_in_stub = true;
+        std::fprintf(stderr, "cosim: simmerv ready (checkpoint %s)\n", ck);
+        return;
+    }
     simmerv_zero_registers(g_ctx);
     uint64_t reset_pc = AXI_BASE;
     const char* fw = plusarg("fw");
@@ -408,6 +421,10 @@ extern "C" void probe_retire(
     unsigned char      mem_size)
 {
     if (!g_inited) cosim_init();
+    if (g_in_stub) {
+        if (pc - BOOT_SRAM_BASE < BOOT_SRAM_BYTES) return;
+        g_in_stub = false;
+    }
 
     if (!g_tp_parsed) { g_tp_parsed = true;
         const char* t = plusarg("tracepc");

@@ -147,7 +147,7 @@
    // take one and fetch has none, by the reason; printed with TOPDOWN-SIM
    reg [63:0] fs_take, fs_held, fs_cnt [0:FK_N-1];
    initial begin fs_take = 0; fs_held = 0; for (kti = 0; kti < FK_N; kti = kti + 1) fs_cnt[kti] = 0; end
-   always @(posedge clk) if (!reset) begin
+   always @(posedge clk) if (!reset && meas) begin
       if (!dut.core.fe.pb_ready)      fs_held <= fs_held + 1;
       else if (dut.core.fe.dq_valid)  fs_take <= fs_take + 1;
       else                            fs_cnt[fetch_k(1'b0)] <= fs_cnt[fetch_k(1'b0)] + 1;

@@ -1821,6 +1821,15 @@ program of your own:
 `make run B=sillyloop PLUSARGS="+kanata=$PWD/s.kanata +trace_from=2000000 +trace_to=2001000"`,
 then `../../tools/pipeview/target/release/pipeview s.kanata sillyloop.elf`.
 
+**A slice of a long workload.** `simmerv-cli --insn-time 100 --ckpt-at N[,N...]:<dir> <images>`
+writes architectural checkpoints -- registers, CSRs, device registers and memory, no
+microarchitectural state (`docs/PLAN-2026-09-25-arch-checkpoints.md`) -- that any RTL version
+restores. `CKPT=<dir>/N.ckpt core/run-linux.sh +measure_from=<warm-up retires> +max_retires=<end>`
+runs a restore stub from the boot SRAM, then the workload, and the testbench's statistics
+(TOPDOWN-SIM, the perf-stat block, the -SIM lines; not the core's own WALK-SIM and MEMDEP counts)
+cover only the measured window. `core/run-cosim-linux.sh` takes the same `CKPT` and locksteps
+from the checkpoint's first instruction.
+
 ---
 
 ## 12. Verification

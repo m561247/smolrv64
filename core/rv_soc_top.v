@@ -964,7 +964,7 @@ module rv_soc_top #(
    localparam [LAW-1:0] LLBASE = LBASE[AW-1:6];  // local SRAM base as a line address
    reg [511:0] lmem [0:NLLINE-1];
    // FPGA: bake the monitor image into the BRAM at elaboration (one 64-byte line per hex
-   // line). Sim TBs instead pack dut.lmem directly via +monhex, so guard on the define.
+   // line). The Linux TB loads dut.lmem itself (+lram: a checkpoint's restore stub), so guard on the define.
 `ifdef SOC_BOOT_HEX
    initial $readmemh(`SOC_BOOT_HEX, lmem);
 `endif
