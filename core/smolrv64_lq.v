@@ -230,17 +230,9 @@ module smolrv64_lq
                  tail = {IDXB{1'b0}}; cnt = {(IDXB+1){1'b0}}; end
 
    // PROGRAM ORDER IS THE RING READ FROM THE TAIL: the slot at the tail is the oldest position,
-   // the one before it the youngest. Every "oldest of these" below is the first set bit of the
-   // vector rotated to start at the tail -- a rotate and a priority encoder, with no pointer to
-   // keep in step with entries that land and free out of order.
-   function [IDXB-1:0] oldest(input [NENT-1:0] m);
-      reg [2*NENT-1:0] d;  reg [NENT-1:0] r;  integer i;
-      begin
-         d = {m, m} >> tail;  r = d[NENT-1:0];
-         oldest = tail;
-         for (i = NENT - 1; i >= 0; i = i - 1) if (r[i]) oldest = tail + i[IDXB-1:0];
-      end
-   endfunction
+   // the one before it the youngest. Every "oldest of these" below is ring_oldest(.., tail), with
+   // no pointer to keep in step with entries that land and free out of order.
+`include "smolrv64_ring.vh"
 
    // THE SLOT AT THE TAIL MUST BE FREE, not merely "the queue is not full". Loads land out of
    // order once they are pipelined (the tagged fast path; the random bench lands them in any
@@ -263,7 +255,7 @@ module smolrv64_lq
    assign uf_any    = |(v & ~av);
    wire [NENT-1:0] pk_m = v & ~av & ar;
    assign pk_v      = |pk_m;
-   assign pk_idx    = oldest(pk_m);
+   assign pk_idx    = ring_oldest(pk_m, tail);
    assign pk_seq    = sqn[pk_idx];
 
    // THE ACCESS CANDIDATE is the oldest entry that may go to memory now: filled and translated,
@@ -300,9 +292,9 @@ module smolrv64_lq
    wire [NENT-1:0] wlk_m = v & av & ~sent & ~tv;
    wire [NENT-1:0] flt_m = (v & av & ~sent & tv & flt) | (v & rpl);
    assign k_v   = |wlk_m;
-   assign k_idx = oldest(wlk_m);
+   assign k_idx = ring_oldest(wlk_m, tail);
    assign k_va  = va[k_idx];
-   wire [IDXB-1:0] fi = oldest(flt_m);
+   wire [IDXB-1:0] fi = ring_oldest(flt_m, tail);
    assign f_v   = |flt_m;
    assign f_idx = fi;
    assign f_rp  = rpl[fi];
@@ -314,7 +306,7 @@ module smolrv64_lq
    assign b_ok = v[b_idx] & ~av[b_idx];
    // the older-store query is about M's load when it holds an unfilled one, else the oldest filled
    // entry still waiting to go to memory
-   wire [IDXB-1:0] qi = b_ok ? b_idx : oldest(v & av & ~sent);
+   wire [IDXB-1:0] qi = b_ok ? b_idx : ring_oldest(v & av & ~sent, tail);
    assign q_tag   = sqt[qi];
    genvar ge;
    generate
@@ -330,7 +322,7 @@ module smolrv64_lq
       assign e_pch[gd*PCHB +: PCHB] = pc[gd][PCHB:1];
    end endgenerate
    assign e_acc = v & sent;
-   wire [IDXB-1:0] xi = oldest(rdy_m);
+   wire [IDXB-1:0] xi = ring_oldest(rdy_m, tail);
    assign x_head  = hd[xi];
    assign x_v     = |rdy_m;
    assign x_block = |(cand_m & e_block);   // instrumentation only
@@ -363,18 +355,8 @@ module smolrv64_lq
          kmk[kq] = kds[kq] & v[kq];
       end
    end
-   // The oldest dead entry: the ring read from the tail on runs oldest to youngest, so it is the
-   // first set bit of the marks rotated to start at the tail -- a rotate and a priority encoder,
-   // not a compare per entry.
-   wire [2*NENT-1:0] k_dbl = {kmk, kmk} >> tail;
-   wire [NENT-1:0]   k_rot = k_dbl[NENT-1:0];
-   reg  [IDXB-1:0]   k_off;
-   integer           kf;
-   always @* begin
-      k_off = {IDXB{1'b0}};
-      for (kf = NENT - 1; kf >= 0; kf = kf - 1) if (k_rot[kf]) k_off = kf[IDXB-1:0];
-   end
-   wire [IDXB-1:0]   kd0 = tail + k_off;
+   // the oldest dead entry
+   wire [IDXB-1:0]   kd0 = ring_oldest(kmk, tail);
    assign kmask = kds;
    wire          k_any = |kmk;
    // WATCHING. A load that landed while an older store's address was still unknown stays (lnd,

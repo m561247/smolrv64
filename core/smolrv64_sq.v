@@ -253,33 +253,21 @@ module smolrv64_sq
    assign d_tag     = tailc;
    assign av_any    = |(v & av);
    assign uf_any    = |(v & ~av);
+`include "smolrv64_ring.vh"
    // the data read's pick, from flops: the oldest entry with its address whose value is in a
    // register file and not yet read (every committed entry has its data, so it is at or after
    // the first uncommitted; the data is needed only to commit, which the address precedes)
-   reg [IDXB-1:0] rp_i;  integer ri;  reg rp_f;
-   always @* begin
-      rp_i = kc;  rp_f = 1'b0;
-      for (ri = NENT - 1; ri >= 0; ri = ri - 1)
-         if (v[kc + ri[IDXB-1:0]] & av[kc + ri[IDXB-1:0]] & rd[kc + ri[IDXB-1:0]]) begin rp_i = kc + ri[IDXB-1:0]; rp_f = 1'b1; end
-   end
-   wire           rp_v = rp_f;
-   wire [IDXB-1:0] rp_idx = rp_i;
+   wire [NENT-1:0] rp_m   = v & av & rd;
+   wire            rp_v   = |rp_m;
+   wire [IDXB-1:0] rp_idx = ring_oldest(rp_m, kc);
    reg            rq_v;  reg [IDXB-1:0] rq_idx;  reg [PBITS-1:0] rq_preg;
    initial rq_v = 1'b0;
    assign r_v    = rq_v;
    assign r_preg = rq_preg;
-   // the oldest arrived-and-unfilled entry: the live region runs from the head, so it is the first
-   // set bit of the mask rotated to start there
+   // the oldest arrived-and-unfilled entry: the live region runs from the head
    wire [NENT-1:0]   pk_m = v & ~av & ar;
-   wire [2*NENT-1:0] pk_d = {pk_m, pk_m} >> head;
-   wire [NENT-1:0]   pk_r = pk_d[NENT-1:0];
-   reg  [IDXB-1:0]   pk_o;  integer pkf;
-   always @* begin
-      pk_o = {IDXB{1'b0}};
-      for (pkf = NENT - 1; pkf >= 0; pkf = pkf - 1) if (pk_r[pkf]) pk_o = pkf[IDXB-1:0];
-   end
    assign pk_v      = |pk_m;
-   assign pk_idx    = head + pk_o;
+   assign pk_idx    = ring_oldest(pk_m, head);
    assign pk_seq    = sqn[pk_idx];
    assign occupancy = cnt;
    // THE WALKER AND THE TRAP READ THE FIRST UNCOMMITTED ENTRY. Stores commit in order, so an
