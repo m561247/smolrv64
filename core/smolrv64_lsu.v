@@ -68,6 +68,13 @@ module smolrv64_lsu
     input  wire            pt_signed,      // load formatting
     input  wire            pt_fp,
     input  wire            pt_unc,         // the uncached bit decided at translate time
+    // STORE-TO-LOAD FORWARDING: the port's load takes its bytes from an older queued store that
+    // covers them (fw_data, read in the start cycle), not from the D$. It starts as a fast load
+    // and lands as one, in the first cycle the D$ returns nothing; one at a time (fw_busy).
+    input  wire            pt_fwd,
+    input  wire [63:0]     fw_data,        // the store's doubleword as the D$ would hold it
+    output wire            fw_busy,
+    output wire            fw_inj,         // the forward lands this cycle (on pt_rtag)
     output wire            pt_done,
     output wire            pt_ack,         // accepted this cycle -- the requester may advance
     output wire            pt_is_store,    // direction of the access IN FLIGHT
@@ -600,13 +607,37 @@ module smolrv64_lsu
    initial begin rtag_q = {LDTW{1'b0}}; rfast_q = 1'b0; end
    assign mem_rtag  = rtag_q;
    assign mem_rfast = rfast_q;
-   wire ld_fast_ret = mem_rvalid_c & o_v[mem_rtag_resp];
-   assign pt_rtag       = mem_rtag_resp;
-   assign pt_fast_done  = ld_fast_ret & ~o_kill[mem_rtag_resp];   // a squashed load's data is dropped
-   wire [5:0]  f_sh  = {o_boff[mem_rtag_resp], 3'b000};
-   wire [63:0] f_eff = mem_rdata_c >> f_sh;
-   wire [3:0]  f_nb  = o_nb[mem_rtag_resp];
-   wire        f_sgn = o_sgn[mem_rtag_resp], f_fp = o_fp[mem_rtag_resp];
+   // THE FORWARD REGISTER. A forwarded load's bytes are captured in its start cycle and wait here
+   // for the first cycle the D$ returns nothing: then they are the response, by the same tag, the
+   // same formatting and the same landing as a D$ hit's. The D$ cannot be held, so it always wins.
+   wire            fw_go = ld_fast_ok & pt_start & pt_fwd;
+   reg             fw_v;  reg [LDTW-1:0] fw_tag;  reg [63:0] fw_q;
+   initial fw_v = 1'b0;
+   assign fw_inj  = fw_v & ~mem_rvalid_c;
+   assign fw_busy = fw_v;
+   always @(posedge clk) begin
+      if (reset)       fw_v <= 1'b0;
+      else if (fw_go)  begin fw_v <= 1'b1;  fw_tag <= ld_tag;  fw_q <= fw_data; end
+      else if (fw_inj) fw_v <= 1'b0;
+   end
+   always @(posedge clk) if (!reset) begin
+      if (fw_go & fw_v)
+         $fatal(1, "smolrv64_lsu: forward to tag %0d starts while tag %0d's is still waiting", ld_tag, fw_tag);
+      if (pt_start & pt_fwd & ~ld_fast_ok)
+         $fatal(1, "smolrv64_lsu: forward start for tag %0d that is not a fast load (xword=%b unc=%b mem=%b)", ld_tag, xword, eff_unc, pa_mem);
+      if (fw_inj & ~o_v[fw_tag])
+         $fatal(1, "smolrv64_lsu: forward lands on tag %0d that nothing is waiting on", fw_tag);
+   end
+   // the response the fast path sees: the D$'s, else the waiting forward
+   wire [LDTW-1:0] r_tag  = mem_rvalid_c ? mem_rtag_resp : fw_tag;
+   wire [63:0]     r_data = mem_rvalid_c ? mem_rdata_c   : fw_q;
+   wire ld_fast_ret = (mem_rvalid_c & o_v[mem_rtag_resp]) | fw_inj;
+   assign pt_rtag       = r_tag;
+   assign pt_fast_done  = ld_fast_ret & ~o_kill[r_tag];   // a squashed load's data is dropped
+   wire [5:0]  f_sh  = {o_boff[r_tag], 3'b000};
+   wire [63:0] f_eff = r_data >> f_sh;
+   wire [3:0]  f_nb  = o_nb[r_tag];
+   wire        f_sgn = o_sgn[r_tag], f_fp = o_fp[r_tag];
    wire [63:0] ld_fast_val =
         (f_nb == 4'd1) ? (f_sgn ? {{56{f_eff[7]}},  f_eff[7:0]}  : {56'd0, f_eff[7:0]})
       : (f_nb == 4'd2) ? (f_sgn ? {{48{f_eff[15]}}, f_eff[15:0]} : {48'd0, f_eff[15:0]})
@@ -616,7 +647,7 @@ module smolrv64_lsu
    always @(posedge clk) begin
       if (reset) begin o_v <= {NLD{1'b0}}; o_kill <= {NLD{1'b0}}; end
       else begin
-         if (ld_fast_ret) o_v[mem_rtag_resp] <= 1'b0;
+         if (ld_fast_ret) o_v[r_tag] <= 1'b0;
          if (ld_fast_ok) begin
             o_v[ld_tag] <= 1'b1;  o_kill[ld_tag] <= 1'b0;  o_nb[ld_tag] <= nb;  o_boff[ld_tag] <= boff;
             o_sgn[ld_tag] <= eff_signed;  o_fp[ld_tag] <= eff_fp;
@@ -635,9 +666,9 @@ module smolrv64_lsu
    // are the checks that caught C4a step 2's first attempt on its first simulation run,
    // and they are the ones that matter most once the D$ grows MSHRs (C5) -- so they are
    // wires, and the integrity log carries them onto the board.
-   wire e_tag_reissue = ld_fast_ok & o_v[ld_tag] & ~(ld_fast_ret & (mem_rtag_resp == ld_tag));
+   wire e_tag_reissue = ld_fast_ok & o_v[ld_tag] & ~(ld_fast_ret & (r_tag == ld_tag));
    wire e_tag_orphan  = mem_rvalid_c & ~o_v[mem_rtag_resp];
-   wire e_tag_reuse   = ld_fast_ok & ld_fast_ret & (mem_rtag_resp == ld_tag);
+   wire e_tag_reuse   = ld_fast_ok & ld_fast_ret & (r_tag == ld_tag);
    always @(posedge clk) if (!reset) begin
       if (e_tag_reissue)
          $fatal(1, "smolrv64_lsu: tag %0d reissued while its response is outstanding", ld_tag);
@@ -788,7 +819,8 @@ module smolrv64_lsu
                    pa_q <= xl_can ? (eff_pa & ~56'd7) : eff_pa;
                    mem_raddr <= xl_can ? ({{(AW-56){1'b0}}, eff_pa} & ~{{(AW-3){1'b0}}, 3'b111})
                                        :  {{(AW-56){1'b0}}, eff_pa};
-                   mem_ren   <= 1'b1;  rfast_q <= ld_fast_ok;  rtag_q <= ld_tag;
+                   mem_ren   <= ~(pt_start & pt_fwd);   // a forward reads the store queue, not the D$
+                   rfast_q   <= ld_fast_ok;  rtag_q <= ld_tag;
                    // a fast load leaves the FSM idle: everything it still needs is in o_*
                    st        <= ld_fast_ok ? S_IDLE : S_LD;
                 end

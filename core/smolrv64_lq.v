@@ -91,6 +91,7 @@ module smolrv64_lq
     input  wire                  a_fp,
     input  wire                  a_unc,       // Svpbmt NC/IO: decided by the translation, travels with the entry
     input  wire                  a_mem,       // the PA is DRAM/LRAM (idempotent) -> may access speculatively
+    input  wire                  a_bare,      // the address was not translated (M-mode or satp Bare)
 
     // ---- disambiguation: a BIT PER ENTRY, maintained by smolrv64_sq -----------------------
     // The entries are exported so smolrv64_sq can run the alias test where an ADDRESS ARRIVES
@@ -100,6 +101,7 @@ module smolrv64_lq
     // address off the TRANSLATE path -- this module's original purpose -- left the compare
     // itself, and its whole downstream tail, exactly where they were.
     output wire [NENT*12-1:0]    e_off,       // page offsets: VA[11:0] = PA[11:0]
+    output wire [NENT*(VAW-11)-1:0] e_vpn,    // ...and the page, {bare, VA[VAW-1:12]}, for forwarding (smolrv64_sq cov)
     output wire [NENT*2-1:0]     e_size,
     output wire [NENT*SQIB-1:0]  e_tag,
     output wire [NENT-1:0]       e_av,
@@ -109,6 +111,11 @@ module smolrv64_lq
     input  wire [NENT-1:0]       unk_q,       // smolrv64_sq: an older store's address is still unknown (registered)
     input  wire [NENT-1:0]       viol,        // smolrv64_sq: it went ahead of an older store that overlaps it
     input  wire [NENT-1:0]       e_block,     // per entry: an older store aliases it
+    // ...and it can take its bytes from that store instead (smolrv64_sq, registered): the store
+    // covers them, has its data, and every older store's address is known. Forwarding goes one at a
+    // time; fw_busy says one is still in flight.
+    input  wire [NENT-1:0]       e_fwd,
+    input  wire                  fw_busy,
     output wire                  x_block,     // ...and the candidate is one, held right now
     output wire                  x_devwait,   // the candidate is a device load waiting to be the head (counters only)
     // ...and the seqno of the entry being tested, for smolrv64_sq's ld_older. That one is
@@ -130,6 +137,7 @@ module smolrv64_lq
     output wire                  x_fp,
     output wire                  x_unc,
     output wire                  x_head,      // the candidate's op is the ROB head (index compare; the core adds ~rob_empty)
+    output wire                  x_fwd,       // the candidate is held by a store and takes its bytes from it
     input  wire                  x_take,      // the LSU accepted it
 
     // ---- land: data back for an entry that was sent to memory ----
@@ -209,6 +217,7 @@ module smolrv64_lq
    // guest maps nothing NC). The store queue had carried its own bit all along.
    reg [NENT-1:0]        sgn, isfp, unc;
    reg [NENT-1:0]        mem;                 // PA is DRAM/LRAM (idempotent): may access speculatively
+   reg [NENT-1:0]        bare;                // the address was not translated (smolrv64_sq a_bare)
    reg [PBITS-1:0]       prd  [0:NENT-1];
    reg [5:0]             rdn  [0:NENT-1];
    reg [NENT-1:0]        rdv;
@@ -222,11 +231,12 @@ module smolrv64_lq
    reg [NENT-1:0]        wt;                  // the load waits for older stores' unknown addresses
    reg [NENT-1:0]        lnd;                 // landed, and still here: an older store's address is unknown
    reg [NENT-1:0]        rpl;                 // sticky: it read before an older store that overlaps it
+   reg [NENT-1:0]        fwd;                 // sent as a forward: it read a store, not memory
    reg [IDXB-1:0]        tail;
    reg [IDXB:0]          cnt;
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; sent = {NENT{1'b0}};
-                 wt = {NENT{1'b0}}; lnd = {NENT{1'b0}}; rpl = {NENT{1'b0}};
+                 wt = {NENT{1'b0}}; lnd = {NENT{1'b0}}; rpl = {NENT{1'b0}}; fwd = {NENT{1'b0}};
                  tail = {IDXB{1'b0}}; cnt = {(IDXB+1){1'b0}}; end
 
    // PROGRAM ORDER IS THE RING READ FROM THE TAIL: the slot at the tail is the oldest position,
@@ -285,7 +295,10 @@ module smolrv64_lq
    always @(posedge clk) hd <= reset ? {NENT{1'b0}} : (v & head_m);
    always @(posedge clk) if (!reset && |(cand_m & hd & ~head_m))
       $fatal(1, "smolrv64_lq: a candidate's head flag is set while its op is not the head (hd=%b head_m=%b cand=%b)", hd, head_m, cand_m);
-   wire [NENT-1:0] rdy_m = cand_m & ~e_block & (mem | hd);
+   // A held load is ready too when it can forward: idempotent memory only (a device or uncached
+   // load reads the device), and while no other forward is in flight.
+   wire [NENT-1:0] fwd_m = e_fwd & mem & ~unc & {NENT{~fw_busy}};
+   wire [NENT-1:0] rdy_m = cand_m & (~e_block | fwd_m) & (mem | hd);
    // THE WALKER AND THE TRAP READ THE OLDEST ENTRY THAT NEEDS THEM: an untranslated filled load
    // is walked oldest first, and a load whose translation faulted is never sent: it traps when
    // its op reaches the ROB head.
@@ -312,6 +325,7 @@ module smolrv64_lq
    generate
       for (ge = 0; ge < NENT; ge = ge + 1) begin : g_exp
          assign e_off [ge*12   +: 12  ] = va [ge][11:0];
+         assign e_vpn [ge*(VAW-11) +: VAW-11] = {bare[ge], va[ge][VAW-1:12]};
          assign e_size[ge*2    +: 2   ] = sz [ge];
          assign e_tag [ge*SQIB +: SQIB] = sqt[ge];
       end
@@ -321,13 +335,16 @@ module smolrv64_lq
    generate for (gd = 0; gd < NENT; gd = gd + 1) begin : g_pch
       assign e_pch[gd*PCHB +: PCHB] = pc[gd][PCHB:1];
    end endgenerate
-   assign e_acc = v & sent;
+   // A forwarded load has not reached memory: it read the store it is ordered after, every older
+   // store's address was known, so no store can arrive that it went ahead of.
+   assign e_acc = v & sent & ~fwd;
    wire [IDXB-1:0] xi = ring_oldest(rdy_m, tail);
    assign x_head  = hd[xi];
    assign x_v     = |rdy_m;
    assign x_block = |(cand_m & e_block);   // instrumentation only
    assign x_devwait = |(cand_m & ~e_block & ~mem & ~hd) & ~x_v;   // instrumentation only
    assign x_idx   = xi;
+   assign x_fwd   = e_block[xi];
    assign x_pa    = pa[xi];
    assign x_size  = sz[xi];
    assign x_signed= sgn[xi];
@@ -384,15 +401,16 @@ module smolrv64_lq
       end else begin
          // Retiring the entry frees its slot; slot REUSE is governed by cnt and tail, so an
          // out-of-order response simply leaves the slot dead until tail comes round to it.
-         if (l_v & ~lwatch) begin v[l_idx] <= 1'b0; av[l_idx] <= 1'b0; sent[l_idx] <= 1'b0; end
+         if (l_v & ~lwatch) begin v[l_idx] <= 1'b0; av[l_idx] <= 1'b0; sent[l_idx] <= 1'b0; fwd[l_idx] <= 1'b0; end
          if (l_v & lwatch)  lnd[l_idx] <= 1'b1;
          for (kw = 0; kw < NENT; kw = kw + 1) begin
-            if (wfree[kw]) begin v[kw] <= 1'b0; av[kw] <= 1'b0; sent[kw] <= 1'b0; lnd[kw] <= 1'b0; end
+            if (wfree[kw]) begin v[kw] <= 1'b0; av[kw] <= 1'b0; sent[kw] <= 1'b0; lnd[kw] <= 1'b0; fwd[kw] <= 1'b0; end
             if (viol[kw] & v[kw]) rpl[kw] <= 1'b1;
          end
-         if (x_v & x_take) sent[x_idx] <= 1'b1;
+         if (x_v & x_take) begin sent[x_idx] <= 1'b1;  fwd[x_idx] <= x_fwd; end
          if (d_alloc & d_ready) begin
             v[tail] <= 1'b1; av[tail] <= 1'b0; sent[tail] <= 1'b0;  lnd[tail] <= 1'b0;  rpl[tail] <= 1'b0;  wt[tail] <= d_wt;
+            fwd[tail] <= 1'b0;
             rob[tail] <= d_rob; prd[tail] <= d_prd; rdn[tail] <= d_rd;
             rdv[tail] <= d_rd_v; sqt[tail] <= d_sqtag;  pc[tail] <= d_pc;  sqn[tail] <= d_seq;
             tail <= tail + 1'b1;
@@ -402,6 +420,7 @@ module smolrv64_lq
          if (a_v) begin
             pa[a_idx] <= a_pa;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;
             sgn[a_idx] <= a_signed;  isfp[a_idx] <= a_fp;  unc[a_idx] <= a_unc;  mem[a_idx] <= a_mem;  av[a_idx] <= 1'b1;
+            bare[a_idx] <= a_bare;
             tv[a_idx] <= a_tv;  flt[a_idx] <= a_flt;  fc[a_idx] <= a_fc;
          end
          // the walker's answer: the PA and its classes, or the fault the load traps with at the head
@@ -417,7 +436,7 @@ module smolrv64_lq
          // allocates while it holds (asserted).
          if (k_any) begin
             for (kw = 0; kw < NENT; kw = kw + 1)
-               if (kmk[kw]) begin v[kw] <= 1'b0;  av[kw] <= 1'b0;  sent[kw] <= 1'b0;  lnd[kw] <= 1'b0;  rpl[kw] <= 1'b0; end
+               if (kmk[kw]) begin v[kw] <= 1'b0;  av[kw] <= 1'b0;  sent[kw] <= 1'b0;  lnd[kw] <= 1'b0;  rpl[kw] <= 1'b0;  fwd[kw] <= 1'b0; end
             tail <= kd0;
          end
          // The flush, ordered LAST: it wins over an allocation made in its cycle (dispatch
@@ -425,7 +444,7 @@ module smolrv64_lq
          // redirecting op is in flight, so every entry is younger and dies.
          if (flush) begin
             v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
-            lnd <= {NENT{1'b0}}; rpl <= {NENT{1'b0}};
+            lnd <= {NENT{1'b0}}; rpl <= {NENT{1'b0}}; fwd <= {NENT{1'b0}};
             tail <= {IDXB{1'b0}};
             cnt <= {(IDXB+1){1'b0}};
          end
@@ -477,6 +496,12 @@ module smolrv64_lq
          $fatal(1, "smolrv64_lq: entry %0d started early without a translation", a_idx);
       if (x_v & x_take & ~tv[x_idx])
          $fatal(1, "smolrv64_lq: the candidate started without a translation");
+      if (x_v & x_take & x_fwd & ~(e_fwd[x_idx] & mem[x_idx] & ~unc[x_idx] & ~fw_busy))
+         $fatal(1, "smolrv64_lq: entry %0d forwards without a forwarding store (fwd=%b mem=%b unc=%b busy=%b)",
+                x_idx, e_fwd[x_idx], mem[x_idx], unc[x_idx], fw_busy);
+      if (l_v & fwd[l_idx] & (unk_q[l_idx] | rpl[l_idx] | viol[l_idx]))
+         $fatal(1, "smolrv64_lq: forwarded entry %0d lands watched (unk=%b rpl=%b viol=%b)",
+                l_idx, unk_q[l_idx], rpl[l_idx], viol[l_idx]);
       if (w_v & ~(v[w_idx] & av[w_idx] & ~tv[w_idx]))
          $fatal(1, "smolrv64_lq: the walker's answer for entry %0d is not for a live untranslated entry", w_idx);
       if (w_v & a_v & (a_idx == w_idx))

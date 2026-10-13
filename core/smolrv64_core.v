@@ -356,6 +356,9 @@ module smolrv64_core
    always @(posedge clk) mmu_flush_q <= ~reset & mmu_flush;
    wire [63:0] satp_fetch = (mmu_priv  == 2'd3) ? 64'd0 : mmu_satp;
    wire [63:0] satp_data  = (mmu_dpriv == 2'd3) ? 64'd0 : mmu_satp;
+   // M's access is untranslated (M-mode, or satp Bare): the queues keep it beside the page for
+   // forwarding, which needs the regime as well as the VA to name the same memory
+   wire        m_bare     = (satp_data[63:60] != 4'd8);
 
    mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6)) u_immu
      (.clk(clk), .reset(reset),
@@ -1555,6 +1558,8 @@ module smolrv64_core
       .l_block(sq_l_block_live), .l_block_q(lq_e_block), .l_older(sq_l_older),
       .ld_tag(lq_q_tag), .ld_older(sq_ld_older),
       .l_block_unk_q(sq_l_block_unk_q),
+      .l_vpn(lq_e_vpn), .l_fill_vpn({m_bare, m_addr[38:12]}), .a_bare(m_bare), .l_fwd(sq_l_fwd),
+      .f_go(lq_x_take & lq_x_fwd), .f_lix(lq_x_idx), .f_data(sq_f_data),
       .k_v(sq_k_v), .k_idx(sq_k_idx), .k_va(sq_k_va),
       .w_v(lsu_wk_done & wk_st), .w_idx(sq_k_idx), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
@@ -1568,6 +1573,11 @@ module smolrv64_core
 
    // ------------------------------------------------------------------- LOAD QUEUE
    wire                lq_d_ready, lq_x_v, lq_x_signed, lq_x_fp, lq_x_unc, lq_x_head, lq_l_rd_v, lq_b_ok;
+   // store-to-load forwarding (smolrv64_sq l_fwd / f_data, smolrv64_lq x_fwd, smolrv64_lsu fw_*)
+   wire [LQ_N-1:0]     sq_l_fwd;
+   wire [LQ_N*28-1:0]  lq_e_vpn;
+   wire                lq_x_fwd, lsu_fw_busy, lsu_fw_inj;
+   wire [63:0]         sq_f_data;
    wire [LQ_IB-1:0]    lq_d_idx, lq_x_idx;
    wire [55:0]         lq_x_pa;
    wire [1:0]          lq_x_size;
@@ -1637,6 +1647,7 @@ module smolrv64_core
       .e_off(lq_e_off), .e_size(lq_e_size), .e_tag(lq_e_tag), .e_av(lq_e_av),
       .e_wt(lq_e_wt), .e_pch(lq_e_pch), .e_acc(lq_e_acc), .unk_q(sq_l_unk_q), .viol(sq_l_viol),
       .e_block(lq_e_block), .x_block(sq_ld_block), .q_tag(lq_q_tag),
+      .e_vpn(lq_e_vpn), .e_fwd(sq_l_fwd), .fw_busy(lsu_fw_busy), .x_fwd(lq_x_fwd), .a_bare(m_bare),
       .b_idx(m_lq_idx), .b_ok(lq_b_ok),
       .x_v(lq_x_v), .x_idx(lq_x_idx), .x_pa(lq_x_pa), .x_size(lq_x_size),
       .x_signed(lq_x_signed), .x_fp(lq_x_fp), .x_unc(lq_x_unc), .x_head(lq_x_head), .x_take(lq_x_take),
@@ -1700,16 +1711,17 @@ module smolrv64_core
    // core family of the first C4a build (rd_resp_tag -> e_r, 20 levels; IW=3 -0.070). It is
    // exact: a fast response with a live tag makes the slow path yield (slow_rv), so a slow
    // landing never coincides with one, and a killed fast response lands nothing (asserted).
-   wire [LQ_IB-1:0] ld_land_idx = dmem_rvalid_c ? dmem_rtag_resp : ld_inflight_idx;
+   // A forward lands like a fast response, in a cycle the D$ returns none (smolrv64_lsu fw_inj).
+   wire [LQ_IB-1:0] ld_land_idx = dmem_rvalid_c ? dmem_rtag_resp : lsu_fw_inj ? lsu_pt_rtag : ld_inflight_idx;
    always @(posedge clk) if (!reset) begin
       if (ld_land_fast && ld_land_slow) $fatal(1, "smolrv64_core: a load landed on both the fast and the slow path");
-      if (ld_land_slow && dmem_rvalid_c) $fatal(1, "smolrv64_core: a slow landing under a fast response (the index would be wrong)");
-      if (ld_land_fast && (lsu_pt_rtag != dmem_rtag_resp)) $fatal(1, "smolrv64_core: the fast landing's tag is not the response's");
+      if (ld_land_slow && (dmem_rvalid_c | lsu_fw_inj)) $fatal(1, "smolrv64_core: a slow landing under a fast response or a forward (the index would be wrong)");
+      if (ld_land_fast && dmem_rvalid_c && (lsu_pt_rtag != dmem_rtag_resp)) $fatal(1, "smolrv64_core: the fast landing's tag is not the response's");
    end
    // The registered alias block the queue's candidate select reads may only ever be the
    // MORE conservative: a load that starts (x_v, on the copy) is never one the live block holds.
    always @(posedge clk)
-      if (!reset && lq_x_v && sq_l_block_live[lq_x_idx])
+      if (!reset && lq_x_v && ~lq_x_fwd && sq_l_block_live[lq_x_idx])
          $fatal(1, "smolrv64_core: load %0d starts on the registered block copy while the live block holds it", lq_x_idx);
    // The tag of the access in flight. One at a time today, so a single register; when loads
    // are pipelined this becomes the D$'s rd_tag and the queue interface does not change.
@@ -2034,6 +2046,7 @@ module smolrv64_core
       .pt_unc(pt_store ? sq_c_unc : lq_x_unc), .pt_done(lsu_pt_done),
       .pt_ack(lsu_pt_ack), .pt_is_store(lsu_pt_is_store), .pt_ld_done(lsu_pt_ld_done), .pt_ld_kill(lsu_pt_ld_kill),
       .pt_tag(lq_x_idx), .req_tag(m_lq_idx), .pt_rtag(lsu_pt_rtag), .pt_fast_done(lsu_pt_fast_done),
+      .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj),
       .req_store(m_is_store & ~m_is_amo), .req_amo(m_is_amo),
       .req_amo_func(m_amo_func), .req_cbo(m_is_cbo), .req_cbo_zero(m_cbo_zero),
       .req_cbo_keep(m_cbo_keep),

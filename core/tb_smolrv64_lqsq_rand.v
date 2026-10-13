@@ -45,6 +45,10 @@ module tb;
    wire [IDXB-1:0]  lq_pk_idx, sq_pk_idx;
    wire [7:0]       lq_pk_seq, sq_pk_seq;
    wire             lq_d_ready, lq_x_v, lq_x_block, lq_b_ok, lq_x_signed, lq_x_fp, lq_x_unc, lq_l_rd_v;
+   wire [NENT-1:0]  sq_l_fwd;                 // forwarding: the store queue's per-load flags...
+   wire [NENT*28-1:0] e_vpn;
+   wire             lq_x_fwd;                 // ...the candidate taking its bytes from a store...
+   wire [63:0]      sq_f_data;                // ...and those bytes
    wire [IDXB-1:0]  lq_d_idx, lq_x_idx;  wire [IDXB:0] lq_q_tag;
    wire [PAW-1:0]   lq_x_pa, lq_l_pa;  wire [1:0] lq_x_size;
    wire [PBITS-1:0] lq_l_prd;  wire [5:0] lq_l_rd;  wire [ROBB-1:0] lq_l_rob;  wire [IDXB:0] lq_occ;
@@ -86,6 +90,7 @@ module tb;
       .a_v(lq_a_v),.a_sent(lq_a_sent),.a_idx(lq_a_idx),.a_pa(lq_a_pa),.a_va(39'(lq_a_pa)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(lq_a_size),
       .a_signed(lq_a_signed),.a_fp(lq_a_fp),.a_unc(lq_a_unc),
       .e_off(e_off),.e_size(e_size),.e_tag(e_tag),.e_av(e_av),.e_wt(e_wt),.e_pch(e_pch),.e_acc(e_acc),.unk_q(sq_unk_q),.viol(sq_viol),.e_block(e_block),.x_block(lq_x_block),
+      .e_vpn(e_vpn),.e_fwd(sq_l_fwd),.fw_busy(1'b0),.x_fwd(lq_x_fwd),.a_bare(1'b0),
       .q_tag(lq_q_tag),.b_idx(lq_b_idx),.b_ok(lq_b_ok),
       .x_v(lq_x_v),.x_idx(lq_x_idx),.x_pa(lq_x_pa),.x_size(lq_x_size),.x_signed(lq_x_signed),
       .x_fp(lq_x_fp),.x_unc(lq_x_unc),.x_head(lq_x_head),.x_devwait(lq_x_devwait),.x_take(lq_x_take),
@@ -105,6 +110,7 @@ module tb;
       .kc_v(sq_kc_v),.kc_rob(sq_kc_rob),.kc_addr(sq_kc_addr),.kc_data(sq_kc_data),.kc_size(sq_kc_size),.k_take(sq_k_take),
       .l_off(e_off),.l_size(e_size),.l_tag(e_tag),.l_av(e_av),.l_wt(e_wt),.l_acc(e_acc),.l_unk_q(sq_unk_q),.l_viol(sq_viol),.l_res_c(sq_res_c),.l_res_a(sq_res_a),
       .l_fill(lq_a_v),.l_fill_ix(lq_a_idx),.l_fill_off(lq_a_pa[11:0]),.l_fill_size(lq_a_size), .l_fill_flt(1'b0),
+      .l_vpn(e_vpn),.l_fill_vpn({1'b0, lq_a_pa[38:12]}),.a_bare(1'b0),.l_fwd(sq_l_fwd),.f_go(lq_x_take & lq_x_fwd),.f_lix(lq_x_idx),.f_data(sq_f_data),
       .l_block(e_block),.l_block_unk_q(sq_l_block_unk_q),.l_block_q(l_block_q),.l_older(l_older),.ld_tag(lq_q_tag),.ld_older(ld_older),
       .k_v(sk_v),.k_idx(sk_idx),.k_va(sk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(sf_v),.f_rob(sf_rob),.f_fc(sf_fc),.f_pc(sf_pc),.f_seq(sf_seq),.occupancy(sq_occ),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(sq_kmask_nc));
 
@@ -123,7 +129,7 @@ module tb;
    reg [2:0]     st    [0:MAXOPS-1];
    reg [IDXB-1:0] qix  [0:MAXOPS-1];        // the entry the op holds in its queue
    integer lq_op [0:NENT-1];                // queue entry -> op, for the candidate and landings
-   integer nops, seed, i, j, op, act, n_early, n_reord, n_full, n_take, n_flush, n_err, n_cyc;
+   integer nops, seed, i, j, op, act, n_early, n_reord, n_full, n_take, n_flush, n_err, n_cyc, n_fwd, fw_op, fw_n;
    integer p_disp, p_addr, p_scmt;          // program-order cursors: dispatch, address, store commit
    integer live_ld_inflight, verbose, vfrom, vto;
 
@@ -174,7 +180,7 @@ module tb;
          sgn[i]   = rnd(0) % 2;  unc[i] = (rnd(0) % 32) == 0;
          st[i]    = 0;
       end
-      n_early = 0; n_reord = 0; n_full = 0; n_take = 0; n_flush = 0; n_err = 0; n_cyc = 0;
+      n_early = 0; n_reord = 0; n_full = 0; n_take = 0; n_flush = 0; n_err = 0; n_cyc = 0; n_fwd = 0;
       p_disp = 0; p_addr = 0; p_scmt = 0; live_ld_inflight = 0;
       repeat (3) @(posedge clk); #1; reset = 0; step;
 
@@ -235,11 +241,24 @@ module tb;
                  end
                  if (lq_x_pa !== addr[op] || lq_x_size !== sz[op] || lq_x_signed !== sgn[op] || lq_x_unc !== unc[op])
                     fail("candidate attributes differ from those presented", op);
+                 fw_op = -1;  fw_n = 0;   // the forwarding store, and how many undrained older stores overlap
                  for (j = 0; j < op; j = j + 1) if (is_st[j] && st[j] != 4) begin
                     if (st[j] == 0) fail("offered with an older store's address unknown", op);
-                    if ((st[j] == 1 || st[j] == 2) && ovl(addr[j], sz[j], addr[op], sz[op]))
-                       fail("offered past an undrained older store that overlaps it", op);
+                    if ((st[j] == 1 || st[j] == 2) && ovl(addr[j], sz[j], addr[op], sz[op])) begin
+                       if (!lq_x_fwd) fail("offered past an undrained older store that overlaps it", op);
+                       fw_op = j;  fw_n = fw_n + 1;
+                    end
                     if (st[j] == 1 || st[j] == 2) n_reord = n_reord + 1;
+                 end
+                 if (lq_x_fwd) begin
+                    if (fw_n != 1) fail("forwarded with other than exactly one overlapping older store", op);
+                    else if (!(addr[fw_op][PAW-1:3] == addr[op][PAW-1:3] && addr[fw_op][2:0] <= addr[op][2:0]
+                               && ({1'b0, addr[op][2:0]} + (4'd1 << sz[op])) <= ({1'b0, addr[fw_op][2:0]} + (4'd1 << sz[fw_op]))
+                               && ({1'b0, addr[fw_op][2:0]} + (4'd1 << sz[fw_op])) <= 4'd8))
+                       fail("forwarded from a store that does not hold all its bytes", op);
+                    else if (sq_f_data !== ({32'hDA7A, fw_op[31:0]} << {addr[fw_op][2:0], 3'b000}))
+                       fail("forwarded bytes are not the store's", op);
+                    n_fwd = n_fwd + 1;
                  end
                  lq_x_take = 1; st[op] = 2; n_take = n_take + 1; live_ld_inflight = live_ld_inflight + 1;
               end
@@ -310,8 +329,8 @@ module tb;
             $display("   op %0d %s addr=%h sz=%0d st=%0d qix=%0d", i, is_st[i] ? "st" : "ld", addr[i], 1 << sz[i], st[i], qix[i]);
          n_err = n_err + 1;
       end
-      $display("---- tb_smolrv64_lqsq_rand: ops=%0d cycles=%0d takes=%0d early=%0d reordered-past-older-store=%0d full-queue-loads=%0d flushes=%0d errors=%0d",
-               nops, n_cyc, n_take, n_early, n_reord, n_full, n_flush, n_err);
+      $display("---- tb_smolrv64_lqsq_rand: ops=%0d cycles=%0d takes=%0d early=%0d reordered-past-older-store=%0d full-queue-loads=%0d flushes=%0d forwards=%0d errors=%0d",
+               nops, n_cyc, n_take, n_early, n_reord, n_full, n_flush, n_fwd, n_err);
       if (n_err != 0) begin $display("LQSQ-RAND FAIL"); $fatal(1, "tb_smolrv64_lqsq_rand FAILED"); end
       $display("LQSQ-RAND PASS");
       $finish;

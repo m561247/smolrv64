@@ -1212,6 +1212,24 @@ set in the stage register.
   - *Measured* (lockstep, IW=3, rvbench): replaying costs ~28 cycles, a wait about as much, so the
     table waits only after a replay. Dhrystone never replays; rsort 85-119 times in 94-103 K cycles.
     `SMOLRV64_MDSPEC` selects never (0), the table (1), always (2).
+- **A load held by the one older store that holds all its bytes takes them from it (store-to-load
+  forwarding).** Without it such a load waits for the store's commit and drain and then reads the
+  D$. `smolrv64_sq` keeps a second matrix beside `conf`, written at the same sites: `cov[i][g]`,
+  store g holds every byte of load i -- the same page as well as the same offset, as
+  `{bare, VA[38:12]}` (`conf` compares offsets only, so another page at the same offset overlaps
+  there; `bare`, the access was not translated, keeps a user store's VA apart from an M-mode load's
+  PA of the same value, since a committed store outlives a trap's flush), its bytes covering the
+  load's inside one doubleword. A load is forwardable (`l_fwd`, a register per load) when exactly
+  one older live store overlaps it, `cov` holds for that store, its data is in, it is translated,
+  cached and not faulting, and no older store's address is unknown -- so no store can arrive that
+  the forward would go ahead of, and a forwarded load is never watched or replayed (`e_acc` leaves
+  it out). The flag clears in the edge its store drains, so the store it names never outlives it.
+  `smolrv64_lq` offers a forwardable held load like a clear one (`x_fwd`); it takes the port like
+  any queued load and starts as a fast load in the LSU, which asks the D$ for nothing: the store's
+  bytes, read in the start cycle through the same landing bypass as the drain's and placed as the D$
+  write places them, wait in one forward register and land by the load's tag, through the fast
+  path's formatting, in the first cycle the D$ returns no response. One forward is in flight at a
+  time (`fw_busy`).
 - A load's fault is decided **before the access starts** (by M for the address-only faults, by the
   walker into the entry for a page fault, above): for an FSM-starting access
   `mis_flt` and `xl_flt` are qualified by `xl_f = req_valid & ~req_xlate & (st == S_IDLE)`,
@@ -1967,7 +1985,7 @@ closure above is real; the branch cannot ship until that defect is found (handof
 - **Up to `SQ_N`=32 stores between dispatch and their drain.** `SQ_N = 1 << SQ_IB`, `SQ_IB` =
   `SMOLRV64_SQB` = 5 (`smolrv64_tags.vh`). A store holds its entry from dispatch until the LSU
   drains it after commit, and a load whose bytes overlap an older queued store waits for that
-  drain: there is no store-to-load forwarding. 8 -> 32 entries (2026-10-13, IW=3): the 300 M
+  drain unless it can forward from it (§8). 8 -> 32 entries (2026-10-13, IW=3): the 300 M
   lockstep boot 238,877,773 -> 246,963,412 retires (+3.38%; 16 entries +3.35%); GB5 slices of
   50 M retires after 20 M of warm-up, restored from Simmerv checkpoints (§11.2), in cycles:
   Navigation -0.74%, HTML5 -2.49%, SQLite -1.40%, PDF Rendering -2.22%. `be:sq-full` falls

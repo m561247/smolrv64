@@ -153,6 +153,18 @@ module smolrv64_sq
     output wire                  ld_older,   // an older store is live (aliasing or not) --
                                              // the load is REORDERED past it if it starts
 
+    // ---- store-to-load forwarding: a held load takes its bytes from the store it waits on ----
+    // A page names memory only with its translation regime: {bare, VA[VAW-1:12]}, bare = the access
+    // was not translated (M-mode, or satp Bare). A committed store survives a trap's flush, so a
+    // user store's VA can meet an M-mode load's PA of the same value; the regime bit tells them apart.
+    input  wire [LQN*(VAW-11)-1:0] l_vpn,     // each load's page: a forward needs the store's address,
+    input  wire [VAW-12:0]       l_fill_vpn,  // ...not only its page offset (the filling load's)
+    input  wire                  a_bare,      // the arriving store's address was not translated
+    output wire [LQN-1:0]        l_fwd,       // per entry, REGISTERED: it can take its bytes from a store (below)
+    input  wire                  f_go,        // a forward starts this cycle...
+    input  wire [LQIB-1:0]       f_lix,       // ...for this load...
+    output wire [63:0]           f_data,      // ...and these are its store's bytes, placed as the D$ holds them
+
     // ---- the walker: the first uncommitted entry, when it has no translation yet ----
     output wire                  k_v,
     output wire [IDXB-1:0]       k_idx,
@@ -306,6 +318,16 @@ module smolrv64_sq
    assign c_data = ld_v[head] ? wb_q[ld_w[head]*64 +: 64] : data[head];
    assign c_size = sz[head];
    assign c_unc  = unc[head];
+   // THE FORWARD'S READ, in its start cycle: the load's store, named by the flag's own register (so
+   // the store the flag was computed for), through the same landing bypass as c_data, placed at its
+   // doubleword offset as the D$ write places it (smolrv64_lsu's mem_wdata).
+   wire [IDXB-1:0] f_s  = fws_w[f_lix*IDXB +: IDXB];
+   wire [63:0]     f_dw = ld_v[f_s] ? wb_q[ld_w[f_s]*64 +: 64] : data[f_s];
+   assign f_data = f_dw << {va[f_s][2:0], 3'b000};
+   always @(posedge clk)
+      if (!reset && f_go && !(l_fwd[f_lix] && v[f_s] && dv[f_s] && conf[f_lix][f_s] && cov[f_lix][f_s]))
+         $fatal(1, "smolrv64_sq: forward for load %0d from store %0d, not its forwarding store (fwd=%b v=%b dv=%b conf=%b cov=%b)",
+                f_lix, f_s, l_fwd[f_lix], v[f_s], dv[f_s], conf[f_lix][f_s], cov[f_lix][f_s]);
 
    // ---- disambiguation: does any live entry overlap this load? ----
    // A byte range is [addr, addr + (1<<size)). Two ranges overlap unless one ends at or
@@ -345,6 +367,36 @@ module smolrv64_sq
    // two addresses arrives, so nothing about it is on the issue path.
    reg [NENT-1:0] conf [0:LQN-1];
    integer        li;
+
+   // FORWARDING. cov[i][g]: store g holds every byte of load i -- the same VA doubleword (the
+   // offsets alone also match other pages), its bytes covering the load's, and itself inside one
+   // doubleword. Written at exactly the sites conf is and read only through conf, so a stale cell
+   // behind a clear conf cell is never seen. VAs compare because everything in the queues shares one
+   // address space: an satp write and sfence.vma drain them first. A synonym does not forward.
+   function cov_ab;
+      input [VAW-12:0] lp; input [11:0] la; input [1:0] ls;
+      input [VAW-12:0] sp; input [11:0] sa; input [1:0] ss;
+      reg [3:0] l_lo, l_hi, s_lo, s_hi;
+      begin
+         l_lo = {1'b0, la[2:0]};  l_hi = l_lo + (4'd1 << ls);
+         s_lo = {1'b0, sa[2:0]};  s_hi = s_lo + (4'd1 << ss);
+         cov_ab = (lp == sp) & (la[11:3] == sa[11:3]) & (s_lo <= l_lo) & (l_hi <= s_hi) & (s_hi <= 4'd8);
+      end
+   endfunction
+   reg [NENT-1:0] cov [0:LQN-1];
+   reg [NENT-1:0] bare;                     // the store's address was not translated (see a_bare)
+   reg [NENT-1:0] fill_cov;
+   integer        fc2;
+   always @* for (fc2 = 0; fc2 < NENT; fc2 = fc2 + 1)
+      fill_cov[fc2] = (a_v && (fc2[IDXB-1:0] == a_idx))
+                    ? cov_ab(l_fill_vpn, l_fill_off, l_fill_size, {a_bare, a_va[VAW-1:12]}, a_va[11:0], a_size)
+                    : cov_ab(l_fill_vpn, l_fill_off, l_fill_size, {bare[fc2], va[fc2][VAW-1:12]}, va[fc2][11:0], sz[fc2]);
+   // a one-hot store mask's index
+   function [IDXB-1:0] enc1(input [NENT-1:0] m);
+      integer i;
+      begin enc1 = {IDXB{1'b0}}; for (i = 0; i < NENT; i = i + 1) if (m[i]) enc1 = enc1 | i[IDXB-1:0]; end
+   endfunction
+   wire [LQN*IDXB-1:0] fws_w;               // each load's forwarding store (valid with l_fwd)
 
    // The arriving load's row against every live store, computed ONCE (rule C1): the conf
    // write and the registered block copy below both read it.
@@ -402,6 +454,23 @@ module smolrv64_sq
                    ? (|(oldm & (fill_row | (~av_next & {NENT{l_wt[gl]}}))))
                    : ((l_av[gl] & (|(oldm & (conf[gl] | (~av & {NENT{l_wt[gl]}}))))) | arr_ov);
          assign l_block_q[gl] = blk_q;
+         // FORWARDABLE: exactly one older live store overlaps the load, it holds all the load's bytes
+         // (cov), its data is in, it is translated, cached and not faulting, and no older store's
+         // address is unknown -- so no store can still arrive that a forward would go ahead of. A
+         // register, like the block; cleared in the edge its store drains, so the slot it names
+         // never outlives the store (and is read in the forward's start cycle, see f_data).
+         wire [NENT-1:0] kov = oldm & conf[gl];
+         wire            k1  = (kov != {NENT{1'b0}}) & ((kov & (kov - 1'b1)) == {NENT{1'b0}});
+         wire            fwn = l_av[gl] & k1 & (|(kov & cov[gl] & dv & tv & ~flt & ~unc))
+                             & ~(|(oldm & ~av)) & ~(c_take & kov[head]);
+         reg             fw_q;  reg [IDXB-1:0] fws_q;
+         initial begin fw_q = 1'b0; fws_q = {IDXB{1'b0}}; end
+         always @(posedge clk) begin
+            fw_q  <= ~reset & ~flush & fwn;
+            fws_q <= enc1(kov);
+         end
+         assign l_fwd[gl] = fw_q;
+         assign fws_w[gl*IDXB +: IDXB] = fws_q;
          reg unk_q;  initial unk_q = 1'b0;      // MEM_ALIAS_UNK: the unknown-address arm alone, a cycle old
          always @(posedge clk) unk_q <= l_av[gl] & (|(oldm & ~av));
          assign l_block_unk_q[gl] = unk_q;
@@ -480,14 +549,17 @@ module smolrv64_sq
       end else begin
          // A STORE's address arrives: its COLUMN, against every queued load.
          if (a_v)
-            for (li = 0; li < LQN; li = li + 1)
+            for (li = 0; li < LQN; li = li + 1) begin
                conf[li][a_idx] <= l_av[li]
                                 & ovl_ab(l_off[li*12 +: 12], l_size[li*2 +: 2], a_va[11:0], a_size);
+               cov[li][a_idx]  <= cov_ab(l_vpn[li*(VAW-11) +: VAW-11], l_off[li*12 +: 12], l_size[li*2 +: 2],
+                                         {a_bare, a_va[VAW-1:12]}, a_va[11:0], a_size);
+            end
          // A LOAD's address arrives: its ROW, against every live store. Written second, so
          // it wins the one cell both updates can touch -- and it must, because the column
          // update above would compare that cell against va[a_idx], which is not written
          // until this same edge. The a_v arm (in fill_row) forwards the arriving address.
-         if (l_fill) conf[l_fill_ix] <= fill_row;
+         if (l_fill) begin conf[l_fill_ix] <= fill_row;  cov[l_fill_ix] <= fill_cov; end
          // commit the first uncommitted entry (the ROB released it)
          if (k_take) begin
             cmt[kc] <= 1'b1;
@@ -523,7 +595,7 @@ module smolrv64_sq
 
          // address only. The data comes from the snoop or the data read.
          if (a_v) begin
-            addr[a_idx] <= a_addr;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;  av[a_idx] <= 1'b1;
+            addr[a_idx] <= a_addr;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;  av[a_idx] <= 1'b1;  bare[a_idx] <= a_bare;
             unc[a_idx]  <= a_unc;  tv[a_idx] <= a_tv;  flt[a_idx] <= a_flt;  fc[a_idx] <= a_fc;
          end
          // the data read: the pick is a register, the value is in the cycle it is read (dv) and

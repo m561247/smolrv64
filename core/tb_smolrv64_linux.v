@@ -14,6 +14,7 @@
 // (B6, 2026-09-17). The default tiny128 DTB carries no virtio node, so without +disk the
 // region is never touched and the run is the plain initrd boot.
 `include "tb_rand.vh"
+`include "smolrv64_tags.vh"           // the queue sizes FWD-SIM walks (SMOLRV64_LQB, SMOLRV64_SQB)
 `ifndef SMOLRV64_IW
  `define SMOLRV64_IW 3
 `endif
@@ -709,6 +710,52 @@ module tb;
          ls_pulse_held = ls_pulse_held + 1;
    end
 
+   // ---- FWD-SIM: what store-to-load forwarding would release, printed with TOPDOWN-SIM -------
+   // Every cycle, every load the store queue holds back (l_block_q), by why: no older store with
+   // a known address overlaps it, so an unknown address holds it (unknown); the youngest older
+   // store that overlaps it covers all its bytes and has its data (forwardable: forwarding from
+   // that store would release it now), covers them but its data has not arrived (no-data), or
+   // covers them only in part (partial). Load-cycles, so a cycle with two held loads counts two.
+   // Of the forwardable, `known` counts those with no older store whose address is still unknown:
+   // forwarding there needs no replay check, since no older address can still arrive; `one`, those
+   // that exactly one older live store overlaps; `same-va`, those whose store has the load's VA
+   // doubleword (the overlap matrix compares page offsets only, so the rest are other pages).
+   localparam integer FW_LQ = 1 << `SMOLRV64_LQB, FW_SQ = 1 << `SMOLRV64_SQB, FW_IB = `SMOLRV64_SQB;
+   reg [63:0] fw_unk, fw_fwd, fw_nod, fw_part, fw_known, fw_one, fw_samev, fw_all3, fw_go_n;
+   initial begin fw_unk = 0; fw_fwd = 0; fw_nod = 0; fw_part = 0; fw_known = 0; fw_one = 0; fw_samev = 0; fw_all3 = 0; fw_go_n = 0; end
+   always @(posedge clk) if (!reset && meas && dut.core.lq_x_take && dut.core.lq_x_fwd) fw_go_n <= fw_go_n + 1;   // forwards taken
+   always @(negedge clk) if (!reset && meas) begin : fwdsim
+      integer l, s, ys, nov;  reg unk;
+      reg [FW_IB:0]   ld;
+      reg [FW_IB-1:0] sd, yd;
+      reg [12:0]      llo, lhi, slo, shi;
+      for (l = 0; l < FW_LQ; l = l + 1) if (dut.core.u_sq.l_block_q[l]) begin
+         ld = dut.core.u_sq.l_tag[l*(FW_IB+1) +: FW_IB+1] - dut.core.u_sq.headc;
+         ys = -1;  yd = {FW_IB{1'b0}};  unk = 1'b0;  nov = 0;
+         for (s = 0; s < FW_SQ; s = s + 1) begin
+            sd = s[FW_IB-1:0] - dut.core.u_sq.head;
+            if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && !dut.core.u_sq.av[s]) unk = 1'b1;
+            if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && dut.core.u_sq.conf[l][s]) nov = nov + 1;
+            if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && dut.core.u_sq.conf[l][s] && (ys < 0 || sd > yd)) begin
+               ys = s;  yd = sd;
+            end
+         end
+         if (ys < 0) fw_unk = fw_unk + 1;
+         else begin
+            llo = {1'b0, dut.core.u_sq.l_off[l*12 +: 12]};  lhi = llo + (13'd1 << dut.core.u_sq.l_size[l*2 +: 2]);
+            slo = {1'b0, dut.core.u_sq.va[ys][11:0]};      shi = slo + (13'd1 << dut.core.u_sq.sz[ys]);
+            if (slo > llo || lhi > shi)        fw_part = fw_part + 1;
+            else if (!dut.core.u_sq.dv[ys])    fw_nod  = fw_nod + 1;
+            else begin                         fw_fwd  = fw_fwd + 1;  if (!unk) fw_known = fw_known + 1;
+                                                                    if (nov == 1) fw_one = fw_one + 1;
+               if (dut.core.u_sq.va[ys][38:3] == dut.core.u_lq.va[l][38:3]) begin
+                  fw_samev = fw_samev + 1;  if (!unk && nov == 1) fw_all3 = fw_all3 + 1;
+               end
+            end
+         end
+      end
+   end
+
    // ---- SER-SIM: be:serialize's cycles by the serialising op's class -------------------------
    // The op in flight (captured at its dispatch) or the one waiting at dispatch for the drain:
    // 0 csr read, 1 csr write, 2 amo/lr/sc, 3 fence, 4 fence.i, 5 sfence.vma, 6 xret/ecall/ebreak/wfi,
@@ -993,6 +1040,8 @@ module tb;
       $display("XLATE-SIM M-hits=%0d handed-to-walker=%0d walker-answers=%0d (faults %0d) queue-traps=%0d",
                xs_hit, xs_nopa, xs_wk, xs_wkf, xs_trap);
       $display("ITLB-SIM walks=%0d unused=%0d (a walked page nothing retired from before 32 more walks)", iw_n, iw_waste);
+      $display("FWD-SIM forwards=%0d | held load-cycles: unknown=%0d forwardable=%0d (every older address known %0d, one overlapping store %0d, same VA %0d, all three %0d) no-data=%0d partial=%0d",
+               fw_go_n, fw_unk, fw_fwd, fw_known, fw_one, fw_samev, fw_all3, fw_nod, fw_part);
       $display("DISP-SIM group cut before slot B: alone=%0d rule=%0d resteer=%0d | head waits for a credit=%0d | before slot C: alone=%0d rule=%0d resteer=%0d (%0d)",
                ds_b_alone, ds_b_rule, ds_b_sq, ds_b_room, ds_c_alone, ds_c_rule, ds_c_sq, ds_c_room);
       $display("DISP-SIM alu ready-waiting=%0d (with the other ALU idle %0d) issued-past-an-older-ready=%0d | lsu starts=%0d back-to-back=%0d",
