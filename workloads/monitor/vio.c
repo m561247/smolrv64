@@ -75,6 +75,14 @@ int vio_start(volatile uint32_t *d, uint32_t id, const char *name)
     return 0;
 }
 
+// Whether the device offers feature `bit`: a driver may read the config it describes without
+// taking it.
+int vio_offers(volatile uint32_t *d, int bit)
+{
+    d[VM_DEVFEATSEL] = (uint32_t)bit / 32;
+    return d[VM_DEVFEAT] >> (bit % 32) & 1;
+}
+
 int vio_queue(struct vq *q, volatile uint32_t *d, uint32_t sel, uint64_t base, const char *name)
 {
     d[VM_QSEL] = sel;

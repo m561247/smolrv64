@@ -4,8 +4,10 @@
 // the SD card (disk.c) is for demos.
 //
 // The device takes one descriptor per frame, a 12-byte virtio_net_hdr_v1 and then the Ethernet
-// frame, and it does not filter by address, so the board's MAC is the locally administered one
-// below. TFTP asks for 1468-byte blocks (RFC 2348): a block fills a 1500-byte IP packet.
+// frame, and it does not filter by address. The board's MAC is the device's (VIRTIO_NET_F_MAC:
+// from the FPGA's device DNA, the address Linux uses too), or the locally administered one below
+// on a device without it. TFTP asks for 1468-byte blocks (RFC 2348): a block fills a 1500-byte
+// IP packet.
 #include "mon.h"
 
 #define VNET            ((volatile uint32_t *)0x10003000)
@@ -25,7 +27,7 @@
 
 static struct vq rxq, txq;
 static int       net_up;
-static const uint8_t my_mac[6] = { 0x02, 'S', 'M', 'O', 'L', 0x01 };
+static uint8_t       my_mac[6] = { 0x02, 'S', 'M', 'O', 'L', 0x01 };
 static const uint8_t bcast[6]  = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 static uint32_t my_ip, netmask, gateway;
 static uint32_t arp_ip;                                  // a cache of one: the next hop
@@ -58,6 +60,11 @@ static int net_init(void)
     if (net_up) return 0;
     if (vio_start(VNET, 1, "net") || vio_queue(&rxq, VNET, 0, RXQ_BASE, "net") ||
         vio_queue(&txq, VNET, 1, TXQ_BASE, "net")) return -1;
+    if (vio_offers(VNET, 5)) {                          // VIRTIO_NET_F_MAC: config mac[6] at 0x100
+        uint32_t lo = VNET[0x100 / 4], hi = VNET[0x104 / 4];
+        for (int i = 0; i < 4; i++) my_mac[i] = (uint8_t)(lo >> 8 * i);
+        my_mac[4] = (uint8_t)hi;  my_mac[5] = (uint8_t)(hi >> 8);
+    }
     uint16_t nrx = rxq.n < NRX ? rxq.n : NRX;
     for (uint16_t i = 0; i < nrx; i++) {
         volatile struct vq_desc *d = &VQ_DESC(&rxq)[i];
@@ -273,7 +280,9 @@ static int dhcp(void)
                 if (t == 5) {
                     my_ip = be32(udp_buf + 16);
                     if (!netmask) netmask = 0xffffff00u;
-                    puts_("net: "); putip(my_ip); puts_(" from DHCP\n");
+                    puts_("net: "); putip(my_ip); puts_(" from DHCP for ");
+                    for (int i = 0; i < 6; i++) { if (i) putc_(':'); puthex8(my_mac[i]); }
+                    putc_('\n');
                     return 0;
                 }
                 if (t == 6) break;

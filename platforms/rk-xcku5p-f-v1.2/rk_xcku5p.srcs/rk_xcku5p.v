@@ -1033,13 +1033,19 @@ module rk_xcku5p(
    );
 `endif
 
+   // The board's MAC, from the FPGA's device DNA (below the VGA's DRP clock). virtio-net offers
+   // it (VIRTIO_NET_F_MAC), so Linux and the monitor use the same address on every boot.
+   reg  [47:0] net_mac = 48'd0;
 `ifndef NO_VIRTIO_NET
    virtio_mmio #(
       .DEVICE_ID(32'd1), /* Network device with a minimal TX-drop backend. */
+      .DEVICE_FEATURES_0(32'h0000_0020), /* VIRTIO_NET_F_MAC */
       .QUEUE_NUM_MAX(32'd256), /* virtio-net needs > MAX_SKB_FRAGS+2 (=19) TX slots */
       .QUEUE_COUNT(32'd2)
    ) virtio_net_inst(
-      .config_read_data        (32'd0),
+      // config: mac[0..5] at 0x100 as little-endian words, then status (0: no VIRTIO_NET_F_STATUS)
+      .config_read_data        (ui_mmio_address[11:2] == 10'h040 ? {net_mac[23:16], net_mac[31:24], net_mac[39:32], net_mac[47:40]}
+                              : ui_mmio_address[11:2] == 10'h041 ? {16'd0, net_mac[7:0], net_mac[15:8]} : 32'd0),
       .config_write            (),
       .config_offset           (),
       .config_write_data       (),
@@ -1420,6 +1426,29 @@ module rk_xcku5p(
 
    BUFGCE_DIV #(.BUFGCE_DIVIDE(2)) vga_drp_bufg (
       .I(ui_clk), .CE(1'b1), .CLR(1'b0), .O(vga_drp_clk));
+
+   // The device DNA: 96 bits the factory programs into every FPGA, unique per chip. DNA_PORTE2
+   // reads it once, after the memory controller's reset (its clock is limited to 200 MHz, so it
+   // runs on vga_drp_clk), and it folds to the low 32 bits of net_mac, under 02:53 (locally
+   // administered, unicast; 0x53 is 'S'): one MAC per board for good, recognisable in a DHCP
+   // server's leases, with nothing stored or programmed. vga_drp_clk is ui_clk / 2
+   // and phase-aligned with it, so dna_n and the fold reach ui_clk as ordinary timed paths.
+   // READ and SHIFT come straight from flops: the port sits at the configuration site with a
+   // large setup time, and ui_rst crosses in through dna_go, never through logic to its pins.
+   reg         dna_go = 1'b0, dna_rd = 1'b0, dna_sh = 1'b0;
+   reg  [6:0]  dna_n  = 7'd0;                   // 1: load, 2..97: take a bit and shift, 98: done
+   reg  [95:0] dna    = 96'd0;
+   wire        dna_do;
+   DNA_PORTE2 u_dna (.CLK(vga_drp_clk), .DIN(1'b0), .READ(dna_rd), .SHIFT(dna_sh), .DOUT(dna_do));
+   always @(posedge vga_drp_clk) begin
+      dna_go <= !ui_rst;
+      if ((dna_n != 7'd0 || dna_go) && dna_n != 7'd98) dna_n <= dna_n + 7'd1;
+      dna_rd <= dna_n == 7'd0 && dna_go;
+      dna_sh <= dna_n >= 7'd1 && dna_n <= 7'd96;
+      if (dna_n >= 7'd2 && dna_n <= 7'd97) dna <= {dna_do, dna[95:1]};
+   end
+   always @(posedge ui_clk)
+      if (dna_n == 7'd98) net_mac <= {16'h0253, dna[95:64] ^ dna[63:32] ^ dna[31:0]};
 
    MMCME4_ADV #(
       .BANDWIDTH          ("OPTIMIZED"),

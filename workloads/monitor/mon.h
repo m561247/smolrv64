@@ -63,6 +63,7 @@ struct vq_desc { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; };
 struct vq { volatile uint32_t *dev; uint32_t sel; uint64_t base; uint16_t n, avail, used; };
 #define VQ_DESC(q) ((volatile struct vq_desc *)(q)->base)
 int  vio_start(volatile uint32_t *dev, uint32_t devid, const char *name);
+int  vio_offers(volatile uint32_t *dev, int bit);
 int  vio_queue(struct vq *q, volatile uint32_t *dev, uint32_t sel, uint64_t base, const char *name);
 void vio_ready(volatile uint32_t *dev);
 void vio_reset(volatile uint32_t *dev);

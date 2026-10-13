@@ -193,10 +193,11 @@ which Linux's block layer always provides. The capacity comes from the card's CS
 clock divider is writable at `0x1000_1100`, and a debug word at `0x1000_2F00` reads the
 capacity, the backend's state, or the last read's R1 and timeout.
 
-**virtio-net** (`src/virtio_net.v`, `src/eth_*.v`) has no device-specific features, so the
-guest picks its own MAC address. Received frames wait in an eight-slot ring, which absorbs a
-back-to-back gigabit burst, and both directions DMA 8-byte words. Ubuntu's NFS root runs
-through it.
+**virtio-net** (`src/virtio_net.v`, `src/eth_*.v`) offers one feature, `VIRTIO_NET_F_MAC`: the
+board's MAC, `02:53` and 32 bits folded from the FPGA's factory device DNA, so each board keeps
+one address across boots, in Linux and in the monitor alike. Received frames wait in an
+eight-slot ring, which absorbs a back-to-back gigabit burst, and both directions DMA 8-byte
+words. Ubuntu's NFS root runs through it.
 
 **virtio-input** (`src/virtio_input.v`) is one device that is both keyboard and mouse:
 - **Config space:** every key code 1-255, `BTN_LEFT` through `BTN_EXTRA`, and `REL_X`,
