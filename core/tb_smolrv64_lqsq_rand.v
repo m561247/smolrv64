@@ -24,7 +24,7 @@
 // when nothing is in flight. One action per cycle, chosen at random among those enabled.
 //
 //   +seed=<n>   (default 1)      +nops=<n>   (default 20000)
-// Configuration is stated in the output: NENT=4 both queues, the shipped shape.
+// Configuration is stated in the output: NENT=4 both queues, small, so both fill and wrap all the time.
 module tb;
    localparam NENT=4, IDXB=2, PAW=56, PBITS=9, ROBB=4, NWB=3;
    reg clk=0, reset=1, flush=0;

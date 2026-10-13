@@ -517,7 +517,7 @@ keeps. The ROB is sized by the *window*; the scheduler that needs execute detail
   reaches retire, the free lists or the rename stall. With a same-cycle forward from every
   port the lanes build stood at -0.768 ns over 10,991 endpoints, -0.155 with the deepest
   ports cut. The cost is ROB and SQ occupancy: -1.48% in the 60 M boot (ROB 64 recovers
-  0.24 points and moves the stalls into the SQ, whose 8 entries are the next bound).
+  0.24 points and moves the stalls into the SQ, sized in §14).
 - The irrevocable pointer reads the store queue's completion port (`IRR_FWD`) in its own
   cycle as well as `done`: without it a store leaves the SQ a cycle later, and the boot loses
   another 2.8% to `be:sq-full`.
@@ -1964,6 +1964,16 @@ closure above is real; the branch cannot ship until that defect is found (handof
   `LQ_IB` = `SMOLRV64_LQB` = 4 (`smolrv64_tags.vh`, which the core, `rv_soc_top` and the benches
   read), and the D$ read tag is `{client[1:0], lq_idx}`, `DRTW = LQ_IB + 2`. 8 -> 16 entries:
   Dhrystone 1,660,876 -> 1,585,889 cycles (lockstep, IW=3).
+- **Up to `SQ_N`=32 stores between dispatch and their drain.** `SQ_N = 1 << SQ_IB`, `SQ_IB` =
+  `SMOLRV64_SQB` = 5 (`smolrv64_tags.vh`). A store holds its entry from dispatch until the LSU
+  drains it after commit, and a load whose bytes overlap an older queued store waits for that
+  drain: there is no store-to-load forwarding. 8 -> 32 entries (2026-10-13, IW=3): the 300 M
+  lockstep boot 238,877,773 -> 246,963,412 retires (+3.38%; 16 entries +3.35%); GB5 slices of
+  50 M retires after 20 M of warm-up, restored from Simmerv checkpoints (§11.2), in cycles:
+  Navigation -0.74%, HTML5 -2.49%, SQLite -1.40%, PDF Rendering -2.22%. `be:sq-full` falls
+  below 1% of cycles in all four and the stall moves on: Navigation's ROB fills (0 -> 10.7%)
+  with loads waiting on older stores (a load blocked in 19.5% -> 35.2% of cycles), PDF
+  Rendering's ROB and load queue (24.5% and 21.9%).
 - **ALU, FP, CTF and mul/div reorder** (§2.1, §7); memory, AMO, CSR and fences still issue
   in program order from `u_iq_l`. A long-latency op in M still blocks *other M-class ops*
   behind it. Freeing those needs the load queue and store buffer, and `head_block` gone.

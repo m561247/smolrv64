@@ -19,7 +19,7 @@
 //     and the LANDING BYPASS against a MOVING writeback bus (60481808)
 //   * the load queue's ordering: no overtaking of an unfilled older entry, two in flight,
 //     landing by index, the early start (a_sent)
-// Configuration stated in the output: NENT=4 both, the shipped shape.
+// Configuration stated in the output: NENT=4 both queues, small, so the directed cases fill and wrap them.
 module tb;
    localparam NENT=4, IDXB=2, PAW=56, PBITS=9, ROBB=4, NWB=3;
    reg clk=0, reset=1, flush=0;

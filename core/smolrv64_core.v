@@ -2863,13 +2863,17 @@ module smolrv64_core
    reg [1:0]  hpm_disp_q;                 // instructions dispatched this cycle (DPATCH)
    reg [5:0]  hpm_lqocc_q, hpm_sqocc_q;   // queue occupancies, per cycle (MEM_LQOCC / MEM_SQOCC)
    reg [5:0]  hpm_ret_q;
+   // The occupancies as the 6-bit fields the PMU and core_dbg carry: a queue of up to 32 entries.
+   wire [5:0] lq_occ6 = lq_occ, sq_occ6 = sq_occ;
+   initial if (LQ_N > 32 || SQ_N > 32)
+      $fatal(1, "smolrv64_core: LQ_N=%0d SQ_N=%0d; the 6-bit occupancy fields count to 32", LQ_N, SQ_N);
    initial begin hpm_ev_q = 44'd0; hpm_ret_q = 6'd0; hpm_lqocc_q = 6'd0; hpm_sqocc_q = 6'd0; hpm_disp_q = 2'd0; end
    always @(posedge clk) begin
       hpm_ev_p  <= hpm_ev;
       hpm_ev_q  <= reset ? 44'd0 : hpm_ev_p;
       hpm_disp_q <= reset ? 2'd0 : td_nd;
-      hpm_lqocc_q <= reset ? 6'd0 : {{(6-LQ_IB-1){1'b0}}, lq_occ};
-      hpm_sqocc_q <= reset ? 6'd0 : {{(6-SQ_IB-1){1'b0}}, sq_occ};
+      hpm_lqocc_q <= reset ? 6'd0 : lq_occ6;
+      hpm_sqocc_q <= reset ? 6'd0 : sq_occ6;
       hpm_ret_q <= reset ? 6'd0 : {2'd0, ones_nl(retire)};
    end
 
@@ -4275,7 +4279,7 @@ module smolrv64_core
                       irq_inject, inject_inflight, irq_taken, fe_dq_valid, d_take,
                       ic_req, ic_ack, ic_valid, ic_busy, imem_ok, immu_ready,
                       dmem_ren, dmem_idle, lq_x_devwait, redirect,
-                      {(6-SQ_IB-1){1'b0}}, sq_occ, {(6-LQ_IB-1){1'b0}}, lq_occ,
+                      sq_occ6, lq_occ6,
                       {(7-ROB_IDXB){1'b0}}, rob_head_idx, m_insn, fpu_busy, hpm_ev[38:0]};
 endmodule
 
