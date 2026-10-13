@@ -29,6 +29,17 @@ REPO=$(pwd); PLAT=$REPO/platforms/rk-xcku5p-f-v1.2; UB=$REPO/workloads/ubuntu
 # screenlog.0) lives in ONE checkout's workloads/ubuntu -- the main one, which `git worktree list`
 # prints first. A gate run from a worktree reads the console there (gate V4, 2026-09-05: "BOARD:
 # FAIL (upload)" with the bitstream already on the board) and still boots its own tree.
+# Two boards hang off coffee. BOARD=2g|4g names the one under test and sets what must match it:
+# its console log and screen session, its JTAG cable, its device tree (the memory, and the NFS
+# root: each board has its own, so two boards never write one tree) and the MAC its FPGA's DNA
+# gives it, which the boot must show.
+MAIN=$(git -C "$REPO" worktree list | head -1 | awk '{print $1}')
+case "${BOARD:-}" in
+   2g) CON=$MAIN/workloads/ubuntu/screenlog.2g; SCREEN=b2g; export JTAG=0ABC02A DTB=ubuntu-nfs.dtb;    BMAC=02:53:7c:76:21:25 ;;
+   4g) CON=$MAIN/workloads/ubuntu/screenlog.4g; SCREEN=b4g; export JTAG=0ABC01A DTB=ubuntu-nfs-4g.dtb; BMAC=02:53:64:12:43:42 ;;
+   "") BMAC="" ;;
+   *)  echo "BOARD=$BOARD: 2g or 4g"; exit 2 ;;
+esac
 CON=${CON:-$UB/screenlog.0}
 [ -f "$CON" ] || CON=$(git -C "$REPO" worktree list | head -1 | awk '{print $1}')/workloads/ubuntu/screenlog.0
 # With several boards on one host, CON (the console log) and SCREEN (the `screen` session on
@@ -150,8 +161,28 @@ esac
 export RTL_BANNER
 # every device tree's model string names the LOADED bitstream (its banner), never the tree's
 # commit: `make dtbs RTL=` for the variants, ubuntu-boot.sh again for the one it boots
-( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs RTL="$RTL_BANNER" >/dev/null 2>&1; LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
-   || { echo "BOARD: FAIL (upload)"; tail -3 "$RES/upload.log"; exit 1; }
+( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs RTL="$RTL_BANNER" ) > "$RES/dtbs.log" 2>&1 \
+   || { echo "BOARD: FAIL (dtbs)"; tail -3 "$RES/dtbs.log"; exit 1; }
+if [ -n "${BOARD:-}" ]; then
+   # A named board boots over TFTP, as the monitor's `go` does: this tree's payload and the board's
+   # device tree go to coffee's /srv/tftp/$BOARD with the boot.txt `go $BOARD` runs: 19.7 MB in a
+   # few seconds; XMODEM at 3 Mbaud takes a minute. VGA=1 turns the scanout on, as ubuntu-boot.sh does.
+   T=/srv/tftp/$BOARD
+   cp "$UB/fw_payload.bin" "$T/fw_payload.bin" && cp "$UB/$DTB" "$T/smolrv64.dtb" \
+      || { echo "BOARD: FAIL (staging $T)"; exit 1; }
+   { echo "# The gate's boot of $RTL_BANNER from $REPO ($DTB), staged by tools/board-gate.sh."
+     echo "N80000000 fw_payload.bin"; echo "Nffdff000 smolrv64.dtb"
+     [ "$VGA" = 1 ] && echo "WW10005000 1"
+     echo "X80000000 0 ffdff000"; } > "$T/boot.txt"
+   cp "$T/boot.txt" "$RES/boot.txt"
+   # a character at a time: a bitstream older than the UART's receive FIFO drops a burst
+   go="go $BOARD"; for ((i = 0; i < ${#go}; i++)); do screen -S "$SCREEN" -X stuff "${go:$i:1}"; sleep 0.02; done
+   screen -S "$SCREEN" -X stuff $'\r'
+else
+   # One board, unnamed: the payload and device tree over XMODEM (ubuntu-boot.sh).
+   ( cd "$UB" && LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
+      || { echo "BOARD: FAIL (upload)"; tail -3 "$RES/upload.log"; exit 1; }
+fi
 fi
 echo "booting, watching past byte $PRE"
 # The boot's own marker: its byte offset anchors everything below.
@@ -177,6 +208,11 @@ RTL=$(tail -c +$((PRE+1)) "$CON" | tr -d '\r' | grep -aoE 'rtl=[0-9a-f]+\+?' | h
 FAULTS=$(printf '%s' "$NEW" | grep -acE "$BAD")
 LOGIN=$(printf '%s' "$NEW" | grep -ac "login:")
 echo "login: $LOGIN   faults: $FAULTS   ${RTL:-rtl=?}   last: $(printf '%s' "$NEW" | grep -aoE '^\[ *[0-9]+\.[0-9]+\]' | tail -1)"
+# The board that booted is the one named: the kernel's IP-Config line carries its MAC.
+HW=$(printf '%s' "$NEW" | grep -aoE 'hwaddr=[0-9a-f:]+' | head -1 | cut -d= -f2)
+if [ -n "$BMAC" ] && [ "$HW" != "$BMAC" ]; then
+   echo "BOARD: FAIL (BOARD=$BOARD booted with MAC ${HW:-?}, not its $BMAC: another board, or another board's device tree)"; exit 1
+fi
 if [ "$LOGIN" -ge 1 ] && [ "$FAULTS" -eq 0 ]; then
    if [ -n "${REPLAY:-}" ]; then echo "BOARD: PASS"; exit 0; fi
    stress || exit 1
