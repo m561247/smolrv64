@@ -5,7 +5,7 @@
 #
 #   make            # tiny128-glibc.cpio + ../tiny128/tiny128-cosim-glibc.dtb
 #   ./run-cosim.sh  # boot it under lockstep; expect "GLIBC-TEST PASS ... checksum=..."
-R    ?= /srv/ubuntu-root
+R    ?= /srv/ubuntu-root-2g
 LIBD  = usr/lib/riscv64-linux-gnu
 BINS  = dash wc sort head cat tr
 LIBS  = libc.so.6 ld-linux-riscv64-lp64d.so.1

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # The board's software stack under simmerv: the same fw_payload, the same NFS root from
-# /srv/ubuntu-root, over a host-only TAP. Faster than the board, and the oracle for "does the
+# /srv/ubuntu-root-sim (the guests' own copy of the boards' root), over a host-only TAP. Faster than the board, and the oracle for "does the
 # software itself do this" (e.g. Geekbench's Structure from Motion) against the core.
 #
 # One-time host setup (root; coffee is the NFS server, so no LAN bridge is needed):
 #   sudo ip tuntap add dev tap0 mode tap user $USER
 #   sudo ip addr add 192.168.10.1/24 dev tap0
 #   sudo ip link set tap0 up
-#   echo '/srv/ubuntu-root 192.168.10.0/24(rw,sync,no_root_squash,no_subtree_check)' | sudo tee -a /etc/exports
+#   echo '/srv/ubuntu-root-sim 192.168.10.0/24(rw,sync,no_root_squash,no_subtree_check)' | sudo tee -a /etc/exports
 #   sudo exportfs -ra
 # Then:  ./simmerv-nfs.sh [--rva23]   (Ctrl-C ends it; -n = no popup terminal, console on stdout)
 set -u

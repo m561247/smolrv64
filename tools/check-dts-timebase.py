@@ -53,9 +53,13 @@ def rtl_id():
     except Exception:
         return "unknown"
 
-# The root file system: coffee's NFS export (the kernel's own DHCP brings the link up), or the
-# SD card's first partition (the root's own networking takes over; no DHCP wait without a cable).
-ROOT_NFS = "root=/dev/nfs nfsroot=192.168.1.145:/srv/ubuntu-root,vers=4,tcp ip=dhcp"
+# The root file system: coffee's NFS export (the kernel's own DHCP brings the link up), one per
+# board, so two boards never write one tree and no root is anyone's by default -- the 2 GiB board
+# mounts /srv/ubuntu-root-2g, the 4 GiB board (16 Gb parts) /srv/ubuntu-root-4g -- or the SD
+# card's first partition (the root's own networking takes over; no DHCP wait without a cable).
+# Both NFS roots mount tommy's home from /srv/ubuntu-home.
+# NFS 4.2 with 1 MiB transfers: the nfsroot default is 4.0 and 4 KiB, an RPC per 4 KiB read.
+ROOT_NFS = "root=/dev/nfs nfsroot=192.168.1.145:/srv/ubuntu-root-%s,vers=4.2,tcp,rsize=1048576,wsize=1048576 ip=dhcp"
 ROOT_SD  = "root=/dev/vda1 rootwait"
 
 # The memory node: 2 GiB fits every board; 4 GiB needs 16 Gb parts (src/dram_window.vh).
@@ -66,7 +70,7 @@ def generate(div8, tmpl, out, polled=False, rtl=None, sd_root=False, mem_4g=Fals
     hz, tb = real_rate(div8)
     txt = pathlib.Path(tmpl).read_text()
     txt = txt.replace("@TIMEBASE@", str(tb))
-    txt = txt.replace("@ROOT@", ROOT_SD if sd_root else ROOT_NFS)
+    txt = txt.replace("@ROOT@", ROOT_SD if sd_root else ROOT_NFS % ("4g" if mem_4g else "2g"))
     txt = txt.replace("@MODEL@", "SmolRV64 %s @ %.2f MHz%s%s%s"
                       % (rtl or rtl_id(), hz / 1e6, " (polled UART)" if polled else "",
                          " (SD root)" if sd_root else "", " (4 GiB)" if mem_4g else ""))

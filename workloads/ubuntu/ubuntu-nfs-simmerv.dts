@@ -14,7 +14,7 @@
 	chosen {
 		linux,initrd-start = <0 0x9f52c000>;
 		linux,initrd-end   = <0 0x9ff00000>;
-		bootargs = "console=ttyS0 earlycon=sbi root=/dev/nfs nfsroot=192.168.10.1:/srv/ubuntu-root,vers=4,tcp ip=192.168.10.2::192.168.10.1:255.255.255.0:smolrv64:eth0:off rw ignore_loglevel random.trust_bootloader=on";
+		bootargs = "console=ttyS0 earlycon=sbi root=/dev/nfs nfsroot=192.168.10.1:/srv/ubuntu-root-sim,vers=4.2,tcp,rsize=1048576,wsize=1048576 ip=192.168.10.2::192.168.10.1:255.255.255.0:smolrv64:eth0:off rw ignore_loglevel random.trust_bootloader=on";
 		stdout-path = "/uart@10000000";
 
 		/* Development-only static seed: replace with per-boot random bytes later. */

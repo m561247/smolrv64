@@ -6,7 +6,7 @@ Under Simmerv instret is the simulator's own instruction count, which makes this
 meaningful number there. Prints one row per subtest with each build's count and the ratio
 to the first build, so the B/Zicond/V builds' savings read directly.
 
-  tools/gb7-mix.py /srv/ubuntu-root/var/tmp/sv-gb7-{rv64gc,rv64gcbv,rva23}-raw.log
+  tools/gb7-mix.py /srv/ubuntu-root-sim/var/tmp/sv-gb7-{rv64gc,rv64gcbv,rva23}-raw.log
 """
 import re, sys
 

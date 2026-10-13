@@ -33,7 +33,7 @@ ubuntu-nfs-polled.dts: $(TMPL) $(GEN)   # UART polled instead of interrupt-drive
 	$(GEN) --gen $(GENRTL) $(DIV8) --polled $(TMPL) $@
 ubuntu-sd.dts: $(TMPL) $(GEN)           # root on the SD card's first partition, not NFS
 	$(GEN) --gen $(GENRTL) $(DIV8) --sd-root $(TMPL) $@
-ubuntu-nfs-4g.dts: $(TMPL) $(GEN)       # 4 GiB: only for a board with 16 Gb DDR4 parts
+ubuntu-nfs-4g.dts: $(TMPL) $(GEN)       # 4 GiB: the board with 16 Gb DDR4 parts, its own NFS root
 	$(GEN) --gen $(GENRTL) $(DIV8) --4g $(TMPL) $@
 ubuntu-sd-4g.dts: $(TMPL) $(GEN)
 	$(GEN) --gen $(GENRTL) $(DIV8) --sd-root --4g $(TMPL) $@

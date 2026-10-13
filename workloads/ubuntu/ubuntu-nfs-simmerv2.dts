@@ -1,5 +1,5 @@
-// DO NOT BOOT THIS while the board or the other guest is up (Tommy, 2026-09-10): every client
-// of /srv/ubuntu-root shares one machine-id, one journal, /var/tmp, /home and every lock file,
+// DO NOT BOOT THIS while the other guest is up (Tommy, 2026-09-10): both guests mount
+// /srv/ubuntu-root-sim and share one machine-id, one journal, /var/tmp and every lock file,
 // and the guest's own dmesg already shows journald repairing journals two writers corrupted.
 // A second guest needs its own writable layer first -- an overlayfs upper on tmpfs or a
 // per-guest virtio-blk image over the read-only NFS root, or a per-guest copy of the tree
@@ -20,7 +20,7 @@
 	chosen {
 		linux,initrd-start = <0 0x9f52c000>;
 		linux,initrd-end   = <0 0x9ff00000>;
-		bootargs = "console=ttyS0 earlycon=sbi root=/dev/nfs nfsroot=192.168.11.1:/srv/ubuntu-root,vers=4,tcp ip=192.168.11.2::192.168.11.1:255.255.255.0:smolrv64b:eth0:off rw ignore_loglevel random.trust_bootloader=on";
+		bootargs = "console=ttyS0 earlycon=sbi root=/dev/nfs nfsroot=192.168.11.1:/srv/ubuntu-root-sim,vers=4.2,tcp,rsize=1048576,wsize=1048576 ip=192.168.11.2::192.168.11.1:255.255.255.0:smolrv64b:eth0:off rw ignore_loglevel random.trust_bootloader=on";
 		stdout-path = "/uart@10000000";
 
 		/* Development-only static seed: replace with per-boot random bytes later. */

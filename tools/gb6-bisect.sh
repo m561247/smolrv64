@@ -65,6 +65,7 @@ else
 fi
 say "gb6 on $ip (dmesg lines before: $PRE_D), PASS at $PASS_N subtests, cap ${PASS_S}s"
 RAW=/var/tmp/gb6-$TAG-raw.log
+ROOT=${ROOT:-/srv/ubuntu-root-2g}   # the board's NFS root on coffee, where its /var/tmp lives
 dead=0; last_say=0; n=0; name="-"
 while :; do
    sleep 60
@@ -88,22 +89,22 @@ while :; do
    # the raw log (the result URL and whatever scores the CLI prints) kept in $RES. PASS_N=999
    # turns the subtest-count pass off so the run goes the distance.
    if [ -n "$end" ] && echo "$end" | grep -q 'gb6 end.*rc=0' && [ "${f:-0}" -eq 0 ] && [ -z "$con" ]; then
-      cp "/srv/ubuntu-root$RAW" "$RES/" 2>/dev/null; cp "/srv/ubuntu-root/var/tmp/gb6-$TAG-perf.txt" "$RES/" 2>/dev/null
+      cp "$ROOT$RAW" "$RES/" 2>/dev/null; cp "$ROOT/var/tmp/gb6-$TAG-perf.txt" "$RES/" 2>/dev/null
       "$REPO/tools/errlog-read.sh" "$ip" | tee "$RES/errlog-final.log"
-      grep -aE 'Score|score|https://browser.geekbench.com|Upload' "/srv/ubuntu-root$RAW" | tee "$RES/score.log"
-      echo "GB6-BISECT: PASS $TAG rtl=$BANNER COMPLETED in $el s ($n subtests, last: $name) -- $(grep -aoE 'https://browser.geekbench.com/[^ ]*' "/srv/ubuntu-root$RAW" | tail -1)"
+      grep -aE 'Score|score|https://browser.geekbench.com|Upload' "$ROOT$RAW" | tee "$RES/score.log"
+      echo "GB6-BISECT: PASS $TAG rtl=$BANNER COMPLETED in $el s ($n subtests, last: $name) -- $(grep -aoE 'https://browser.geekbench.com/[^ ]*' "$ROOT$RAW" | tail -1)"
       exit 0
    fi
    if [ "${f:-0}" -gt 0 ] || [ -n "$end" ] || [ -n "$con" ]; then
       timeout 40 $SSH "dmesg | tail -n +$((PRE_D+1)) | grep -aE '$FAULT|epc :|badaddr' | head -6; cp $RAW /var/tmp/gb6-$TAG-perf.txt /tmp/ 2>/dev/null" | tee "$RES/fault.log"
-      cp "/srv/ubuntu-root$RAW" "$RES/" 2>/dev/null
+      cp "$ROOT$RAW" "$RES/" 2>/dev/null
       "$REPO/tools/errlog-read.sh" "$ip" | tee -a "$RES/fault.log"     # the integrity log, if this bitstream has one
       echo "GB6-BISECT: FAIL $TAG rtl=$BANNER after $el s at subtest $n ($name) -- ${end:-dmesg: $f fault lines}${con:+; console: $con}"
       exit 1
    fi
    if [ "${n:-0}" -ge "$PASS_N" ] || [ "$el" -ge "$PASS_S" ]; then
       timeout 40 $SSH "pkill -TERM -x geekbench_riscv; sleep 5; pgrep -x geekbench_riscv >/dev/null && pkill -KILL -x geekbench_riscv; true"
-      sleep 3; cp "/srv/ubuntu-root$RAW" "/srv/ubuntu-root/var/tmp/gb6-$TAG-perf.txt" "$RES/" 2>/dev/null
+      sleep 3; cp "$ROOT$RAW" "$ROOT/var/tmp/gb6-$TAG-perf.txt" "$RES/" 2>/dev/null
       "$REPO/tools/errlog-read.sh" "$ip" | tee "$RES/errlog.log"
       if [ "${n:-0}" -ge "$PASS_N" ]; then echo "GB6-BISECT: PASS $TAG rtl=$BANNER survived $el s ($n subtests, last: $name)"; exit 0; fi
       echo "GB6-BISECT: INCONCLUSIVE $TAG rtl=$BANNER hit the ${PASS_S}s cap at $n subtests ($name)"; exit 2

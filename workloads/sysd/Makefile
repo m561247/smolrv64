@@ -7,7 +7,7 @@
 #
 #   make            # tiny128-sysd.cpio + ../tiny128/tiny128-cosim-sysd.dtb
 #   ./run-cosim.sh  # boot it under lockstep; expect "SYSD-TEST PASS"
-R     ?= /srv/ubuntu-root
+R     ?= /srv/ubuntu-root-2g
 LIBD   = usr/lib/riscv64-linux-gnu
 SYSD   = usr/lib/systemd/systemd
 LIBS   = ld-linux-riscv64-lp64d.so.1 libacl.so.1 libapparmor.so.1 libaudit.so.1 libblkid.so.1 libc.so.6 \
