@@ -111,4 +111,5 @@ FWD-SIM (Navigation / HTML5 / SQLite / PDF Rendering, load-cycles, with the queu
   another load starts, the drain has the port, or the LSU takes nothing; in the 300 M boot, 48.2 M,
   32.7 M of them behind the drain (a committed store at the queue head has the port first). A
   forward needs no D$ access; a start of its own beside the port's would take it out of that
-  contention.
+  contention. Giving the port to a ready load first (a store refused once goes next) is worse:
+  Navigation +6.7% cycles, HTML5 +1.4% -- a later drain holds back the loads that wait on it.
