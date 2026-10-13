@@ -1472,6 +1472,9 @@ board with bitstream O. `tb_virtio_net` toggles the flag mid-delivery both ways.
 | DDR4 | `0x8000_0000` | 2 or 4 GiB (§13, DDR4) |
 
 UART is **3 Mbps, hardwired in RTL** — not derived from the DTS or the kernel printout.
+Receive goes through a **4 KiB FIFO** behind RBR, 13.7 ms of input: the line has no flow
+control, so a byte that finds the FIFO full is dropped and sets LSR.OE. The THR is one byte
+(`fifo-size = <1>` in the DTS).
 
 ---
 
@@ -1590,7 +1593,8 @@ Address translation, two instances (iTLB in `smolrv64_core`, dTLB in `smolrv64_l
 | iTLB `tlb_v`/`tag`/`ppn`/`lvl`/`perm`/`nc`/`n` | 64 | 1+27+44+2+8+1+1 = 84 | 5 376 |
 | dTLB, the same fields | 2048, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 84 | 172 032 per copy |
 
-Also in `rv_soc_top`: `lmem` — the 256 KiB on-chip boot/monitor SRAM, `NLLINE × 512`.
+Also in `rv_soc_top`: `lmem` — the 256 KiB on-chip boot/monitor SRAM, `NLLINE × 512`; and
+`u_uart_rxq` — the UART's receive FIFO, 4096 × 8, one block RAM.
 
 ### 10.4 Verification-only
 

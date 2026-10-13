@@ -81,8 +81,8 @@ module rv_soc_top #(
    input  wire             ddr_w_valid,  // write done (the DRAM's write response)
    output wire             ddr_w_ready,
    input  wire [4:0]       ddr_w_id,
-   // UART receive: the TB/host pushes a byte (uart_rx_we while uart_rx_ready) -> the core
-   // reads it from RBR. uart_rx_ready = the holding register is empty (DR clear).
+   // UART receive: the TB/host pushes a byte (uart_rx_we while uart_rx_ready) into the receive
+   // FIFO, which the core reads from RBR. uart_rx_ready = the FIFO has room.
    input  wire             uart_rx_we,
    input  wire [7:0]       uart_rx_data,
    output wire             uart_rx_ready,
@@ -322,13 +322,32 @@ module rv_soc_top #(
    // interrupt (RX-DR | THRE) to PLIC source 10. Interrupt-driven TX is load-bearing: the
    // DTS declares the IRQ, so the 8250 driver waits for a THRE interrupt to drain its xmit
    // buffer -- without it userspace wedges in its first console write() while polled printk
-   // still looks healthy. DTS fifo-size=<1> makes the 1-deep THR/RBR compliant.
+   // still looks healthy. DTS fifo-size=<1> is the THR's depth.
+   // Receive is a 4 KiB FIFO behind RBR, 13.7 ms of input at 3 Mbps. The board's line has no
+   // flow control: a byte that finds the FIFO full is dropped and sets LSR.OE, which reading
+   // LSR clears; FCR bit 1 empties the FIFO. The counts carry a wrap bit above the index. The
+   // block RAM is read at rxq_r every cycle and returns garbage for an address written in the
+   // same cycle, so DR waits until the head byte was written two cycles ago (rxq_wv is rxq_w a
+   // cycle late) and rxq_r has held for a cycle (rxq_rq): only then is the RAM's output the head.
+   localparam integer RXQB = 12;
+   localparam [RXQB:0] RXQN = {1'b1, {RXQB{1'b0}}};
    reg [3:0] uart_ier;  reg uart_fcr_fifo;  reg [4:0] uart_mcr;  reg [7:0] uart_scr;
    reg [7:0] uart_lcr;  integer ub;
-   reg [7:0] uart_rbr;  reg uart_dr;       // RX holding register + data-ready
+   reg [RXQB:0] uart_rxq_w, uart_rxq_wv, uart_rxq_r, uart_rxq_rq;
+   reg       uart_oe;
+   wire [7:0] uart_rbr;
+   wire      uart_dr   = (uart_rxq_wv != uart_rxq_r) & (uart_rxq_r == uart_rxq_rq);
+   wire      uart_full = (uart_rxq_w - uart_rxq_r) == RXQN;
    reg [7:0] uart_thr;  reg uart_thr_full; // TX holding register + pending flag
    reg       uart_thre_pending;
-   assign    uart_rx_ready = ~uart_dr;
+   assign    uart_rx_ready = ~uart_full;
+   smolrv64_sdpram #(.ADDR_WIDTH(RXQB), .DATA_WIDTH(8), .READ_LATENCY(1)) u_uart_rxq
+     (.clock(clk), .rd_addr(uart_rxq_r[RXQB-1:0]), .rd_data(uart_rbr),
+      .wr_en(uart_rx_we & ~uart_full), .wr_addr(uart_rxq_w[RXQB-1:0]), .wr_data(uart_rx_data));
+   always @(posedge clk)
+      if (~reset & (((uart_rxq_w - uart_rxq_r) > RXQN) | ((uart_rxq_wv - uart_rxq_r) > (uart_rxq_w - uart_rxq_r))))
+         $fatal(1, "rv_soc_top: UART receive FIFO counts out of order (w %0d, wv %0d, r %0d)",
+                uart_rxq_w, uart_rxq_wv, uart_rxq_r);
    // TX byte stream: hold the THR byte until rs232tx accepts it (FPGA backpressure).
    // In a sim TB uart_tx_ready is tied 1, so the byte drains next cycle (THRE stays high).
    assign    uart_tx_valid = uart_thr_full;
@@ -362,17 +381,20 @@ module rv_soc_top #(
    assign    uart_irq = uart_rx_ip | uart_thre_ip;
 `endif
    // Read strobes: UART_BASE is 16-aligned and is_uart_r bounds the window, so the register
-   // offset is just the low address bits. RBR read pops DR; IIR read clears THRE-pending
-   // when THRE is the cause being reported.
+   // offset is just the low address bits. An RBR read pops the receive FIFO, an LSR read
+   // clears OE, and an IIR read clears THRE-pending when THRE is the cause being reported.
    wire [2:0] uart_roff   = dmem_raddr[2:0];
    wire      uart_rbr_rd = dmem_ren & is_uart_r & (uart_roff == 3'd0) & ~uart_lcr[7];
    wire      uart_iir_rd = dmem_ren & is_uart_r & (uart_roff == 3'd2);
+   wire      uart_lsr_rd = dmem_ren & is_uart_r & (uart_roff == 3'd5);
    // Like the PLIC claim, read data REGISTERS at the ren strobe and delivers on the 1-cycle-
    // later dev_rvalid, so a side-effecting read returns its pre-side-effect value.
    reg [63:0] uart_rdata_q;
    always @(posedge clk) if (reset) begin
          uart_ier<=4'd0; uart_fcr_fifo<=1'b0; uart_mcr<=5'd0; uart_scr<=8'd0;
-         uart_lcr<=8'd0; uart_dr<=1'b0; uart_rbr<=8'd0;
+         uart_lcr<=8'd0; uart_oe<=1'b0;
+         uart_rxq_w<={(RXQB+1){1'b0}}; uart_rxq_wv<={(RXQB+1){1'b0}};
+         uart_rxq_r<={(RXQB+1){1'b0}}; uart_rxq_rq<={(RXQB+1){1'b0}};
          uart_thr<=8'd0; uart_thr_full<=1'b0; uart_thre_pending<=1'b0; uart_rdata_q<=64'd0;
       end
       else begin
@@ -381,7 +403,7 @@ module rv_soc_top #(
             uart_thre_pending <= 1'b1;
          end
          if (dmem_ren & is_uart_r) begin
-            uart_rdata_q <= uart_rd(dmem_raddr, uart_rbr, uart_dr, uart_lcr, uart_thr_full,
+            uart_rdata_q <= uart_rd(dmem_raddr, uart_rbr, uart_dr, uart_oe, uart_lcr, uart_thr_full,
                                     uart_ier, uart_iir, uart_mcr, uart_scr);
             if (uart_iir_rd & uart_iir_thre) uart_thre_pending <= 1'b0;
          end
@@ -400,7 +422,7 @@ module rv_soc_top #(
                         end
                   3'd2: begin                   // FCR (write-only): FIFO enable + RX/TX resets
                            uart_fcr_fifo <= dmem_wdata[ub*8];
-                           if (dmem_wdata[ub*8+1]) uart_dr <= 1'b0;
+                           if (dmem_wdata[ub*8+1]) uart_rxq_r <= uart_rxq_wv;
                            if (dmem_wdata[ub*8+2]) begin
                               uart_thr_full <= 1'b0;
                               if (uart_ier[1]) uart_thre_pending <= 1'b1;
@@ -411,11 +433,15 @@ module rv_soc_top #(
                   3'd7: uart_scr <= dmem_wdata[ub*8 +: 8];
                   default: ;
                endcase
-         if (uart_rx_we & ~uart_dr) begin uart_rbr <= uart_rx_data; uart_dr <= 1'b1; end
-         else if (uart_rbr_rd)      uart_dr <= 1'b0;
+         uart_rxq_wv <= uart_rxq_w;
+         uart_rxq_rq <= uart_rxq_r;
+         if (uart_rx_we & ~uart_full) uart_rxq_w <= uart_rxq_w + 1'b1;
+         if (uart_rbr_rd & uart_dr)   uart_rxq_r <= uart_rxq_r + 1'b1;
+         if (uart_rx_we & uart_full)  uart_oe <= 1'b1;
+         else if (uart_lsr_rd)        uart_oe <= 1'b0;
       end
    function [63:0] uart_rd;
-      input [63:0] a; input [7:0] rbr; input dr; input [7:0] lcr; input thr_full;
+      input [63:0] a; input [7:0] rbr; input dr; input oe; input [7:0] lcr; input thr_full;
       input [3:0] ier; input [7:0] iir; input [4:0] mcr; input [7:0] scr;
       integer b2; reg [2:0] off; reg [63:0] uoff;
       begin uart_rd=64'd0; for (b2=0;b2<8;b2=b2+1) begin
@@ -426,7 +452,7 @@ module rv_soc_top #(
             : (off==3'd2) ? iir                                          // IIR
             : (off==3'd3) ? lcr                                          // LCR
             : (off==3'd4) ? {3'd0, mcr}                                  // MCR
-            : (off==3'd5) ? ((thr_full?8'h00:8'h60) | (dr?8'h01:8'h00))  // LSR: TEMT|THRE|DR
+            : (off==3'd5) ? ((thr_full?8'h00:8'h60) | (oe?8'h02:8'h00) | (dr?8'h01:8'h00))  // LSR: TEMT|THRE|OE|DR
             : (off==3'd6) ? 8'hB0                                        // MSR: CTS+DSR+CD
             :               scr; end end                                 // SCR
    endfunction

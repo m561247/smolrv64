@@ -60,6 +60,38 @@ module tb;
       else if (uart_tx_v & uart_tx_rdy) txcnt <= TX_DRAIN[7:0];
       else if (txcnt != 8'd0)           txcnt <= txcnt - 8'd1;
 
+   // Console input: +uart_in=<file> types the file into the UART's receive FIFO from cycle
+   // +uart_at=<n>, a byte every +uart_gap=<n> cycles (default 555: 3 Mbps at 166.67 MHz), with
+   // no flow control, as the board's line has none: a byte that finds the FIFO full is lost.
+   reg  [7:0]       uin [0:65535];
+   reg  [63:0]      uin_n, uin_i, uin_at, uin_gap, uin_t;
+   reg  [8*256-1:0] uin_file;
+   integer          uin_fd, uin_ch;
+   reg              uin_we;
+   reg  [7:0]       uin_d;
+   initial begin
+      uin_n = 64'd0; uin_i = 64'd0; uin_t = 64'd0; uin_we = 1'b0; uin_d = 8'd0;
+      if (!$value$plusargs("uart_at=%d", uin_at))   uin_at  = 64'd0;
+      if (!$value$plusargs("uart_gap=%d", uin_gap)) uin_gap = 64'd555;
+      if ($value$plusargs("uart_in=%s", uin_file)) begin
+         uin_fd = $fopen(uin_file, "rb");
+         if (uin_fd == 0) begin $display("FATAL: +uart_in=%0s does not open", uin_file); $finish; end
+         for (uin_ch = $fgetc(uin_fd); uin_ch >= 0 && uin_n < 64'd65536; uin_ch = $fgetc(uin_fd)) begin
+            uin[uin_n[15:0]] = uin_ch[7:0];  uin_n = uin_n + 64'd1;
+         end
+         $fclose(uin_fd);
+         $display("[uart_in: %0d bytes from cycle %0d, one every %0d cycles]", uin_n, uin_at, uin_gap);
+      end
+   end
+   always @(posedge clk) begin
+      uin_t  <= uin_t + 64'd1;
+      uin_we <= 1'b0;
+      if (uin_we & ~rx_ready) $display("tb: uart_in byte %0d lost: the receive FIFO is full", uin_i - 64'd1);
+      if (~reset & (uin_i < uin_n) & (uin_t >= uin_at) & ((uin_t - uin_at) % uin_gap == 64'd0)) begin
+         uin_we <= 1'b1;  uin_d <= uin[uin_i[15:0]];  uin_i <= uin_i + 64'd1;
+      end
+   end
+
    // The reset PC is a define so the same bench boots the ROM MONITOR from the SoC's SRAM:
    //   VDEFS='-DSOC_BOOT_HEX="<src/binline.py monitor.bin>" -DTB_RESET_PC=64'"'"'h7000_0000'
    // (2026-09-05: gate V4 printed no monitor banner on the board while every cosim passed;
@@ -88,7 +120,7 @@ module tb;
       .ddr_r_valid(ddr_r_valid), .ddr_r_ready(ddr_r_ready), .ddr_r_id(ddr_r_id), .ddr_r_beat(ddr_r_beat),
       .ddr_r_last(ddr_r_last), .ddr_r_data(ddr_r_data),
       .ddr_w_valid(ddr_w_valid), .ddr_w_ready(ddr_w_ready), .ddr_w_id(ddr_w_id),
-      .uart_rx_we(1'b0), .uart_rx_data(8'd0), .uart_rx_ready(rx_ready),
+      .uart_rx_we(uin_we), .uart_rx_data(uin_d), .uart_rx_ready(rx_ready),
       .uart_tx_valid(uart_tx_v), .uart_tx_ready(uart_tx_rdy),
       .virtio_addr(virtio_addr), .virtio_read(virtio_read), .virtio_write(virtio_write),
       .virtio_wdata(virtio_wdata), .virtio_be(virtio_be),

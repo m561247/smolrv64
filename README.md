@@ -111,7 +111,7 @@ is read off the RTL or measured with the workload named):
   mechanism; a pending interrupt waits out a page-straddling fetch rather than abandoning
   it.
 
-**An SoC that runs the real thing.** CLINT, PLIC, an NS16550A UART hardwired to 3 Mbaud,
+**An SoC that runs the real thing.** CLINT, PLIC, an NS16550A UART hardwired to 3 Mbaud with a 4 KiB receive FIFO,
 virtio-blk backed by an SD card over SPI, virtio-net over RGMII with an eight-slot receive
 ring and word-wide DMA, a virtio keyboard and mouse fed by USB devices through a Pico (see
 [Virtio devices](#virtio-devices)), a 256 KiB boot SRAM holding a ROM monitor that boots over TFTP or from the
