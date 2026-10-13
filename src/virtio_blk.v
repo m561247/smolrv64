@@ -341,9 +341,13 @@ module virtio_blk #(
 
          case (state)
            S_IDLE: begin
-              // Hold off until the card is initialised (capacity valid) — a
-              // notify arriving earlier stays latched in notify_pending.
-              if (queue_configured && driver_ok && sd_ready &&
+              // Hold off while the card initialises (capacity not yet valid) — a
+              // notify arriving earlier stays latched in notify_pending. An init that
+              // failed (no card: sd_error held with sd_ready low) ends the wait too:
+              // the capacity stays 0, so every request with data is out of range and
+              // answered IOERR -- the serial number udev reads at boot (GET_ID)
+              // included: no request waits on a card that is not there.
+              if (queue_configured && driver_ok && (sd_ready || sd_error) &&
                   (blk_notify || notify_pending)) begin
                  notify_pending <= 1'b0;
                  left_idle_ever <= 1'b1;   // ILA_DEV: backend EVER started servicing a notify

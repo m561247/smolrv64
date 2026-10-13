@@ -12,6 +12,7 @@
 //   1. T_IN  (read):  SD sector -> block buffer -> guest DATA buffer
 //   2. T_OUT (write): guest DATA buffer -> block buffer -> SD sector
 //   3. round trip: write a sector, then read it back, bytes match
+// and first, with the slot empty: the card's init fails, and requests are answered, not held.
 #include "Vvirtio_blk.h"
 #include "verilated.h"
 #include "sd_spi_card_model.h"
@@ -47,11 +48,12 @@ static uint32_t mem_rd32(uint32_t a){ uint32_t v=0; for(int i=0;i<4;i++) v|=mem_
 
 static Vvirtio_blk* dut;
 static SpiSdCard card;
+static bool card_in = false;    // the slot is empty until Test 0 is done
 static bool s_rvalid = false; static uint64_t s_rdata = 0;
 static bool s_bvalid = false;
 
 static void tick() {
-    dut->sd_miso = card.miso & 1;
+    dut->sd_miso = card_in ? (card.miso & 1) : 1;   // an empty slot: MISO pulled high
 
     dut->m_axi_arready = 1; dut->m_axi_awready = 1; dut->m_axi_wready = 1;
     dut->m_axi_rvalid = s_rvalid; dut->m_axi_rdata = s_rdata;
@@ -74,7 +76,7 @@ static void tick() {
     if (b_hs) s_bvalid = false;
     if (aw_hs && w_hs && !s_bvalid) { mem_wr64(awaddr, wdata, wstrb); s_bvalid = true; }
 
-    card.clock_edge(dut->sd_sck, dut->sd_cs_n, dut->sd_mosi);
+    if (card_in) card.clock_edge(dut->sd_sck, dut->sd_cs_n, dut->sd_mosi);
 }
 
 // ---- vring layout (device addresses) --------------------------------------
@@ -106,33 +108,57 @@ static void set_blk_hdr(uint32_t type, uint64_t sector) {
 static int fails = 0;
 static void check(bool ok, const char* m) { if(!ok){ printf("FAIL: %s\n",m); fails++; } }
 
-static void run_request(uint16_t avail_idx, uint16_t expect_used_idx) {
+static long run_request(uint16_t avail_idx, uint16_t expect_used_idx, long budget = 3000000) {
     mem_wr16(AVAIL + 0, 0);
     mem_wr16(AVAIL + 4 + (avail_idx-1)*2, 0);      // avail.ring[slot] = head desc 0
     mem_wr16(AVAIL + 2, avail_idx);                // avail.idx (publish)
     dut->queue_notify_pulse = 1; dut->queue_notify_value = 0; tick();
     dut->queue_notify_pulse = 0;
-    for (int i = 0; i < 3000000; i++) {            // budget covers SD init + xfer
+    for (long i = 0; i < budget; i++) {            // the default covers SD init + xfer
         tick();
-        if (mem_rd16(USED + 2) == expect_used_idx) return;
+        if (mem_rd16(USED + 2) == expect_used_idx) return i;
     }
     check(false, "request timed out (used.idx never advanced)");
+    return budget;
+}
+
+// Reset the device (and its SD host, which then initialises the card again), then set the
+// queue up as a driver does, its rings empty.
+static void start() {
+    dut->reset = 1; dut->device_status = 0; dut->queue_notify_pulse = 0;
+    dut->queue_num = 0; dut->queue_ready = 0;
+    dut->queue_desc = 0; dut->queue_driver = 0; dut->queue_device = 0;
+    for (int i = 0; i < 8; i++) tick();
+    dut->reset = 0;
+    mem_wr16(AVAIL + 2, 0); mem_wr16(USED + 2, 0);
+    dut->queue_num = 8; dut->queue_ready = 1;
+    dut->queue_desc = GUEST + DESC; dut->queue_driver = GUEST + AVAIL; dut->queue_device = GUEST + USED;
+    dut->device_status = 0x0f; // ACK|DRIVER|FEATURES_OK|DRIVER_OK
+    for (int i = 0; i < 4; i++) tick();
 }
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vvirtio_blk;
 
-    dut->reset = 1; dut->device_status = 0; dut->queue_notify_pulse = 0;
-    dut->queue_num = 0; dut->queue_ready = 0;
-    dut->queue_desc = 0; dut->queue_driver = 0; dut->queue_device = 0;
-    for (int i = 0; i < 8; i++) tick();
-    dut->reset = 0;
+    // ---- Test 0: no card. Nothing answers ACMD41, the init gives up, and the device answers
+    //      every request: the capacity is 0, so GET_ID (udev's serial read) and a read are IOERR.
+    start();
+    set_blk_hdr(8 /*T_GET_ID*/, 0);
+    set_desc(0, HDR, 16, F_NEXT, 1); set_desc(1, DATA, 20, F_NEXT | F_WRITE, 2); set_desc(2, STATUS, 1, F_WRITE, 0);
+    mem_wr_bytes(STATUS, (const uint8_t*)"\xff", 1);
+    long t = run_request(1, 1, 50000000);           // after the init has given up
+    printf("no card: the init gave up and GET_ID was answered after %ld cycles\n", t);
+    check(mem_rd_byte(STATUS) == 1, "no card: GET_ID status == S_IOERR");
+    set_blk_hdr(0 /*T_IN*/, 3);
+    set_desc(0, HDR, 16, F_NEXT, 1); set_desc(1, DATA, 512, F_NEXT | F_WRITE, 2); set_desc(2, STATUS, 1, F_WRITE, 0);
+    mem_wr_bytes(STATUS, (const uint8_t*)"\xff", 1);
+    run_request(2, 2);
+    check(mem_rd_byte(STATUS) == 1, "no card: read status == S_IOERR");
+    check(dut->capacity_sectors == 0, "no card: capacity == 0");
 
-    dut->queue_num = 8; dut->queue_ready = 1;
-    dut->queue_desc = GUEST + DESC; dut->queue_driver = GUEST + AVAIL; dut->queue_device = GUEST + USED;
-    dut->device_status = 0x0f; // ACK|DRIVER|FEATURES_OK|DRIVER_OK
-    for (int i = 0; i < 4; i++) tick();
+    card_in = true;   // the card goes in; the device starts over and initialises it
+    start();
 
     // ---- Test 1: READ (T_IN) SD sector 3 -> DATA buffer -------------------
     const uint32_t SECT = 3;

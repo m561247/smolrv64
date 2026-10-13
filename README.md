@@ -189,7 +189,8 @@ operations. Every device offers `VIRTIO_F_VERSION_1` and `VIRTIO_F_ACCESS_PLATFO
 **virtio-blk** (`src/virtio_blk.v`) walks Linux's three-descriptor request (header, data,
 status). It moves the data one 512-byte sector at a time between the guest's buffer and the
 card. The data segment must be one descriptor, 8-byte aligned and a whole number of sectors,
-which Linux's block layer always provides. The capacity comes from the card's CSD. The SPI
+which Linux's block layer always provides. The capacity comes from the card's CSD; with no card
+in the slot it is 0, and every request is answered with an I/O error rather than held. The SPI
 clock divider is writable at `0x1000_1100`, and a debug word at `0x1000_2F00` reads the
 capacity, the backend's state, or the last read's R1 and timeout.
 
