@@ -720,12 +720,21 @@ module tb;
    // forwarding there needs no replay check, since no older address can still arrive; `one`, those
    // that exactly one older live store overlaps; `same-va`, those whose store has the load's VA
    // doubleword (the overlap matrix compares page offsets only, so the rest are other pages).
+   // Of `one` and `same-va` with an unknown older address, `unk-before` counts those whose unknown
+   // stores are all older than the forwarding store (it covers the load, so they cannot matter),
+   // `unk-between` those with one between the store and the load (forwarding there needs replay).
+   // Of `all three`, by what the load waits for in the cycle: its registered flag (l_fwd) not yet
+   // set (lag), the forward queue full (busy), the port (the drain has it, the LSU takes nothing,
+   // or another load has it), or nothing: it starts (take).
    localparam integer FW_LQ = 1 << `SMOLRV64_LQB, FW_SQ = 1 << `SMOLRV64_SQB, FW_IB = `SMOLRV64_SQB;
-   reg [63:0] fw_unk, fw_fwd, fw_nod, fw_part, fw_known, fw_one, fw_samev, fw_all3, fw_go_n;
-   initial begin fw_unk = 0; fw_fwd = 0; fw_nod = 0; fw_part = 0; fw_known = 0; fw_one = 0; fw_samev = 0; fw_all3 = 0; fw_go_n = 0; end
+   reg [63:0] fw_unk, fw_fwd, fw_nod, fw_part, fw_known, fw_one, fw_samev, fw_all3, fw_go_n, fw_ubef, fw_ubtw;
+   initial begin fw_unk = 0; fw_fwd = 0; fw_nod = 0; fw_part = 0; fw_known = 0; fw_one = 0; fw_samev = 0; fw_all3 = 0; fw_go_n = 0;
+                 fw_ubef = 0; fw_ubtw = 0; fw_lag = 0; fw_bsy = 0; fw_port = 0; fw_tk = 0;
+                 fw_pdr = 0; fw_pls = 0; end
+   reg [63:0] fw_lag, fw_bsy, fw_port, fw_tk, fw_pdr, fw_pls;
    always @(posedge clk) if (!reset && meas && dut.core.lq_x_take && dut.core.lq_x_fwd) fw_go_n <= fw_go_n + 1;   // forwards taken
    always @(negedge clk) if (!reset && meas) begin : fwdsim
-      integer l, s, ys, nov;  reg unk;
+      integer l, s, ys, nov;  reg unk, ubtw;
       reg [FW_IB:0]   ld;
       reg [FW_IB-1:0] sd, yd;
       reg [12:0]      llo, lhi, slo, shi;
@@ -749,7 +758,25 @@ module tb;
             else begin                         fw_fwd  = fw_fwd + 1;  if (!unk) fw_known = fw_known + 1;
                                                                     if (nov == 1) fw_one = fw_one + 1;
                if (dut.core.u_sq.va[ys][38:3] == dut.core.u_lq.va[l][38:3]) begin
-                  fw_samev = fw_samev + 1;  if (!unk && nov == 1) fw_all3 = fw_all3 + 1;
+                  fw_samev = fw_samev + 1;
+                  if (!unk && nov == 1) begin
+                     fw_all3 = fw_all3 + 1;
+                     if (!dut.core.u_sq.l_fwd[l])                                      fw_lag  = fw_lag + 1;
+                     else if (dut.core.lsu_fw_busy)                                     fw_bsy  = fw_bsy + 1;
+                     else if (dut.core.lq_x_take && dut.core.lq_x_fwd && dut.core.lq_x_idx == l) fw_tk = fw_tk + 1;
+                     else begin                                                         fw_port = fw_port + 1;
+                        if (dut.core.sq_go)              fw_pdr = fw_pdr + 1;
+                        else if (!dut.core.lsu_pt_ack)   fw_pls = fw_pls + 1;
+                     end
+                  end
+                  if (unk && nov == 1) begin
+                     ubtw = 1'b0;
+                     for (s = 0; s < FW_SQ; s = s + 1) begin
+                        sd = s[FW_IB-1:0] - dut.core.u_sq.head;
+                        if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && !dut.core.u_sq.av[s] && sd > yd) ubtw = 1'b1;
+                     end
+                     if (ubtw) fw_ubtw = fw_ubtw + 1;  else fw_ubef = fw_ubef + 1;
+                  end
                end
             end
          end
@@ -1040,8 +1067,10 @@ module tb;
       $display("XLATE-SIM M-hits=%0d handed-to-walker=%0d walker-answers=%0d (faults %0d) queue-traps=%0d",
                xs_hit, xs_nopa, xs_wk, xs_wkf, xs_trap);
       $display("ITLB-SIM walks=%0d unused=%0d (a walked page nothing retired from before 32 more walks)", iw_n, iw_waste);
-      $display("FWD-SIM forwards=%0d | held load-cycles: unknown=%0d forwardable=%0d (every older address known %0d, one overlapping store %0d, same VA %0d, all three %0d) no-data=%0d partial=%0d",
-               fw_go_n, fw_unk, fw_fwd, fw_known, fw_one, fw_samev, fw_all3, fw_nod, fw_part);
+      $display("FWD-SIM forwards=%0d | held load-cycles: unknown=%0d forwardable=%0d (every older address known %0d, one overlapping store %0d, same VA %0d, all three %0d; one and same VA with an unknown address: unk-before %0d, unk-between %0d) no-data=%0d partial=%0d",
+               fw_go_n, fw_unk, fw_fwd, fw_known, fw_one, fw_samev, fw_all3, fw_ubef, fw_ubtw, fw_nod, fw_part);
+      $display("FWD-SIM all three, waiting for: lag=%0d busy=%0d port=%0d (the drain %0d, the LSU %0d, another load %0d) take=%0d",
+               fw_lag, fw_bsy, fw_port, fw_pdr, fw_pls, fw_port - fw_pdr - fw_pls, fw_tk);
       $display("DISP-SIM group cut before slot B: alone=%0d rule=%0d resteer=%0d | head waits for a credit=%0d | before slot C: alone=%0d rule=%0d resteer=%0d (%0d)",
                ds_b_alone, ds_b_rule, ds_b_sq, ds_b_room, ds_c_alone, ds_c_rule, ds_c_sq, ds_c_room);
       $display("DISP-SIM alu ready-waiting=%0d (with the other ALU idle %0d) issued-past-an-older-ready=%0d | lsu starts=%0d back-to-back=%0d",

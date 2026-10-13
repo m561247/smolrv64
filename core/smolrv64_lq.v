@@ -112,8 +112,8 @@ module smolrv64_lq
     input  wire [NENT-1:0]       viol,        // smolrv64_sq: it went ahead of an older store that overlaps it
     input  wire [NENT-1:0]       e_block,     // per entry: an older store aliases it
     // ...and it can take its bytes from that store instead (smolrv64_sq, registered): the store
-    // covers them, has its data, and every older store's address is known. Forwarding goes one at a
-    // time; fw_busy says one is still in flight.
+    // covers them, has its data, and every older store's address is known. Forwards wait for their
+    // landing in the LSU, two deep; fw_busy says both are waiting.
     input  wire [NENT-1:0]       e_fwd,
     input  wire                  fw_busy,
     output wire                  x_block,     // ...and the candidate is one, held right now

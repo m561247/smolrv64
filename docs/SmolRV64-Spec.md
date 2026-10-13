@@ -1227,9 +1227,9 @@ set in the stage register.
   `smolrv64_lq` offers a forwardable held load like a clear one (`x_fwd`); it takes the port like
   any queued load and starts as a fast load in the LSU, which asks the D$ for nothing: the store's
   bytes, read in the start cycle through the same landing bypass as the drain's and placed as the D$
-  write places them, wait in one forward register and land by the load's tag, through the fast
-  path's formatting, in the first cycle the D$ returns no response. One forward is in flight at a
-  time (`fw_busy`).
+  write places them, wait in the forward queue, two deep, and land by the load's tag, through the
+  fast path's formatting, in the first cycle the D$ returns no response, the older first. A forward
+  starts while another waits; `fw_busy` says both slots are full.
 - A load's fault is decided **before the access starts** (by M for the address-only faults, by the
   walker into the entry for a page fault, above): for an FSM-starting access
   `mis_flt` and `xl_flt` are qualified by `xl_f = req_valid & ~req_xlate & (st == S_IDLE)`,

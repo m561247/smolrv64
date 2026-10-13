@@ -60,16 +60,17 @@ not the cache, and with every older address known no store can arrive to violate
 
 **The LSU starts a forwarded load like a fast load** -- the same per-tag formatting state (`o_v`,
 `o_nb`, `o_boff`, `o_sgn`, `o_fp`) -- but sends no D$ read. The store queue reads the candidate's
-data in the start cycle as the D$ would hold it (`data << 8*off[2:0]`) into one forward register,
-and the LSU presents it as a response in the first cycle the D$ returns none (`mem_rvalid_c` low):
-the same tag mux, formatting and landing as a D$ hit. One forward in flight; the next waits.
+data in the start cycle as the D$ would hold it (`data << 8*off[2:0]`) into the forward queue, two
+deep, and the LSU presents the older as a response in the first cycle the D$ returns none
+(`mem_rvalid_c` low): the same tag mux, formatting and landing as a D$ hit. A forward starts while
+another waits; with both slots full the next waits (`fw_busy`, a register).
 
 ## Checks (always on)
 
 - at a forward start: the store is the load's forwarding store -- live, data in, `conf` and `cov`;
 - a forward starts only for a forwardable, idempotent, cached load, and a forwarded load never
   lands watched (so never replays);
-- the forward register never holds two, and lands only on a live fast tag (`o_v`).
+- a forward never starts into a full queue, and lands only on a live fast tag (`o_v`).
 
 ## Verification
 
@@ -80,13 +81,34 @@ lockstep; memrand sweep; the interrupt storm; GB5 slices (cycles, FWD-SIM before
 
 ## Measured
 
-60 M lockstep +0.82% over SQ 32 (351,419 forwards). GB5 slices, cycles: Navigation -2.95%, HTML5
--0.12%, SQLite -0.70%, PDF Rendering -0.38%.
+60 M lockstep +0.82% over SQ 32 with one forward register (351,419 forwards), +0.35% more with
+the queue. GB5 slices, cycles, without forwarding -> one register -> the queue:
+
+| slice | without | one register | the queue |
+|---|---|---|---|
+| Navigation | 42,234,909 | 40,987,984 (-2.95%) | 40,204,456 (-1.91% more) |
+| HTML5 | 50,731,839 | 50,672,571 (-0.12%) | 50,662,476 |
+| SQLite | 47,845,043 | 47,511,585 (-0.70%) | 47,533,897 |
+| PDF Rendering | 37,956,859 | 37,814,406 (-0.38%) | 37,813,675 |
+
+With one register, Navigation's forwardable loads (8.16 M load-cycles) waited for it in 2.77 M
+(a forward lands in the first cycle the D$ returns nothing, and the next could not start until
+it had) and for the port in 3.00 M; it started 952,794 forwards. With the queue they wait for a
+full queue in 4 K, and it starts 1,381,490.
 
 ## What is left
 
-The rule "every older store's address known" turns away 17-37% of the forwardable cycles. A load
-that would forward past an older store with an unknown address can do it speculatively, as loads
-already go ahead of unknown addresses, if the store's address arriving and overlapping flags the
-forwarded load for replay like a load that read memory (`e_acc` would then include it, and the
-check against the forwarding store itself must exclude it).
+FWD-SIM (Navigation / HTML5 / SQLite / PDF Rendering, load-cycles, with the queue):
+
+- **An unknown address between the store and the load**: 5.15 M / 1.34 M / 1.81 M / 0.28 M. Unknown
+  stores older than the forwarding store cannot matter -- it covers the load -- but there are
+  almost none (5 K / 35 K / 29 K / 63 K): the unknowns lie between the store and the load. A load
+  can forward past them speculatively, as loads already go ahead of unknown addresses, if a store
+  between the two arriving and overlapping flags it for replay like a load that read memory
+  (`e_acc` would then include it, and the overlap check would exclude the forwarding store and the
+  stores older than it).
+- **The port**: 5.33 M / 1.59 M / 1.82 M / 0.43 M load-cycles of forwardable loads waiting while
+  another load starts, the drain has the port, or the LSU takes nothing; in the 300 M boot, 48.2 M,
+  32.7 M of them behind the drain (a committed store at the queue head has the port first). A
+  forward needs no D$ access; a start of its own beside the port's would take it out of that
+  contention.

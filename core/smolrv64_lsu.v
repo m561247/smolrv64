@@ -70,7 +70,7 @@ module smolrv64_lsu
     input  wire            pt_unc,         // the uncached bit decided at translate time
     // STORE-TO-LOAD FORWARDING: the port's load takes its bytes from an older queued store that
     // covers them (fw_data, read in the start cycle), not from the D$. It starts as a fast load
-    // and lands as one, in the first cycle the D$ returns nothing; one at a time (fw_busy).
+    // and lands as one, in the first cycle the D$ returns nothing; two wait at most (fw_busy).
     input  wire            pt_fwd,
     input  wire [63:0]     fw_data,        // the store's doubleword as the D$ would hold it
     output wire            fw_busy,
@@ -607,30 +607,37 @@ module smolrv64_lsu
    initial begin rtag_q = {LDTW{1'b0}}; rfast_q = 1'b0; end
    assign mem_rtag  = rtag_q;
    assign mem_rfast = rfast_q;
-   // THE FORWARD REGISTER. A forwarded load's bytes are captured in its start cycle and wait here
-   // for the first cycle the D$ returns nothing: then they are the response, by the same tag, the
-   // same formatting and the same landing as a D$ hit's. The D$ cannot be held, so it always wins.
+   // THE FORWARD QUEUE. A forwarded load's bytes are captured in its start cycle and wait here, two
+   // deep, for the first cycle the D$ returns nothing: then the older is the response, by the same
+   // tag, the same formatting and the same landing as a D$ hit's. The D$ cannot be held, so it
+   // always wins. A forward starts while another waits; fw_busy (a register) says both slots are
+   // full.
    wire            fw_go = ld_fast_ok & pt_start & pt_fwd;
-   reg             fw_v;  reg [LDTW-1:0] fw_tag;  reg [63:0] fw_q;
-   initial fw_v = 1'b0;
-   assign fw_inj  = fw_v & ~mem_rvalid_c;
-   assign fw_busy = fw_v;
+   reg  [1:0]      fw_n;                                  // forwards waiting: slot 0 lands first
+   reg  [LDTW-1:0] fw_tag0, fw_tag1;
+   reg  [63:0]     fw_q0, fw_q1;
+   initial fw_n = 2'd0;
+   assign fw_inj  = (fw_n != 2'd0) & ~mem_rvalid_c;
+   assign fw_busy = (fw_n == 2'd2);
+   // a start goes behind the one that waits on, else to the head
+   wire            fw_wr1 = (fw_n == 2'd1) & ~fw_inj;
    always @(posedge clk) begin
-      if (reset)       fw_v <= 1'b0;
-      else if (fw_go)  begin fw_v <= 1'b1;  fw_tag <= ld_tag;  fw_q <= fw_data; end
-      else if (fw_inj) fw_v <= 1'b0;
+      if (fw_inj) begin fw_tag0 <= fw_tag1;  fw_q0 <= fw_q1; end
+      if (fw_go & ~fw_wr1) begin fw_tag0 <= ld_tag;  fw_q0 <= fw_data; end
+      if (fw_go &  fw_wr1) begin fw_tag1 <= ld_tag;  fw_q1 <= fw_data; end
+      fw_n <= reset ? 2'd0 : fw_n + {1'b0, fw_go} - {1'b0, fw_inj};
    end
    always @(posedge clk) if (!reset) begin
-      if (fw_go & fw_v)
-         $fatal(1, "smolrv64_lsu: forward to tag %0d starts while tag %0d's is still waiting", ld_tag, fw_tag);
+      if (fw_go & (fw_n == 2'd2))
+         $fatal(1, "smolrv64_lsu: forward to tag %0d starts with both slots waiting (tags %0d, %0d)", ld_tag, fw_tag0, fw_tag1);
       if (pt_start & pt_fwd & ~ld_fast_ok)
          $fatal(1, "smolrv64_lsu: forward start for tag %0d that is not a fast load (xword=%b unc=%b mem=%b)", ld_tag, xword, eff_unc, pa_mem);
-      if (fw_inj & ~o_v[fw_tag])
-         $fatal(1, "smolrv64_lsu: forward lands on tag %0d that nothing is waiting on", fw_tag);
+      if (fw_inj & ~o_v[fw_tag0])
+         $fatal(1, "smolrv64_lsu: forward lands on tag %0d that nothing is waiting on", fw_tag0);
    end
    // the response the fast path sees: the D$'s, else the waiting forward
-   wire [LDTW-1:0] r_tag  = mem_rvalid_c ? mem_rtag_resp : fw_tag;
-   wire [63:0]     r_data = mem_rvalid_c ? mem_rdata_c   : fw_q;
+   wire [LDTW-1:0] r_tag  = mem_rvalid_c ? mem_rtag_resp : fw_tag0;
+   wire [63:0]     r_data = mem_rvalid_c ? mem_rdata_c   : fw_q0;
    wire ld_fast_ret = (mem_rvalid_c & o_v[mem_rtag_resp]) | fw_inj;
    assign pt_rtag       = r_tag;
    assign pt_fast_done  = ld_fast_ret & ~o_kill[r_tag];   // a squashed load's data is dropped
