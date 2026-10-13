@@ -115,7 +115,12 @@ for c in $(con_ip 0); do
    case "$m" in "SmolRV64 "*)
       echo "halting $c ($m)"
       timeout 15 ssh -o BatchMode=yes tommy@$c 'sudo halt' >/dev/null 2>&1
-      for i in $(seq 90); do tail -c +$((PRE+1)) "$CON" | tr -d '\0' | grep -aq "reboot: System halted" && break; sleep 1; done
+      # A shutdown can take minutes (systemd waits out a stuck udev worker, 90 s at a time), and
+      # programming before the halt line is the cut above: wait it out, or give up unprogrammed.
+      for i in $(seq 600); do tail -c +$((PRE+1)) "$CON" | tr -d '\0' | grep -aq "reboot: System halted" && break; sleep 1; done
+      tail -c +$((PRE+1)) "$CON" | tr -d '\0' | grep -aq "reboot: System halted" \
+         || { echo "BOARD: FAIL (no 'reboot: System halted' on the console 600 s after halting $c: not programming a running board)"; exit 1; }
+      echo "halted after ${i} s"
       PRE=$(wc -c < "$CON");;
    esac
 done
