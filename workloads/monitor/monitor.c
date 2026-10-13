@@ -16,6 +16,7 @@
 //   B                - boot from the SD card: run /smolrv64/boot.txt (for demos)
 //   X<addr> [a0 [a1]] - jump to address and execute
 //   P                - dump core debug counters; Pc clears them
+//   M [<addr> <len> [n]] - test DRAM, all of it by default, n passes or until a key (memtest.c)
 //   ?                - help
 //
 // BOOT SCRIPTS: monitor command lines, one per line, '#' starts a comment; a failing line stops
@@ -67,15 +68,6 @@
 // [4]=git commit (truncated HEAD), [5]=source-dirty flag.
 #define BUILD_ID_BASE   ((volatile uint32_t *)0x1000F000)
 #define BUILD_ID_MAGIC  0x534d4f4cu
-
-// Integrity log (rv_soc_top.v, the window the fetch-buffer diagnostic used to own,
-// 0x1000E000): the design's own invariants, latched in hardware by rv_errlog. 64-bit words:
-// [0]={version,"ERRL"} magic, [1]=sticky, one bit per invariant that has fired since reset
-// (D$ [15:0], I$ [31:16], LSU [47:32]; the bit numbers are the ones in rv_cache.v's and
-// smolrv64_lsu.v's INTEGRITY LOG blocks), [2]={idx[55:48], cycle[47:0]} of the FIRST to fire.
-// Linux userland reads the same words through /dev/mem (tools/errlog-read.sh).
-#define ERRLOG_BASE     ((volatile uint64_t *)0x1000E000)
-#define ERRLOG_MAGIC    0x4552524cu
 
 static void uart_init(volatile uint8_t *base, int clk_freq, int baud)
 {
@@ -220,6 +212,14 @@ static char getc_or_key(void)
         if (UART0_BASE[UART_LSR] & LSR_DR) return UART0_BASE[UART_RBR];
         if (KEYS_BASE[0] & KEY0_PRESSED) { KEYS_BASE[0] = KEY0_PRESSED; return KEY_GO; }
     }
+}
+
+// A key typed at the console, consumed: for a command that runs until one is.
+int con_key(void)
+{
+    if (!(UART0_BASE[UART_LSR] & LSR_DR)) return 0;
+    (void)UART0_BASE[UART_RBR];
+    return 1;
 }
 
 static void readline(char *buf)
@@ -699,6 +699,18 @@ static int run_cmd(const char *p)
             }
         }
 
+    } else if (*p == 'M' || *p == 'm') {
+        uint64_t len = 0, passes = 0;
+        addr = 0;
+        for (p++; *p == ' '; p++) ;
+        if (*p) {
+            p = parse_hex(p, &addr);
+            if (p) { while (*p == ' ') p++; p = parse_hex(p, &len); }
+            if (p) { while (*p == ' ') p++; if (*p) p = parse_hex(p, &passes); }
+            if (!p || !len) { puts_("usage: M [<addr> <len> [passes]]\n"); return -1; }
+        }
+        return memtest(addr, len, passes);
+
     } else if (*p == '?' || *p == 'h' || *p == 'H') {
         puts_("R<addr>          read 64-bit word\n");
         puts_("W<addr> <val>    write 64-bit word\n");
@@ -717,6 +729,7 @@ static int run_cmd(const char *p)
         puts_("X<addr> [a0 [a1]] execute from address\n");
         puts_("P                dump core debug counters; Pc clears them\n");
         puts_("E                integrity log: which invariant fired, and when\n");
+        puts_("M [<addr> <len> [n]] test DRAM (all of it), n passes or until a key\n");
 
     } else if (*p != 0) {
         puts_("unknown command (? for help)\n");

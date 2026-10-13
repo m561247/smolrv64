@@ -13,7 +13,7 @@ BUILD_STAMP := $(shell date +%Y%m%d%H%M%S)
 monitor.bin: monitor.elf
 	$(RV)objcopy -O binary monitor.elf monitor.bin
 
-SRCS = crt0.s monitor.c vio.c disk.c net.c video.c blake3.c
+SRCS = crt0.s monitor.c vio.c disk.c net.c video.c blake3.c memtest.c
 # The core's whole ISA (the device trees' riscv,isa), soft-float ABI: the monitor has no FP state.
 CFLAGS = -mabi=lp64 -mcmodel=medany \
 	-march=rv64imafdc_zicsr_zifencei_zba_zbb_zbs_zicond_zicbom_zicbop_zicboz \

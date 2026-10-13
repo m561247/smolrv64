@@ -19,6 +19,20 @@ typedef unsigned long      uint64_t;
 #define DMA_BASE 0xFE000000ul
 #endif
 
+// The framebuffer, RGB565 in DDR (video.c): the device tree's framebuffer node.
+#ifndef FB_BASE
+#define FB_BASE 0xFFF00000ul
+#endif
+
+// Integrity log (rv_soc_top.v, the window the fetch-buffer diagnostic used to own,
+// 0x1000E000): the design's own invariants, latched in hardware by rv_errlog. 64-bit words:
+// [0]={version,"ERRL"} magic, [1]=sticky, one bit per invariant that has fired since reset
+// (D$ [15:0], I$ [31:16], LSU [47:32]; the bit numbers are the ones in rv_cache.v's and
+// smolrv64_lsu.v's INTEGRITY LOG blocks), [2]={idx[55:48], cycle[47:0]} of the FIRST to fire.
+// Linux userland reads the same words through /dev/mem (tools/errlog-read.sh).
+#define ERRLOG_BASE     ((volatile uint64_t *)0x1000E000)
+#define ERRLOG_MAGIC    0x4552524cu
+
 static inline uint64_t now(void)
 {
     uint64_t t;
@@ -32,6 +46,10 @@ void puthex8(uint32_t v);
 void puthex32(uint32_t v);
 void puthex64(uint64_t v);
 void putdec(uint64_t v);
+int  con_key(void);
+
+// memtest.c: the `M` command
+int  memtest(uint64_t a, uint64_t n, uint64_t passes);
 
 // Zicbom over a range, by 64-byte block: 0 invalidate, 1 clean, 2 flush (vio.c)
 void cbo(uint64_t a, uint64_t n, int op);

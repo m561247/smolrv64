@@ -115,7 +115,7 @@ is read off the RTL or measured with the workload named):
 virtio-blk backed by an SD card over SPI, virtio-net over RGMII with an eight-slot receive
 ring and word-wide DMA, a virtio keyboard and mouse fed by USB devices through a Pico (see
 [Virtio devices](#virtio-devices)), a 256 KiB boot SRAM holding a ROM monitor that boots over TFTP or from the
-SD card or takes an XMODEM upload and has a memory-integrity command set, and one 512-bit line port into DDR4 (2 GiB, or 4 GiB on a board with 16 Gb
+SD card or takes an XMODEM upload and has a memory-integrity command set and a DRAM test, and one 512-bit line port into DDR4 (2 GiB, or 4 GiB on a board with 16 Gb
 parts) with a hardware latency monitor on it. Ubuntu boots to `login:` over an NFS root; the board has run for days at a
 time.
 
@@ -271,7 +271,10 @@ payload; without `boot.txt` it loads `fw_payload.bin` at `0x8000_0000` and `smol
 (`/smolrv64/boot.txt`, for demos; `workloads/sdboot/install-esp.sh` puts the files there), and
 `workloads/ubuntu/ubuntu-boot.sh` uploads over the serial console at 3 Mbaud. The device tree
 decides the root filesystem: `ubuntu-nfs.dtb` mounts NFS, `ubuntu-sd.dtb` the SD card's first
-partition (both `make -C workloads/ubuntu dtbs`).
+partition (both `make -C workloads/ubuntu dtbs`). `M` at the prompt tests the DRAM, all of it, pass
+after pass until a key: the data lines, the address lines, every word holding its own address,
+random data at full bandwidth, and random data in a scattered order that opens a row on nearly
+every access; `M <addr> <len> [n]` tests a range for n passes.
 On the board,
 `tools/perf-smol.sh td <cmd> 2>&1 | tools/perf-cpi-stack.py` runs a command under the
 Top-Down event set and prints the report; `docs/SmolRV64-Spec.md` §11, "Reading the report",

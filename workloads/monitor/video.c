@@ -11,9 +11,6 @@
 #ifndef VGA
 #define VGA         ((volatile uint32_t *)0x10005000)
 #endif
-#ifndef FB_BASE
-#define FB_BASE     0xFFF00000ul
-#endif
 #define FB          ((volatile uint16_t *)FB_BASE)
 #define W           640
 #define H           480
