@@ -1236,7 +1236,9 @@ set in the stage register.
   bytes, read in the start cycle through the same landing bypass as the drain's and placed as the D$
   write places them, wait in the forward queue, two deep, and land by the load's tag, through the
   fast path's formatting, in the first cycle the D$ returns no response, the older first. A forward
-  starts while another waits; `fw_busy` says both slots are full.
+  starts while another waits; `fw_busy` says both slots are full. The queue is a ring: the free
+  slot `fw_wp` names takes each cycle's candidate whether it starts or not, a start moves `fw_wp`
+  on and a landing `fw_rp`, so neither the start nor the D$'s response reaches a slot's write.
 - A load's fault is decided **before the access starts** (by M for the address-only faults, by the
   walker into the entry for a page fault, above): for an FSM-starting access
   `mis_flt` and `xl_flt` are qualified by `xl_f = req_valid & ~req_xlate & (st == S_IDLE)`,
