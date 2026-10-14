@@ -141,13 +141,16 @@ module smolrv64_lq
     input  wire                  x_take,      // the LSU accepted it
 
     // ---- land: data back for an entry that was sent to memory ----
-    // The response names its ENTRY, it is not assumed to be the oldest one outstanding
-    // (rule B1: a response is matched by a tag the requester allocated). Today the D$
-    // returns in order and l_idx is always the head, but the moment loads are pipelined
-    // through rd_tag/rd_resp_tag that stops being true, and this interface does not have
-    // to change for it.
+    // The response names its ENTRY by the tag the requester allocated (rule B1), not by
+    // age: the D$ answers out of order. l_idx is the landing entry; its payload is read at
+    // both of the entries it can be, the D$ response's tag (l_tg) and the other candidate
+    // (l_alt), each a register, and l_rsp (the D$'s response lands) picks the answer, so
+    // the late pick reaches no array's index (rule I6). l_idx is l_rsp ? l_tg : l_alt.
     input  wire                  l_v,
     input  wire [IDXB-1:0]       l_idx,
+    input  wire [IDXB-1:0]       l_tg,
+    input  wire [IDXB-1:0]       l_alt,
+    input  wire                  l_rsp,
     output wire [PBITS-1:0]      l_prd,
     output wire [5:0]            l_rd,
     output wire                  l_rd_v,
@@ -352,12 +355,12 @@ module smolrv64_lq
    assign x_fp    = isfp[xi];
    assign x_unc   = unc[xi];
 
-   // The landing entry's payload, selected by the tag the response carried.
-   assign l_prd  = prd[l_idx];
-   assign l_rd   = rdn[l_idx];
-   assign l_rd_v = rdv[l_idx];
-   assign l_rob  = rob[l_idx];
-   assign l_pa   = pa[l_idx];
+   // The landing entry's payload, read at both candidates and picked by l_rsp.
+   assign l_prd  = l_rsp ? prd[l_tg] : prd[l_alt];
+   assign l_rd   = l_rsp ? rdn[l_tg] : rdn[l_alt];
+   assign l_rd_v = l_rsp ? rdv[l_tg] : rdv[l_alt];
+   assign l_rob  = l_rsp ? rob[l_tg] : rob[l_alt];
+   assign l_pa   = l_rsp ? pa[l_tg]  : pa[l_alt];
 
 
    // THE KILL. The dead entries are the youngest live ones (the ring is program order), so the
@@ -483,6 +486,9 @@ module smolrv64_lq
          $fatal(1, "smolrv64_lq: address written to a slot with no live entry (idx %0d)", a_idx);
       if (a_v & av[a_idx])
          $fatal(1, "smolrv64_lq: address written twice to slot %0d", a_idx);
+      if (l_v & (l_idx != (l_rsp ? l_tg : l_alt)))
+         $fatal(1, "smolrv64_lq: the landing entry %0d is not the payload's pick (tag %0d, other %0d, response %b)",
+                l_idx, l_tg, l_alt, l_rsp);
       if (l_v & ~v[l_idx])
          $fatal(1, "smolrv64_lq: data landed for a slot with no live entry (idx %0d)", l_idx);
       if (l_v & ~sent[l_idx])

@@ -75,6 +75,8 @@ module smolrv64_lsu
     input  wire [63:0]     fw_data,        // the store's doubleword as the D$ would hold it
     output wire            fw_busy,
     output wire            fw_inj,         // the forward lands this cycle (on pt_rtag)
+    output wire            fw_any,         // a forward waits: it lands in the next cycle the D$ returns none...
+    output wire [LDTW-1:0] fw_lt,          // ...on this tag (a register)
     output wire            pt_done,
     output wire            pt_ack,         // accepted this cycle -- the requester may advance
     output wire            pt_is_store,    // direction of the access IN FLIGHT
@@ -622,7 +624,8 @@ module smolrv64_lsu
    reg  [LDTW-1:0] fw_tg [0:1];
    reg  [63:0]     fw_q  [0:1];
    initial begin fw_n = 2'd0; fw_wp = 1'b0; fw_rp = 1'b0; end
-   assign fw_inj  = (fw_n != 2'd0) & ~mem_rvalid_c;
+   assign fw_any  = (fw_n != 2'd0);
+   assign fw_inj  = fw_any & ~mem_rvalid_c;
    assign fw_busy = (fw_n == 2'd2);
    reg  [LDTW-1:0] fw_tag0;                               // the older's tag: it lands first
    initial fw_tag0 = {LDTW{1'b0}};
@@ -632,6 +635,7 @@ module smolrv64_lsu
    wire            fw_nx_snd = (fw_n == 2'd2) & fw_inj;
    always @(posedge clk)
       fw_tag0 <= fw_nx_new ? ld_tag : fw_nx_snd ? fw_tg[~fw_rp] : fw_tag0;
+   assign fw_lt = fw_tag0;
    always @(posedge clk) begin
       if (~fw_busy) begin fw_tg[fw_wp] <= ld_tag;  fw_q[fw_wp] <= fw_data; end
       if (reset) begin fw_n <= 2'd0;  fw_wp <= 1'b0;  fw_rp <= 1'b0; end
@@ -653,16 +657,22 @@ module smolrv64_lsu
       if (fw_inj & ~o_v[fw_tag0])
          $fatal(1, "smolrv64_lsu: forward lands on tag %0d that nothing is waiting on", fw_tag0);
    end
-   // the response the fast path sees: the D$'s, else the waiting forward
+   // the response the fast path sees: the D$'s, else the waiting forward. Each per-tag lookup is
+   // read at BOTH tags, the D$'s response tag and the forward's -- registers both -- and
+   // mem_rvalid_c (the D$'s valid and tag class) picks the answer: as the select of one tag it
+   // stood in front of every 16-way lookup, and the landing's wake behind them (rule I6).
    wire [LDTW-1:0] r_tag  = mem_rvalid_c ? mem_rtag_resp : fw_tag0;
    wire [63:0]     r_data = mem_rvalid_c ? mem_rdata_c   : fw_q0;
    wire ld_fast_ret = (mem_rvalid_c & o_v[mem_rtag_resp]) | fw_inj;
    assign pt_rtag       = r_tag;
-   assign pt_fast_done  = ld_fast_ret & ~o_kill[r_tag];   // a squashed load's data is dropped
-   wire [5:0]  f_sh  = {o_boff[r_tag], 3'b000};
+   wire        r_kill = mem_rvalid_c ? o_kill[mem_rtag_resp] : o_kill[fw_tag0];
+   assign pt_fast_done  = ld_fast_ret & ~r_kill;   // a squashed load's data is dropped
+   wire [2:0]  r_boff = mem_rvalid_c ? o_boff[mem_rtag_resp] : o_boff[fw_tag0];
+   wire [5:0]  f_sh  = {r_boff, 3'b000};
    wire [63:0] f_eff = r_data >> f_sh;
-   wire [3:0]  f_nb  = o_nb[r_tag];
-   wire        f_sgn = o_sgn[r_tag], f_fp = o_fp[r_tag];
+   wire [3:0]  f_nb  = mem_rvalid_c ? o_nb[mem_rtag_resp]  : o_nb[fw_tag0];
+   wire        f_sgn = mem_rvalid_c ? o_sgn[mem_rtag_resp] : o_sgn[fw_tag0];
+   wire        f_fp  = mem_rvalid_c ? o_fp[mem_rtag_resp]  : o_fp[fw_tag0];
    wire [63:0] ld_fast_val =
         (f_nb == 4'd1) ? (f_sgn ? {{56{f_eff[7]}},  f_eff[7:0]}  : {56'd0, f_eff[7:0]})
       : (f_nb == 4'd2) ? (f_sgn ? {{48{f_eff[15]}}, f_eff[15:0]} : {48'd0, f_eff[15:0]})

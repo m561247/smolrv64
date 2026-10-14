@@ -91,7 +91,7 @@ module tb;
       .q_tag(lq_q_tag),.b_idx(lq_b_idx),.b_ok(lq_b_ok),
       .x_v(lq_x_v),.x_idx(lq_x_idx),.x_pa(lq_x_pa),.x_size(lq_x_size),.x_signed(lq_x_signed),
       .x_fp(lq_x_fp),.x_unc(lq_x_unc), .x_head(lq_x_head),.x_devwait(lq_x_devwait),.x_take(lq_x_take),
-      .l_v(lq_l_v),.l_idx(lq_l_idx),.l_prd(lq_l_prd),.l_rd(lq_l_rd),.l_rd_v(lq_l_rd_v),.l_rob(lq_l_rob),
+      .l_v(lq_l_v),.l_idx(lq_l_idx),.l_tg(lq_l_idx),.l_alt(lq_l_idx),.l_rsp(1'b1),.l_prd(lq_l_prd),.l_rd(lq_l_rd),.l_rd_v(lq_l_rd_v),.l_rob(lq_l_rob),
       .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_idx(lf_idx),.f_rp(lf_rp),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(lq_kmask_nc),
       // every bench address is DRAM (speculates freely), so the device head-gate is never taken
       .a_mem(1'b1),.rob_head({ROBB{1'b0}}));

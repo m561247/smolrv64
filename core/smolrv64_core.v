@@ -1688,7 +1688,8 @@ module smolrv64_core
    // store-to-load forwarding (smolrv64_sq l_fwd / f_data, smolrv64_lq x_fwd, smolrv64_lsu fw_*)
    wire [LQ_N-1:0]     sq_l_fwd;
    wire [LQ_N*28-1:0]  lq_e_vpn;
-   wire                lq_x_fwd, lsu_fw_busy, lsu_fw_inj;
+   wire                lq_x_fwd, lsu_fw_busy, lsu_fw_inj, lsu_fw_any;
+   wire [LQ_IB-1:0]    lsu_fw_lt;
    wire [63:0]         sq_f_data;
    wire [LQ_IB-1:0]    lq_d_idx, lq_x_idx;
    wire [55:0]         lq_x_pa;
@@ -1763,7 +1764,7 @@ module smolrv64_core
       .b_idx(m_lq_idx), .b_ok(lq_b_ok),
       .x_v(lq_x_v), .x_idx(lq_x_idx), .x_pa(lq_x_pa), .x_size(lq_x_size),
       .x_signed(lq_x_signed), .x_fp(lq_x_fp), .x_unc(lq_x_unc), .x_head(lq_x_head), .x_take(lq_x_take),
-      .l_v(ld_land), .l_idx(ld_land_idx),
+      .l_v(ld_land), .l_idx(ld_land_idx), .l_tg(dmem_rtag_resp), .l_alt(ld_land_alt), .l_rsp(dmem_rvalid_c),
       .l_prd(lq_l_prd), .l_rd(lq_l_rd), .l_rd_v(lq_l_rd_v), .l_rob(lq_l_rob), .l_pa(lq_l_pa),
       .k_v(lq_k_v), .k_idx(lq_k_idx), .k_va(lq_k_va),
       .w_v(lsu_wk_done & ~wk_st), .w_idx(wk_lk_li), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
@@ -1818,13 +1819,17 @@ module smolrv64_core
    wire ld_land_slow = lsu_pt_ld_done & ~lsu_pt_ld_kill;   // ...unless it was a wrong-path speculative load (squashed)
    wire ld_land      = ld_land_fast | ld_land_slow;
    // The landing INDEX selects on the raw fast response (dmem_rvalid_c: the D$'s registered
-   // rd_valid and tag class), not on ld_land_fast: the load queue's arrays are read at this
-   // index, and putting the per-tag o_v/o_kill lookups in front of that read was the worst
-   // core family of the first C4a build (rd_resp_tag -> e_r, 20 levels; IW=3 -0.070). It is
-   // exact: a fast response with a live tag makes the slow path yield (slow_rv), so a slow
-   // landing never coincides with one, and a killed fast response lands nothing (asserted).
-   // A forward lands like a fast response, in a cycle the D$ returns none (smolrv64_lsu fw_inj).
-   wire [LQ_IB-1:0] ld_land_idx = dmem_rvalid_c ? dmem_rtag_resp : lsu_fw_inj ? lsu_pt_rtag : ld_inflight_idx;
+   // rd_valid and tag class), not on ld_land_fast: putting the per-tag o_v/o_kill lookups in
+   // front of the load queue's reads was the worst core family of the first C4a build
+   // (rd_resp_tag -> e_r, 20 levels; IW=3 -0.070). It is exact: a fast response with a live tag
+   // makes the slow path yield (slow_rv), so a slow landing never coincides with one, and a
+   // killed fast response lands nothing (asserted). A forward lands like a fast response, in a
+   // cycle the D$ returns none (smolrv64_lsu fw_inj). The other candidate, ld_land_alt, is the
+   // waiting forward's tag, else the slow access's -- registers alone -- and the queue reads the
+   // landing's payload at both it and the response's tag, dmem_rvalid_c picking the answer
+   // (smolrv64_lq l_tg/l_alt/l_rsp), as the LSU reads its per-tag state (rule I6).
+   wire [LQ_IB-1:0] ld_land_alt = lsu_fw_any ? lsu_fw_lt : ld_inflight_idx;
+   wire [LQ_IB-1:0] ld_land_idx = dmem_rvalid_c ? dmem_rtag_resp : ld_land_alt;
    always @(posedge clk) if (!reset) begin
       if (ld_land_fast && ld_land_slow) $fatal(1, "smolrv64_core: a load landed on both the fast and the slow path");
       if (ld_land_slow && (dmem_rvalid_c | lsu_fw_inj)) $fatal(1, "smolrv64_core: a slow landing under a fast response or a forward (the index would be wrong)");
@@ -2158,7 +2163,7 @@ module smolrv64_core
       .pt_unc(pt_store ? sq_c_unc : lq_x_unc), .pt_done(lsu_pt_done),
       .pt_ack(lsu_pt_ack), .pt_is_store(lsu_pt_is_store), .pt_ld_done(lsu_pt_ld_done), .pt_ld_kill(lsu_pt_ld_kill),
       .pt_tag(lq_x_idx), .req_tag(m_lq_idx), .pt_rtag(lsu_pt_rtag), .pt_fast_done(lsu_pt_fast_done),
-      .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj),
+      .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj), .fw_any(lsu_fw_any), .fw_lt(lsu_fw_lt),
       .req_store(m_is_store & ~m_is_amo), .req_amo(m_is_amo),
       .req_amo_func(m_amo_func), .req_cbo(m_is_cbo), .req_cbo_zero(m_cbo_zero),
       .req_cbo_keep(m_cbo_keep),

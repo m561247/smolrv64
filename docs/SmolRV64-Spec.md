@@ -1058,7 +1058,11 @@ set in the stage register.
   `{01,00}`/`{10,00}`), and the response is claimed by that tag -- never by "only one in
   flight" (rule B1). The formatting state lives per tag in the LSU (`o_nb/o_sgn/o_fp/o_boff`,
   `o_v` = a response is still coming), the landing is `ld_land_fast` by `pt_rtag` into the
-  load queue's entry, the ROB, the lane's landing (above) and the retire record. A start needs no earlier read
+  load queue's entry, the ROB, the lane's landing (above) and the retire record. Each per-tag
+  lookup a landing makes (the LSU's formatting and kill state, the load queue's payload) is read
+  at both entries it can be -- the D$ response's tag and the other candidate, the waiting
+  forward's or the slow access's, registers all -- and the response's valid picks the answer, so
+  the late pick reaches no array index (rule I6). A start needs no earlier read
   waiting for the D$'s accept (`port_free = ~mem_rbusy`, a register: the SoC's read door holds
   up to two waiting reads, the one presented and the one behind it, so a read starts every
   cycle the D$ takes one) and the tag not outstanding (`~o_v[tag]`); a store needs neither. A redirect kills every fast load in flight, INCLUDING one starting in that
