@@ -1245,7 +1245,9 @@ set in the stage register.
   fast path's formatting, in the first cycle the D$ returns no response, the older first. A forward
   starts while another waits; `fw_busy` says both slots are full. The queue is a ring: the free
   slot `fw_wp` names takes each cycle's candidate whether it starts or not, a start moves `fw_wp`
-  on and a landing `fw_rp`, so neither the start nor the D$'s response reaches a slot's write.
+  on and a landing `fw_rp`, so neither the start nor the D$'s response reaches a slot's write. The
+  landing's tag is a register of its own (`fw_tag0`, the older forward's as the ring will stand next
+  cycle), so the lookups a landing makes by it start at a flop.
 - A load's fault is decided **before the access starts** (by M for the address-only faults, by the
   walker into the entry for a page fault, above): for an FSM-starting access
   `mis_flt` and `xl_flt` are qualified by `xl_f = req_valid & ~req_xlate & (st == S_IDLE)`,

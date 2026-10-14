@@ -613,7 +613,9 @@ module smolrv64_lsu
    // always wins. A forward starts while another waits; fw_busy (a register) says both slots are
    // full. A RING of two: the free slot fw_wp names takes this cycle's candidate whether it starts or
    // not, a start moves fw_wp on and a landing fw_rp, so neither the start nor the D$'s response
-   // reaches a slot's write.
+   // reaches a slot's write. The landing's TAG is a register of its own, the older forward's as the
+   // ring will stand next cycle: six bits the D$'s response may steer, so the tag a landing names
+   // (and every lookup by it) starts at a flop.
    wire            fw_go = ld_fast_ok & pt_start & pt_fwd;
    reg  [1:0]      fw_n;                                  // forwards waiting
    reg             fw_wp, fw_rp;                          // the slot a start writes, the one that lands
@@ -622,8 +624,14 @@ module smolrv64_lsu
    initial begin fw_n = 2'd0; fw_wp = 1'b0; fw_rp = 1'b0; end
    assign fw_inj  = (fw_n != 2'd0) & ~mem_rvalid_c;
    assign fw_busy = (fw_n == 2'd2);
-   wire [LDTW-1:0] fw_tag0 = fw_tg[fw_rp];                // the older: it lands first
+   reg  [LDTW-1:0] fw_tag0;                               // the older's tag: it lands first
+   initial fw_tag0 = {LDTW{1'b0}};
    wire [63:0]     fw_q0   = fw_q[fw_rp];
+   // next cycle's older: this cycle's start when none waits behind the one landing, else that one
+   wire            fw_nx_new = (fw_n == 2'd0) | ((fw_n == 2'd1) & fw_inj);
+   wire            fw_nx_snd = (fw_n == 2'd2) & fw_inj;
+   always @(posedge clk)
+      fw_tag0 <= fw_nx_new ? ld_tag : fw_nx_snd ? fw_tg[~fw_rp] : fw_tag0;
    always @(posedge clk) begin
       if (~fw_busy) begin fw_tg[fw_wp] <= ld_tag;  fw_q[fw_wp] <= fw_data; end
       if (reset) begin fw_n <= 2'd0;  fw_wp <= 1'b0;  fw_rp <= 1'b0; end
@@ -638,6 +646,8 @@ module smolrv64_lsu
          $fatal(1, "smolrv64_lsu: forward to tag %0d starts with both slots waiting (tags %0d, %0d)", ld_tag, fw_tg[0], fw_tg[1]);
       if ((fw_wp ^ fw_rp) != fw_n[0])
          $fatal(1, "smolrv64_lsu: the forward ring's pointers (write %b, land %b) disagree with its count %0d", fw_wp, fw_rp, fw_n);
+      if ((fw_n != 2'd0) & (fw_tag0 != fw_tg[fw_rp]))
+         $fatal(1, "smolrv64_lsu: the landing's tag %0d is not the older slot's %0d (%0d waiting)", fw_tag0, fw_tg[fw_rp], fw_n);
       if (pt_start & pt_fwd & ~ld_fast_ok)
          $fatal(1, "smolrv64_lsu: forward start for tag %0d that is not a fast load (xword=%b unc=%b mem=%b)", ld_tag, xword, eff_unc, pa_mem);
       if (fw_inj & ~o_v[fw_tag0])
