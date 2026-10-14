@@ -199,7 +199,7 @@ module smolrv64_sq
    reg [SEQW-1:0]        sqn  [0:NENT-1];
    reg [NENT-1:0]        tv, flt;            // translated / ...and the translation faulted
    reg [3:0]             fc   [0:NENT-1];
-   reg [63:0]            data [0:NENT-1];
+   (* ram_style = "distributed" *) reg [63:0] data [0:NENT-1];   // one write a cycle: the landing below
    reg [1:0]             sz   [0:NENT-1];
    reg [NENT-1:0]        unc;
    reg [PBITS-1:0]       dpr  [0:NENT-1];
@@ -220,7 +220,7 @@ module smolrv64_sq
    reg [IDXB:0]          headc, tailc;
    wire [IDXB-1:0]       head = headc[IDXB-1:0], tail = tailc[IDXB-1:0];
    reg [IDXB:0]          cnt;
-   integer               k, w;
+   integer               k;
    // the kill's entries, and how many
    reg  [NENT-1:0]       kmk, kds;
    reg  [IDXB:0]         k_n;
@@ -235,8 +235,6 @@ module smolrv64_sq
    end
    assign kmask = kds;
    wire uncommitted = (kcc != tailc);           // an uncommitted entry (the kill's check)
-   reg                   sn_live;         // snoop scratch, see the writeback loop
-   reg [PBITS-1:0]       sn_dpr;
 
    // THE SNOOP TAKES ITS DATA A CYCLE LATE, FROM A REGISTERED COPY OF THE WRITEBACK BUS.
    // wb_data for the IE shard is the ALU result of the instruction issued THIS cycle: the
@@ -250,12 +248,40 @@ module smolrv64_sq
    // had them; only the data register's D input moved from an ALU output to a flop.
    // THE DATA READ LANDS THE SAME WAY: the value read from a register file this cycle is wb_q's
    // slot NWB the cycle after, so the read's 64 bits reach one register, not every entry.
+   // ONE ENTRY'S BYTES LAND A CYCLE, so the data array is distributed RAM with one write (the drain,
+   // the commit and a forward read it): the data read's when one lands, else the oldest entry whose
+   // register a writeback names. An entry the landing leaves out is fetched by the data read, as a
+   // value already in a register file at allocation is -- its value is in one now.
    reg [(NWB+1)*64-1:0]  wb_q;            // last cycle's writeback data, and the data read's above it
-   reg [NENT-1:0]        ld_v;            // entry k's data lands from wb_q this cycle
-   reg [2:0]             ld_w [0:NENT-1]; // ...from this slot (a writeback port, or NWB: the data read)
-   integer               li2;
-   initial begin ld_v = {NENT{1'b0}}; for (li2 = 0; li2 < NENT; li2 = li2 + 1) ld_w[li2] = 3'd0; end
-   initial if (NWB > 7) $fatal(1, "smolrv64_sq: ld_w holds a slot index of at most 3 bits, NWB=%0d ports and the data read", NWB);
+   reg                   ln_v;            // an entry's bytes land from wb_q this cycle...
+   reg [IDXB-1:0]        ln_idx;          // ...this entry's...
+   reg [2:0]             ln_w;            // ...from this slot (a writeback port, or NWB: the data read)
+   initial begin ln_v = 1'b0; ln_idx = {IDXB{1'b0}}; ln_w = 3'd0; end
+   initial if (NWB > 7) $fatal(1, "smolrv64_sq: ln_w holds a slot index of at most 3 bits, NWB=%0d ports and the data read", NWB);
+   wire [63:0]           ln_data = wb_q[ln_w*64 +: 64];
+   // THE SNOOP, ARMED FROM ALLOCATE (see the writeback loop): entry k's register is written back this
+   // cycle, on one port at most -- a register is written once. The entry allocated this cycle (the
+   // tail, whose dpr is written at this edge) matches on its own, al_m: it is the youngest, so the
+   // landing takes it last, and the dispatch's renamed register reaches no other entry's choice.
+   reg  [NENT-1:0]       sn_m;
+   reg  [2:0]            sn_w [0:NENT-1];
+   reg                   al_m;
+   reg  [2:0]            al_w;
+   integer               sk, sw;
+   always @* begin
+      for (sk = 0; sk < NENT; sk = sk + 1) begin
+         sn_m[sk] = 1'b0;  sn_w[sk] = 3'd0;
+         for (sw = 0; sw < NWB; sw = sw + 1)
+            if (v[sk] & ~dv[sk] & (dpr[sk] != {PBITS{1'b0}}) & wb_v[sw] & (wb_preg[sw*PBITS +: PBITS] == dpr[sk])) begin
+               sn_m[sk] = 1'b1;  sn_w[sk] = sw[2:0];
+            end
+      end
+      al_m = 1'b0;  al_w = 3'd0;
+      for (sw = 0; sw < NWB; sw = sw + 1)
+         if (d_alloc & d_ready & (d_dpreg != {PBITS{1'b0}}) & wb_v[sw] & (wb_preg[sw*PBITS +: PBITS] == d_dpreg)) begin
+            al_m = 1'b1;  al_w = sw[2:0];
+         end
+   end
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; dv = {NENT{1'b0}}; rd = {NENT{1'b0}}; cmt = {NENT{1'b0}};
                  headc = {(IDXB+1){1'b0}}; tailc = {(IDXB+1){1'b0}}; kcc = {(IDXB+1){1'b0}};
@@ -278,6 +304,11 @@ module smolrv64_sq
    initial rq_v = 1'b0;
    assign r_v    = rq_v;
    assign r_preg = rq_preg;
+   // the landing: the data read's (its value is in wb_q for this one cycle), else the oldest snooped,
+   // else the allocation's
+   wire            rd_ln  = rq_v & v[rq_idx];
+   wire            sn_any = |sn_m;
+   wire [IDXB-1:0] sn_k   = ring_oldest(sn_m, head);
    // the oldest arrived-and-unfilled entry: the live region runs from the head
    wire [NENT-1:0]   pk_m = v & ~av & ar;
    assign pk_v      = |pk_m;
@@ -310,19 +341,19 @@ module smolrv64_sq
    assign kc_addr= addr[kc];
    // The same landing bypass as c_data: the entry commits in the cycle its bytes are still
    // in wb_q, and data[kc] holds the previous occupant's until the next edge.
-   assign kc_data= ld_v[kc] ? wb_q[ld_w[kc]*64 +: 64] : data[kc];
+   assign kc_data= (ln_v & (ln_idx == kc)) ? ln_data : data[kc];
    assign kc_size= sz[kc];
    assign c_rob  = rob[head];
    assign c_addr = addr[head];
    // the landing bypass: the cycle dv rose, the bytes are still in wb_q
-   assign c_data = ld_v[head] ? wb_q[ld_w[head]*64 +: 64] : data[head];
+   assign c_data = (ln_v & (ln_idx == head)) ? ln_data : data[head];
    assign c_size = sz[head];
    assign c_unc  = unc[head];
    // THE FORWARD'S READ, in its start cycle: the load's store, named by the flag's own register (so
    // the store the flag was computed for), through the same landing bypass as c_data, placed at its
    // doubleword offset as the D$ write places it (smolrv64_lsu's mem_wdata).
    wire [IDXB-1:0] f_s  = fws_w[f_lix*IDXB +: IDXB];
-   wire [63:0]     f_dw = ld_v[f_s] ? wb_q[ld_w[f_s]*64 +: 64] : data[f_s];
+   wire [63:0]     f_dw = (ln_v & (ln_idx == f_s)) ? ln_data : data[f_s];
    assign f_data = f_dw << {va[f_s][2:0], 3'b000};
    always @(posedge clk)
       if (!reset && f_go && !(l_fwd[f_lix] && v[f_s] && dv[f_s] && conf[f_lix][f_s] && cov[f_lix][f_s]))
@@ -542,7 +573,7 @@ module smolrv64_sq
    always @(posedge clk) begin
       if (reset) begin
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; dv <= {NENT{1'b0}}; cmt <= {NENT{1'b0}};
-         ld_v <= {NENT{1'b0}};          // a landing noted for a flushed entry is nobody's
+         ln_v <= 1'b0;
          headc <= {(IDXB+1){1'b0}}; tailc <= {(IDXB+1){1'b0}}; kcc <= {(IDXB+1){1'b0}};
          cnt <= {(IDXB+1){1'b0}};
          for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
@@ -587,7 +618,6 @@ module smolrv64_sq
          if (flush) begin
             for (k = 0; k < NENT; k = k + 1)
                if (~cmt[k]) begin v[k] <= 1'b0; av[k] <= 1'b0; dv[k] <= 1'b0; end
-            ld_v  <= {NENT{1'b0}};
             tailc <= kcc;
             cnt   <= (kcc - headc) - {{IDXB{1'b0}}, (c_v & c_take)};
             for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
@@ -599,7 +629,7 @@ module smolrv64_sq
             unc[a_idx]  <= a_unc;  tv[a_idx] <= a_tv;  flt[a_idx] <= a_flt;  fc[a_idx] <= a_fc;
          end
          // the data read: the pick is a register, the value is in the cycle it is read (dv) and
-         // lands from wb_q the cycle after (ld_v, in the snoop loop below)
+         // lands from wb_q the cycle after (the landing, below)
          if (rq_v & v[rq_idx]) dv[rq_idx] <= 1'b1;
          rq_v <= rp_v;  rq_idx <= rp_idx;  rq_preg <= dpr[rp_idx];
          if (rp_v) rd[rp_idx] <= 1'b0;
@@ -627,31 +657,30 @@ module smolrv64_sq
          // The already-produced case is not the snoop's job: a value in a register file at
          // allocation (`d_rdy`) has no writeback coming, and the data read fetches it. The two
          // paths are disjoint by construction, and asserted so.
-         // The match sets dv NOW and notes the port; the bytes land NEXT cycle from wb_q
-         // (below, outside this arm). A flush clears the note with the entry: the slot may
-         // be reallocated the cycle after, and a stale landing would overwrite the new
-         // entry's data at the same edge its own capture wrote it.
-         for (k = 0; k < NENT; k = k + 1) begin
-            sn_live = (d_alloc & d_ready & (tail == k[IDXB-1:0])) ? 1'b1     : (v[k] & ~dv[k]);
-            sn_dpr  = (d_alloc & d_ready & (tail == k[IDXB-1:0])) ? d_dpreg  : dpr[k];
-            ld_v[k] <= 1'b0;
-            for (w = 0; w < NWB; w = w + 1)
-               if (sn_live & (sn_dpr != {PBITS{1'b0}})
-                   & wb_v[w] & (wb_preg[w*PBITS +: PBITS] == sn_dpr)) begin
-                  ld_v[k] <= 1'b1;  ld_w[k] <= w[2:0];
-                  dv[k]   <= 1'b1;
-               end
-            if (rq_v & v[k] & (rq_idx == k[IDXB-1:0])) begin ld_v[k] <= 1'b1;  ld_w[k] <= NWB[2:0]; end
+         // The landing's entry gets dv NOW and its bytes NEXT cycle from wb_q (the data array's
+         // write, below); an entry it leaves out is read from the register file its value is now
+         // in. A landing for an entry a flush or the kill ends goes to a slot nothing reads: the
+         // slot is allocated again no sooner than the cycle it lands, and its new entry's bytes
+         // land later still.
+         ln_v   <= rd_ln | sn_any | al_m;
+         ln_idx <= rd_ln ? rq_idx : sn_any ? sn_k : tail;
+         ln_w   <= rd_ln ? NWB[2:0] : sn_any ? sn_w[sn_k] : al_w;
+         for (k = 0; k < NENT; k = k + 1)
+            if (sn_m[k]) begin
+               if (~rd_ln & (sn_k == k[IDXB-1:0])) dv[k] <= 1'b1;
+               else                                 rd[k] <= 1'b1;
+            end
+         if (al_m) begin
+            if (~rd_ln & ~sn_any) dv[tail] <= 1'b1;
+            else                  rd[tail] <= 1'b1;
          end
       end
       wb_q <= {r_data, wb_data};
-      for (k = 0; k < NENT; k = k + 1)
-         if (ld_v[k]) data[k] <= wb_q[ld_w[k]*64 +: 64];
       // THE KILL, after every other arm (the snoop above included). A flush in its cycle (a trap
       // at the head, which also ends the kill) wins: it cuts at the first uncommitted entry.
       if (!reset & (|kmk) & ~flush) begin
          for (k = 0; k < NENT; k = k + 1)
-            if (kmk[k]) begin v[k] <= 1'b0;  av[k] <= 1'b0;  dv[k] <= 1'b0;  ld_v[k] <= 1'b0; end
+            if (kmk[k]) begin v[k] <= 1'b0;  av[k] <= 1'b0;  dv[k] <= 1'b0; end
          // per cell: a whole-row write would drop this cycle's column and row updates for the live
          for (li = 0; li < LQN; li = li + 1)
             for (k = 0; k < NENT; k = k + 1) if (kmk[k]) conf[li][k] <= 1'b0;
@@ -663,6 +692,21 @@ module smolrv64_sq
          cnt   <= cnt - k_n - {{IDXB{1'b0}}, (c_v & c_take)};
       end
    end
+
+   // the data array's one write: the landing
+   always @(posedge clk) if (ln_v) data[ln_idx] <= ln_data;
+`ifndef SYNTHESIS
+   // SQ-SIM: the landings, and the entries one left out (the data read fetched them instead)
+   reg [63:0] ln_n, ln_out;
+   integer    lno;
+   initial begin ln_n = 0; ln_out = 0; end
+   always @(posedge clk) if (!reset) begin
+      if (rd_ln | sn_any | al_m) ln_n = ln_n + 1;
+      for (lno = 0; lno < NENT; lno = lno + 1)
+         if (sn_m[lno] & (rd_ln | (sn_k != lno[IDXB-1:0]))) ln_out = ln_out + 1;
+      if (al_m & (rd_ln | sn_any)) ln_out = ln_out + 1;
+   end
+`endif
 
    // Invariants (docs/rtl-rules.md A1): anything the design would otherwise drop silently.
    always @(posedge clk) if (!reset) begin
@@ -680,8 +724,12 @@ module smolrv64_sq
       if (d_alloc & d_ready & ~d_rdy & (d_dpreg == {PBITS{1'b0}}))
          $fatal(1, "smolrv64_sq: a store allocated with no data and no producer -- it can never commit");
       for (li = 0; li < NENT; li = li + 1)
-         if (ld_v[li] & (rd[li] | (rq_v & (rq_idx == li[IDXB-1:0]))))
-            $fatal(1, "smolrv64_sq: entry %0d snooped a writeback for a value already in a register file", li);
+         if (sn_m[li] & (rd[li] | (rq_v & (rq_idx == li[IDXB-1:0]))))
+            $fatal(1, "smolrv64_sq: entry %0d snooped a writeback for a value already in a register file (rd %b, read %b)",
+                   li, rd[li], rq_v & (rq_idx == li[IDXB-1:0]));
+      if (al_m & d_rdy)
+         $fatal(1, "smolrv64_sq: a store allocated into entry %0d with its value in a register file sees p%0d written back",
+                tail, d_dpreg);
       if (c_take & ~c_v)
          $fatal(1, "smolrv64_sq: drain taken with no committed, ready head");
       if (k_take & ~kc_v)

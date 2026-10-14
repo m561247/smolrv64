@@ -964,7 +964,14 @@ set in the stage register.
   file at allocation (`d_rdy`) is fetched by the SQ's data read: it registers its oldest entry
   with an address still waiting for one, and reads that preg on M's port `ra2` (which reads the
   integer and FP files) the next cycle. A value produced later comes from the snoop, armed at
-  allocation; the two never meet (asserted). `ra2` is the SQ's alone.
+  allocation; the two never meet (asserted). `ra2` is the SQ's alone. **One entry's bytes land a
+  cycle**, so the data array is distributed RAM with one write (§10.1): the data read's when one
+  lands, else the oldest entry a writeback names; an entry the landing leaves out keeps `dv` clear
+  and is fetched by the data read, its value being in a register file by then. 60 M lockstep boot:
+  9,181,990 landings and 667,265 entries left out, 46,498,426 -> 46,473,281 retires (-0.05%); 300 M:
+  248,383,137 -> 247,626,564 (-0.30%); GB5 slices (§11.2) within 0.11% either way. Two placed builds
+  of 2026-10-13 that differ by this and the forward queue's ring: 190,566 -> 182,820 LUTs, 74,591 ->
+  72,241 flops.
 - **A result lands in its lane's write slot (5.2d-c).** An integer load's, AMO's or CSR read's
   destination is in its slot's lane shard; SH_LD has no writer and no bank. The value takes the
   lane's write register in a cycle the lane leaves it free (nothing executing that completes at
@@ -1531,6 +1538,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 413 | 15 694 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each |
 | `pend` | `smolrv64_pending` | 512 | 1 | 512 | flops | 3R, 1 set + 3 clear, bulk-clear |
+| `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the drain's head, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
 | `qbank[*].mem` | `smolrv64_frontend` | 8 | 416 | 3 328 | LUTRAM | the decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 3*PCW+PDW+SEQW+185`), its dispatch class (`gc`) included; decode reads the bundle register's slots, so the queue head feeds the IR with no logic but the record |
 
 Each PRF shard now has **its own write address** (`wa_ie`/`wa_ld`/`wa_fe`), which is §7 of
@@ -1844,7 +1852,7 @@ writes architectural checkpoints -- registers, CSRs, device registers and memory
 microarchitectural state (`docs/PLAN-2026-09-25-arch-checkpoints.md`) -- that any RTL version
 restores. `CKPT=<dir>/N.ckpt core/run-linux.sh +measure_from=<warm-up retires> +max_retires=<end>`
 runs a restore stub from the boot SRAM, then the workload, and the testbench's statistics
-(TOPDOWN-SIM, the perf-stat block, the -SIM lines; not the core's own WALK-SIM and MEMDEP counts)
+(TOPDOWN-SIM, the perf-stat block, the -SIM lines; not the core's own WALK-SIM, SQ-SIM and MEMDEP counts)
 cover only the measured window. `core/run-cosim-linux.sh` takes the same `CKPT` and locksteps
 from the checkpoint's first instruction.
 
