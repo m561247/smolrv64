@@ -8,6 +8,8 @@
 #   tools/bitcache.sh list [<commit-prefix>]  the entries, newest first, with WNS
 #   tools/bitcache.sh start [<platform dir>]  record the tree a build starts from (make bit does this)
 #   tools/bitcache.sh key [<platform dir>]    the key the tree would be banked under
+#   tools/bitcache.sh content                 the content id of the tree's build inputs
+#   tools/bitcache.sh stampable <content id>  the newest met entry the gate may stamp (tools/gate.sh)
 #
 # A key is <commit12>[-d<diff8>]-iw<IW>-div<DIV8>-<placer>: the commit, a hash of the tree's
 # uncommitted changes to anything synthesized or used to build (src, core, the platform's sources
@@ -39,6 +41,19 @@ tree_id() {
     then echo "$commit-d$d"; else echo "$commit"; fi
 }
 
+# The CONTENT of the build's inputs, with no reference to a commit: every file under the build
+# paths and third_party (tracked, and untracked but not ignored), by path and git blob hash, as the
+# working tree holds them. A dirty probe and the commit made of it share it; the gate's identity
+# stamp (tools/gate.sh) relies on exactly that.
+content_id() {
+    local list
+    local cexcl=(':(exclude)*.xpr' ':(exclude)*.log' ':(exclude)src/mem.linehex')
+    list=$(cd "$here" && { git ls-files -c -- "${diff_paths[@]}" third_party "${cexcl[@]}"
+                           git ls-files -o --exclude-standard -- "${diff_paths[@]}" | grep -v -E '\.(log|linehex|elf|bin|flock)$'
+                         } | sort -u | while read -r f; do [ -f "$f" ] && echo "$f"; done)
+    (cd "$here" && paste <(echo "$list") <(echo "$list" | git hash-object --stdin-paths)) | sha1sum | cut -c1-12
+}
+
 # The full key: the tree as `start` recorded it when the build began (else as it is now), and
 # the knobs the build used.
 key() {
@@ -62,6 +77,7 @@ start)
     plat=${1:-$plat_default}
     mkdir -p "$plat/$PROJ.runs/bitcache-start"
     tree_id > "$plat/$PROJ.runs/bitcache-start/tree"
+    content_id > "$plat/$PROJ.runs/bitcache-start/cid"
     (cd "$here" && git diff HEAD -- "${diff_paths[@]}" "${excl[@]}") > "$plat/$PROJ.runs/bitcache-start/dirty.diff" 2>/dev/null || true
     (cd "$here" && git log -1 --format='%H %s') > "$plat/$PROJ.runs/bitcache-start/commit"
     ;;
@@ -91,11 +107,30 @@ put)
       echo "commit:  $commit"
       echo "tree:    $here"
       echo "built:   $(date '+%Y-%m-%d %H:%M:%S')"
+      echo "cid:     $(cat "$st/cid" 2>/dev/null || echo ?)"
       echo "wns:     ${wns:-?}"
       echo "met:     $(awk -v w="${wns:-x}" 'BEGIN{print (w ~ /^-?[0-9.]+$/ && w >= 0) ? "yes" : "NO"}')"
     } > "$d/meta.txt"
     rm -rf "$st"
     echo "bitcache: banked $d (WNS ${wns:-?})"
+    ;;
+content)
+    content_id
+    ;;
+stampable)
+    # A met entry built from these sources at the shipping configuration: the default knobs and no
+    # define but the build's own (the identity, the monitor's path), so its netlist is the gate's
+    # but for the identity's INIT bits. It must hold the routed checkpoint the stamp starts from.
+    cid=${1:?content id}
+    for d in $(ls -td "$BITCACHE"/*-iw3-div48-AltSpreadLogic_medium* 2>/dev/null); do
+        grep -q "^cid: *$cid\$" "$d/meta.txt" 2>/dev/null || continue
+        grep -q '^met: *yes' "$d/meta.txt" && [ -f "$d/routed.dcp" ] || continue
+        extra=$(sed 's/=.*//' "$d/defines.txt" | grep -v -x -E 'MEM_BASEADDR|SOC_BOOT_HEX|PROBE_CLK_DIV8|SMOLRV64_HW|SMOLRV64_IW|SMOLRV64_GIT_COMMIT|SMOLRV64_GIT_DIRTY|SMOLRV64_BUILD_STAMP' || true)
+        [ -z "$extra" ] && grep -q -x 'PROBE_CLK_DIV8=48' "$d/defines.txt" && grep -q -x 'SMOLRV64_HW=8' "$d/defines.txt" \
+            && grep -q -x 'SMOLRV64_IW=3' "$d/defines.txt" || continue
+        echo "$d"; exit 0
+    done
+    exit 1
     ;;
 get)
     pre=${1:?commit prefix}; filt=${2:-}

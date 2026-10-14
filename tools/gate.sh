@@ -68,13 +68,48 @@ echo "$NB"
 if ! echo "$NB" | grep -q "NETLIST-BOOT: PASS"; then
    echo "GATE: FAIL (netlist)   [evidence: gate-results/$SHA/netlist-boot.log]"; exit 1
 fi
-echo "--- building (no arguments; the shipping config is the default) ---"
-( cd "$PLAT" && git clean -fxdq . && timeout 10800 make ) > "$RES/build.log" 2>&1
+# THE IDENTITY STAMP. The build's identity is INIT bits alone (docs/rtl-rules.md I2): a met probe
+# of exactly these sources at the shipping configuration IS this gate's design, placed and routed,
+# and becomes this commit's bitstream once the commit's identity is stamped into its routed
+# checkpoint (tools/stamp-identity.tcl) -- minutes instead of a build. Only a clean tree is
+# stamped (its identity: dirty 0, the commit's date, as build.tcl gives it); NO_STAMP=1 builds.
+BIT="$PLAT/rk_xcku5p.runs/impl_1/rk_xcku5p.bit"
+SRC=""
+if [ "${NO_STAMP:-0}" = 0 ] && [ -z "$(git status --porcelain --untracked-files=no -- src core platforms/rk-xcku5p-f-v1.2/rk_xcku5p.srcs workloads/ubuntu workloads/tiny128 workloads/monitor)" ]; then
+   SRC=$("$REPO"/tools/bitcache.sh stampable "$("$REPO"/tools/bitcache.sh content)") || SRC=""
+fi
+if [ -n "$SRC" ]; then
+   echo "--- stamping $(basename "$SRC") (these sources, met at WNS $(awk '/^wns:/ {print $2}' "$SRC/meta.txt")) ---"
+   XIL=${XIL:-/home/tommy/Xilinx/2025.1/Vivado}
+   ( export LD_LIBRARY_PATH=$XIL/lib/lnx64.o/Ubuntu/24
+     "$XIL/bin/vivado" -mode batch -nojournal -nolog -source "$REPO/tools/stamp-identity.tcl" -tclargs \
+        "$SRC/routed.dcp" "$(git rev-parse --short=8 HEAD)" 0 \
+        "$(git log -1 --format=%cd --date=format:%Y%m%d%H%M%S HEAD)" "$RES/stamp" ) > "$RES/build.log" 2>&1
+   # the stamp's own output, never a bitstream an earlier build left in the platform directory
+   BIT="$RES/stamp/rk_xcku5p.bit"
+   if grep -q "^STAMP-DONE" "$RES/build.log"; then
+      cat "$RES/stamp/identity.txt"
+      echo "stamped from: $SRC" >> "$RES/commit.txt"
+      echo "Timing met: $(grep -oE 'WNS=[-0-9.]+' "$RES/build.log" | tail -1)" >> "$RES/build.log"
+   elif grep -q "^STAMP-REFUSED" "$RES/build.log"; then
+      # the identical netlist would fail again: a timing failure, no build (BIT stays absent)
+      echo "stamped from: $SRC (refused)" >> "$RES/commit.txt"
+      echo "TIMING VIOLATION: $(grep -oE 'WNS=[-0-9.]+' "$RES/build.log" | tail -1)" >> "$RES/build.log"
+   else
+      echo "stamp failed ($(grep -E '^ERROR|stamp-identity:' "$RES/build.log" | head -1 | cut -c1-120)): building"
+      SRC=""; BIT="$PLAT/rk_xcku5p.runs/impl_1/rk_xcku5p.bit"
+   fi
+fi
+if [ -z "$SRC" ]; then
+   echo "--- building (no arguments; the shipping config is the default) ---"
+   ( cd "$PLAT" && git clean -fxdq . && timeout 10800 make ) > "$RES/build.log" 2>&1
+fi
 WNS=$(grep -oE "Timing met: WNS=[-0-9.]+|TIMING VIOLATION: WNS=[-0-9.]+" "$RES/build.log" | grep -v '^#' | tail -1)
 echo "$WNS" > "$RES/wns.txt"
 # The worst path is worth keeping WHETHER OR NOT it met: a pass at +0.019 ns names the path
 # the next change has to avoid, and that is the whole input to headroom work.
-R=$(ls -t "$PLAT"/rk_xcku5p.runs/impl_1/*timing_summary*.rpt 2>/dev/null | head -1)
+if [ -n "$SRC" ]; then R="$RES/stamp/timing_summary.rpt"
+else R=$(ls -t "$PLAT"/rk_xcku5p.runs/impl_1/*timing_summary*.rpt 2>/dev/null | head -1); fi
 [ -n "$R" ] && cp "$R" "$RES/timing_summary.rpt"
 # The first VIOLATED path, else the first path in the core clock's group: the first "Slack"
 # in the report is a debug-hub path with 11 ns to spare, which is what this printed for
@@ -86,7 +121,7 @@ WORST=$(awk '/^Slack \(VIOLATED\)/{sl=$4+0; blk=$0; p=1; next}
 [ -z "$WORST" ] && WORST=$(awk '/^Slack \(MET\)/{blk=$0; n=0; p=1; next} p{blk=blk"\n"$0; if(/Path Group:/){ if($3=="probe_clk"){print blk; exit} else p=0}}' \
                               "$RES/timing_summary.rpt" 2>/dev/null | grep -E "Slack|Source:|Destination:")
 [ -n "$WORST" ] && printf '%s\n' "$WORST" > "$RES/worst-path.txt"
-if [ ! -f "$PLAT/rk_xcku5p.runs/impl_1/rk_xcku5p.bit" ]; then
+if [ ! -f "$BIT" ]; then
    # Name the stage that failed: a build that never reached timing is not a timing failure
    # (gate U, 2026-09-05: two "FAIL (timing)" verdicts were the RAM-inference check, and
    # one of them was misread as memory pressure).
@@ -99,11 +134,12 @@ if [ ! -f "$PLAT/rk_xcku5p.runs/impl_1/rk_xcku5p.bit" ]; then
 fi
 echo "timing: $WNS"
 printf '%s\n' "$WORST" | sed 's/^/  /'
-# NO_BOARD=1: stop here with the bitstream banked in the evidence directory -- for a build
-# whose board is busy (a Geekbench run on the last gate's bitstream); tools/board-gate.sh
-# on the evidence directory finishes the gate later.
+# The bitstream is banked in the evidence directory, and that copy is the one the board gate
+# programs (tools/board-gate.sh <resultdir>).
+cp "$BIT" "$RES/rk_xcku5p.bit"
+# NO_BOARD=1: stop here -- for a build whose board is busy (a Geekbench run on the last gate's
+# bitstream); tools/board-gate.sh on the evidence directory finishes the gate later.
 if [ "${NO_BOARD:-0}" != 0 ]; then
-   cp "$PLAT/rk_xcku5p.runs/impl_1/rk_xcku5p.bit" "$RES/rk_xcku5p.bit"
    echo "GATE: BUILT (board pending)  ($WHAT)  $WNS   [evidence: gate-results/$SHA/, bitstream banked there]"; exit 0
 fi
 

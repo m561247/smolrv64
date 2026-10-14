@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The board half of tools/gate.sh, runnable alone: program a bitstream, NFS-boot Ubuntu, judge.
 #
-#   tools/board-gate.sh <resultdir>                    # impl_1's bitstream
-#   BIT=/var/tmp/x.bit tools/board-gate.sh <resultdir> # a banked one
+#   tools/board-gate.sh <resultdir>                    # the bitstream banked there, else impl_1's
+#   BIT=/var/tmp/x.bit tools/board-gate.sh <resultdir> # another one
 #   BOOT_WAIT=1500 ...                                 # seconds to allow for login: (default 1800)
 #   REPLAY=<byte> tools/board-gate.sh <resultdir>       # judge an old boot from that console offset, no board
 #   STRESS_S=900 ...                                  # seconds of post-login userspace stress (0 = skip)
@@ -50,6 +50,9 @@ SCREEN=${SCREEN:-$(screen -ls | awk '/\t[0-9]+\./ {print $1; exit}')}
 # never off the host's NFS peer list, which names every board.
 con_ip() { tail -c +$(( ${1:-0} + 1 )) "$CON" | tr -d '\r' | grep -aoE 'ipaddr=192\.168\.1\.[0-9]+' | tail -1 | cut -d= -f2; }
 RES=${1:?result dir}; BOOT_WAIT=${BOOT_WAIT:-1800}; mkdir -p "$RES"
+# The bitstream: BIT=, else the one banked in the result directory (tools/gate.sh puts it there),
+# else the platform's last build -- which is only this result's when the same tree built it.
+[ -z "${BIT:-}" ] && [ -f "$RES/rk_xcku5p.bit" ] && BIT=$(cd "$RES" && pwd)/rk_xcku5p.bit
 # The board boots with the graphics console scanning out (ubuntu-boot.sh VGA): its memory
 # traffic is part of the machine every bitstream is judged on.
 export VGA=${VGA:-1}
