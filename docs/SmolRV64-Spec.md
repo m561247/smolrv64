@@ -141,10 +141,17 @@ FP/MD/SYS pipe (`u_iq_f`), one load and one store
 decode (`smolrv64_gclass`, read from the queue record). A load behind a store in its group
 takes the store-seqno after the store's. A member pops only with a **credit** for everything it allocates, from
 flops, counted against what is already between the head and there: the ROB against the IR
-group, the LQ and SQ against the IR's load or store, each scheduler against its dispatch-stage
-register and the IR's op (`crd`, `CR_*`; this cycle's frees are not credited). The IR loads
-every cycle and dispatches the next, and a dispatch-stage register never waits for its
-scheduler; both are always-on assertions. The head also pops nothing while dispatch is frozen
+group, the LQ and SQ against the IR's load or store, each lane's scheduler against its
+dispatch-stage register and the IR's op, the F/CTF/MD scheduler against its FIFO (below) and the
+IR's op (`crd`, `CR_*`; this cycle's frees are not credited). The IR loads every cycle and
+dispatches the next, and a lane's dispatch-stage register never waits for its scheduler; both are
+always-on assertions. **The F/CTF/MD stage is a FIFO of 8** (`FQ`) whose head is the register its
+scheduler fills from: a burst of FP ops waits there while dispatch goes on, and the head waits for
+the scheduler's room. The FIFO's entries watch a registered copy of the wake buses, a cycle late:
+an entry ORs the copy's match of its sources into the readiness it had at dispatch, the head adds
+the copy's match to its own live snoop, and what the scheduler is handed is the readiness the
+pending table would give, in the same cycle, with no port on the table and no load on the live
+buses (a check compares them at every move into the head). The head also pops nothing while dispatch is frozen
 (`redirect_q`, `fr_v`, `dec_red_q`: what the IR holds then is the wrong path and is dropped),
 while a rename shard is below `LOWAT` (4 covers two groups, each allocating at most one
 register per shard), or while a serialising op is in the IR or in flight. A CBO, which waits
@@ -162,7 +169,7 @@ held a group until its room appeared and dispatched it in that cycle.
 |---|---|
 | *(operands)* | **no longer a dispatch stall.** Waiting for operands happens in the scheduler now (§2.1); dispatch is blocked by structural resources only. |
 | `~cr_rob1..3` | no free ROB row (32 rows) beyond the IR group's (`st_rob`) |
-| `~cr_ia/ib/ic/l/f` | the member's scheduler has no entry beyond its dispatch-stage register and the IR's op — integer 10 each, in-order 12, FP 8 (§6.1); `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
+| `~cr_ia/ib/ic/l/f` | the member's scheduler has no entry beyond its dispatch-stage register and the IR's op — integer 10 each, in-order 12; for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
 | `rn_stall` | any rename shard below `LOWAT`=4 free registers (`st_rn`) |
 | `cr_ser`, `cr_csr` | a serializing op -- a fence, `fence.i`, an AMO, an xret, `ecall`/`ebreak`/`wfi`/`sfence.vma`, a trap from dispatch -- is **alone in flight**: it pops only when the ROB AND the store queue have drained (`drained`, rule C5) and the IR is empty, and nothing pops behind it until it commits. A CSR op does not drain: it waits only for the CSR op before it (`csr_infl`, or one in the IR) (`st_srz`) |
 
@@ -1820,7 +1827,7 @@ register; it is keyed by the fetch sequence number until dispatch binds a ROB in
 | `q` | the decoupling queue, behind the head group or popping | |
 | `g r n z O I L S H o` | at the queue head, not popping: a group rule; a redirect freeze; rename low; a serialising, CSR or CBO gate; no ROB row; its scheduler full; LQ full; SQ full; its lane's handoff op in flight; a head op in flight | `take`, `rule`, `crd` in the order the frontend's `room()` checks them |
 | `i` | the IR, dispatching | `s_v`, `d_take` |
-| `t` | a scheduler's dispatch stage | `stg_v` |
+| `t` | a scheduler's dispatch stage (for F, the head of its FIFO) | `stg_v` |
 | `w` / `s` / `p` | in a scheduler: an operand pending / ready, not picked / picked | the scheduler's `v`, `srdy`, `iss_ent` |
 | `a b c d` | executes in lane A..D | the lane's select register |
 | `u h v j F Y` | a multiply in flight; in its lane's handoff register; a divide in the MD stage; the FP port's select register; stage F or the FPU; a system op waiting in the SYSQ | `m1`/`m2`, `hv`, `md_v`, `j_v`, `f_valid`/`fq_v`, `sy_v` |
@@ -2002,6 +2009,14 @@ closure above is real; the branch cannot ship until that defect is found (handof
   below 1% of cycles in all four and the stall moves on: Navigation's ROB fills (0 -> 10.7%)
   with loads waiting on older stores (a load blocked in 19.5% -> 35.2% of cycles), PDF
   Rendering's ROB and load queue (24.5% and 21.9%).
+- **The FP scheduler holds `NF`=8 ops, behind a FIFO of `FQ`=8** (§2). The FIFO, not a bigger
+  scheduler: GB5 slices restored from Simmerv checkpoints (§11.2), in cycles, FIFO 1 -> 8: Camera
+  39,230,305 -> 32,826,256 (-16.3%), Gaussian Blur 39,653,597 -> 33,357,181 (-15.9%), Structure from
+  Motion 36,336,791 -> 29,204,556 (-19.6%); Navigation unchanged. `be:iq-full` falls from ~21% to
+  2-4% and `be:dep-fp` from 23-28% to 5-9% (dispatch keeps feeding the loads behind a burst); the
+  ROB fills instead (`be:rob-full` 24-27%). A 12- or 16-entry scheduler saves the same cycles (16:
+  -16.9 / -16.8 / -19.8%) and does not close 166.67 MHz (2026-10-13: routing congestion, WNS -0.3 to
+  -1.0 ns). `NFLIGHT` 4 -> 8 changes no cycle: the FPU never holds four ops with a fifth ready.
 - **ALU, FP, CTF and mul/div reorder** (§2.1, §7); memory, AMO, CSR and fences still issue
   in program order from `u_iq_l`. A long-latency op in M still blocks *other M-class ops*
   behind it. Freeing those needs the load queue and store buffer, and `head_block` gone.

@@ -643,7 +643,9 @@ module smolrv64_core
    wire [NQ-1:0] pnd_q;
    wire [6*IW*RN_PBITS-1:0] pnd_sq;              // slot k's six candidates at [6k..6k+5]
    wire [IW-1:0]            pnd_av;
-   smolrv64_pending #(.PBITS(RN_PBITS), .NS(IW), .NWB(NWB_C), .NQ(NQ)) u_pend
+   wire [3*RN_PBITS-1:0]    fpq_h1;              // the F FIFO's next head's sources, for its check (below)
+   wire [2:0]               fpq_h1r;             // ...and whether the table calls each ready
+   smolrv64_pending #(.PBITS(RN_PBITS), .NS(IW), .NWB(NWB_C), .NQ(NQ + 3)) u_pend
      (.clk(clk), .reset(reset),
       // EVERY CANDIDATE'S PENDING BIT IS SET, TAKEN OR NOT: the set enable is the slot's own
       // valid and destination, never the dispatch take, whose
@@ -653,8 +655,8 @@ module smolrv64_core
       // and it is set again when it is taken.
       .a_v(pnd_av), .a_preg(rn_prdv),
       .w_v(wkv), .w_preg(wkp), .err(pend_err),
-      .q({l_psv, pnd_sq}),
-      .r(pnd_q),
+      .q({fpq_h1, l_psv, pnd_sq}),
+      .r({fpq_h1r, pnd_q}),
       .flush(redirect));
 
    // THE SHADOW CHECK. At the cycle an instruction is actually consumed out of X, every
@@ -907,20 +909,41 @@ module smolrv64_core
    // per-slot same-cycle wakeup fold, below) resolve into stg_* at T; the scheduler, psmem
    // and plmem consume the REGISTERED stg_* at T+1. Cost: +1 cycle to refill after a redirect.
    // Each pipe takes at most one dispatch per cycle (the swizzle's <=1 LS, <=1 FC, <=1 per
-   // ALU), so each stage is 1-deep. Back-pressure stays at the frontend: iq_ready becomes
-   // "~stg_v | sched_room" so a stuck stage (scheduler full) holds dispatch, never drops it.
+   // ALU), so a lane's stage is 1-deep; the F stage is a FIFO (below). Back-pressure stays at the
+   // frontend: the credits count the stage, so a full one holds dispatch, never drops it.
    // Wakeup-catch: an op waiting in the stage must not miss a writeback that fires while it
    // waits. The dispatch-cycle (T) writeback is folded per-slot into stg_r at load (srdy_hit
    // below, computed from the early slot pregs so it stays off the mux->register path); every
    // later stuck cycle ORs a fresh wkv snoop of the stage's own pregs; and the move cycle is
    // caught by the scheduler's own fill hit(d_ps). See docs/SmolRV64-Spec.md 15.
-   reg              stg_v_f;
-   reg [ROB_IDXB-1:0] stg_rob_f;
-   reg [3*RN_PBITS-1:0] stg_ps_f;
-   reg [2:0]        stg_r_f;
-   reg [RN_PBITS-1:0] stg_prd_f;
-   reg [PLW-1:0]    stg_pl_f;
+   // THE F STAGE HOLDS FQ OPS: a head register, the one the scheduler fills from, and behind it a
+   // FIFO of FQ-1 in distributed RAM (one write, one read; nothing moves but the pointers). At
+   // FQ = 1 it is the one-deep stage above, which the credits keep from ever waiting; at 8 it holds
+   // a burst of FP/CTF/MD ops while dispatch goes on, and the head waits for the scheduler's room:
+   // GB5's FP slices take 16-20% fewer cycles, as many as a 16-entry scheduler saves, with none of
+   // a scheduler's wakeup.
+   localparam integer FQ = 8, FQB = $clog2(FQ + 1);
+   localparam integer FSQN = (FQ > 1) ? FQ - 1 : 1, FSQB = (FSQN > 1) ? $clog2(FSQN) : 1;
+   reg                     stg_v_f;
+   reg  [ROB_IDXB-1:0]     stg_rob_f;
+   reg  [3*RN_PBITS-1:0]   stg_ps_f;
+   reg  [2:0]              stg_r_f;
+   reg  [RN_PBITS-1:0]     stg_prd_f;
+   reg  [PLW-1:0]          stg_pl_f;
+   wire [2:0]              wkq_f;                    // the head's sources in last cycle's wakes (below)
    initial stg_v_f = 1'b0;
+   // the FIFO behind the head: {destination, payload} in distributed RAM; the sources, their readiness
+   // and the ROB slot in flops (every entry's sources watch the wakes, the kill reads every ROB slot)
+   localparam integer FSQW = RN_PBITS + PLW;
+   (* ram_style = "distributed" *) reg [FSQW-1:0] fsq_mem [0:(1<<FSQB)-1];
+   reg  [ROB_IDXB-1:0]     fsq_rob [0:(1<<FSQB)-1];
+   reg  [3*RN_PBITS-1:0]   fsq_ps  [0:(1<<FSQB)-1];
+   reg  [2:0]              fsq_r   [0:(1<<FSQB)-1];
+   reg  [FSQB-1:0]          fsq_hd, fsq_tl;
+   reg  [FSQB:0]            fsq_n;
+   initial begin fsq_hd = {FSQB{1'b0}}; fsq_tl = {FSQB{1'b0}}; fsq_n = {(FSQB+1){1'b0}}; end
+   wire [FSQW-1:0]          fsq_o = fsq_mem[fsq_hd];                // the FIFO's oldest, the next head
+   wire [FQB-1:0]          fpq_n = {{(FQB-1){1'b0}}, stg_v_f} + {{(FQB-FSQB-1){1'b0}}, fsq_n};
    // The scheduler accepts the stage op when it has room; back-pressure to the frontend below.
    wire mv_f  = stg_v_f  & rf_ready;
 
@@ -951,7 +974,7 @@ module smolrv64_core
       // FP-arith AND control flow (jal/jalr/bXX) share this one queue and issue slot.
       .d_valid(mv_f),.d_ready(rf_ready),
       .d_rob(stg_rob_f),
-      .d_ps(stg_ps_f),.d_r(stg_r_f),
+      .d_ps(stg_ps_f),.d_r(stg_r_f | wkq_f),
       .d_prd(stg_prd_f),.d_long(1'b0),.d_ent(rf_d_ent),
       .wb_v(wkv),.wb_preg(wkp),
       .unit_busy(j_v & ~j_adv),           // j_* can't take: occupied and its op not draining
@@ -964,7 +987,7 @@ module smolrv64_core
    // Stage-aware: a slot may dispatch iff its target pipe's dispatch stage is empty OR drains
    // into the scheduler this cycle (~stg_v | sched_room). A stuck stage (scheduler full) thus
    // holds dispatch at the frontend rather than losing the op behind the stage register.
-   wire f_room    = ~stg_v_f  | rf_ready;
+   wire f_room    = (fpq_n < FQ[FQB-1:0]) | rf_ready;
    // the group's FP/control-flow op (at most one) and what its slot hands the F/CTF stage
    wire [IW-1:0]         s_tf = s_takev & s_cls_fc;
    reg  [ROB_IDXB-1:0]   f_rob_in;
@@ -1121,6 +1144,23 @@ module smolrv64_core
          for (i = 0; i < NWB_C; i = i + 1) wk = wk | (wkv[i] & (wkp[i*RN_PBITS +: RN_PBITS] == p));
       end
    endfunction
+   // THE F STAGE'S WAKES ARE A CYCLE OLD: a registered copy of the wake buses (wkv, wkp) that the
+   // FIFO's entries and its head compare against, so the stage adds no load to the live buses or the
+   // pending table; the head's own live snoop (snp_f) is the one same-cycle compare
+   reg  [NWB_C-1:0]          wkv_q;
+   reg  [NWB_C*RN_PBITS-1:0] wkp_q;
+   initial wkv_q = {NWB_C{1'b0}};
+   always @(posedge clk) begin wkv_q <= reset ? {NWB_C{1'b0}} : wkv;  wkp_q <= wkp; end
+   function automatic [2:0] wkq3;       // which of three sources a broadcast named LAST cycle
+      input [3*RN_PBITS-1:0] ps;
+      integer i, j;
+      begin
+         wkq3 = 3'b000;
+         for (j = 0; j < 3; j = j + 1)
+            for (i = 0; i < NWB_C; i = i + 1)
+               if (wkv_q[i] & (wkp_q[i*RN_PBITS +: RN_PBITS] == ps[j*RN_PBITS +: RN_PBITS])) wkq3[j] = 1'b1;
+      end
+   endfunction
    function automatic wk_i;             // wk() over the integer wakes (wkv_i)
       input [RN_PBITS-1:0] p;
       integer i;
@@ -1129,13 +1169,48 @@ module smolrv64_core
          for (i = 0; i < NWB_C; i = i + 1) wk_i = wk_i | (wkv_i[i] & (wkp[i*RN_PBITS +: RN_PBITS] == p));
       end
    endfunction
-   // Stuck-cycle snoop: fresh wkv match of the stage's OWN pregs, ORed into its ready bits.
-   wire [2:0] snp_f  = {wk(stg_ps_f[2*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[1*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[0*RN_PBITS +: RN_PBITS])};
+   // THE FIFO'S ENTRIES WATCH LAST CYCLE'S WAKES. An entry takes the readiness it had at dispatch
+   // (every writeback up to that cycle; an unused source counts as ready) and ORs in each cycle the
+   // registered copy's match of its sources (wkq3), so it holds every writeback up to two cycles back;
+   // the cycle it becomes the head it adds the copy's match (one cycle back). The head adds the copy's
+   // match of its own sources (wkq_f, the cycle before) to what it hands the scheduler, ORs both
+   // matches into its readiness every cycle it stays, and the op the scheduler takes is caught by its
+   // fill's hit(d_ps) (this cycle): the same readiness, in every cycle, as reading the pending table.
+   // F (FP/CTF/MD): whichever slot is the (single) FC goes into the head when the head is free
+   // this cycle and nothing waits behind it, else behind the ops that wait.
+   wire [2:0] snp_f   = {wk(stg_ps_f[2*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[RN_PBITS +: RN_PBITS]), wk(stg_ps_f[0 +: RN_PBITS])};
+   assign     wkq_f   = wkq3(stg_ps_f);
+   wire [2:0] fsq_hr  = fsq_r[fsq_hd] | wkq3(fsq_ps[fsq_hd]);     // the next head's readiness
+   assign     fpq_h1  = fsq_ps[fsq_hd];
+   wire       fsq_any  = (fsq_n != {(FSQB+1){1'b0}});
+   wire       hd_free = ~stg_v_f | mv_f;                  // the head is empty or leaves this cycle
+   wire       hd_ft   = hd_free & fsq_any;                 // the FIFO's oldest becomes the head
+   wire       push_hd = (|s_tf) & hd_free & ~fsq_any;      // ...or the dispatched op does
+   wire       push_ft = (|s_tf) & ~push_hd;
+   // the kill: a dead op is the youngest of the stage's (everything younger than the restart dies),
+   // so the dead ones are the head-or-FIFO's suffix and nothing is dispatched while it is in force
+   reg  [FSQN-1:0] fsq_dead;
+   reg  [FSQB:0]   fsq_alive;                               // the FIFO's ops before the first dead one
+   integer        fsqk;
+   always @* begin
+      fsq_alive = fsq_n;
+      for (fsqk = FSQN - 1; fsqk >= 0; fsqk = fsqk - 1) begin
+         fsq_dead[fsqk] = (fsqk < fsq_n) & dead(fsq_rob[fsq_hd + fsqk[FSQB-1:0]]);
+         if (fsq_dead[fsqk]) fsq_alive = fsqk[FSQB:0];
+      end
+   end
+   wire       fsq_kill = |fsq_dead;
    always @(posedge clk) begin
-      if (reset) stg_v_f <= 1'b0;
-      else begin
-         // F (FP/CTF): whichever slot is the (single) FC.
-         if (|s_tf) begin
+      if (reset) begin
+         stg_v_f <= 1'b0;  fsq_n <= {(FSQB+1){1'b0}};  fsq_hd <= {FSQB{1'b0}};  fsq_tl <= {FSQB{1'b0}};
+      end else begin
+         if (hd_ft) begin
+            stg_v_f   <= 1'b1;
+            stg_rob_f <= fsq_rob[fsq_hd];
+            stg_ps_f  <= fsq_ps[fsq_hd];
+            stg_r_f   <= fsq_hr;
+            {stg_prd_f, stg_pl_f} <= fsq_o;
+         end else if (push_hd) begin
             stg_v_f   <= 1'b1;
             stg_rob_f <= f_rob_in;
             stg_ps_f  <= f_ps_in;
@@ -1143,11 +1218,48 @@ module smolrv64_core
             stg_prd_f <= f_prd_in;
             stg_pl_f  <= f_pl_in;
          end else if (mv_f) stg_v_f <= 1'b0;
-         else if (stg_v_f) stg_r_f <= stg_r_f | snp_f;
-         if (dead(stg_rob_f)) stg_v_f <= 1'b0;                // the kill
-         // Flush LAST (rule I11: redirect never gates an enable; flush arm wins on order).
-         if (redirect) stg_v_f <= 1'b0;
+         else if (stg_v_f) stg_r_f <= stg_r_f | snp_f | wkq_f;
+         if (push_ft) begin fsq_rob[fsq_tl] <= f_rob_in;  fsq_tl <= fsq_tl + 1'b1; end
+         if (hd_ft) fsq_hd <= fsq_hd + 1'b1;
+         fsq_n <= fsq_n + {{FSQB{1'b0}}, push_ft} - {{FSQB{1'b0}}, hd_ft};
+         // the kill, after the arms above: the head (if it stays) and the FIFO's dead suffix
+         if (stg_v_f & ~mv_f & dead(stg_rob_f)) stg_v_f <= 1'b0;
+         if (fsq_kill) begin
+            // the next head was dead: it is not taken, and the FIFO empties back to it
+            if (hd_ft & (fsq_alive == {(FSQB+1){1'b0}})) begin stg_v_f <= 1'b0;  fsq_hd <= fsq_hd; end
+            fsq_n  <= fsq_alive - {{FSQB{1'b0}}, hd_ft & (fsq_alive != {(FSQB+1){1'b0}})};
+            fsq_tl <= fsq_hd + fsq_alive[FSQB-1:0];
+         end
+         // Flush LAST (rule I11: redirect never gates an enable; flush arm wins on order). Both
+         // pointers restart together, whatever the arms above did to them.
+         if (redirect) begin
+            stg_v_f <= 1'b0;  fsq_n <= {(FSQB+1){1'b0}};  fsq_hd <= {FSQB{1'b0}};  fsq_tl <= {FSQB{1'b0}};
+         end
       end
+   end
+   always @(posedge clk) if (push_ft) fsq_mem[fsq_tl] <= {f_prd_in, f_pl_in};
+   // every entry's sources against the registered wakes, then the pushed entry's dispatch state
+   integer fse;
+   always @(posedge clk) begin
+      for (fse = 0; fse < (1 << FSQB); fse = fse + 1) fsq_r[fse] <= fsq_r[fse] | wkq3(fsq_ps[fse]);
+      if (push_ft) begin fsq_ps[fsq_tl] <= f_ps_in;  fsq_r[fsq_tl] <= f_r_in; end
+   end
+   always @(posedge clk) if (!reset) begin
+      if (push_ft & (fsq_n == FSQN[FSQB:0]) & ~hd_ft)
+         $fatal(1, "smolrv64_core: an FC op dispatches into a full F stage (%0d behind the head): the credits are wrong", fsq_n);
+      if ((|s_tf) & (fsq_kill | (stg_v_f & dead(stg_rob_f))))
+         $fatal(1, "smolrv64_core: an FC op dispatches while the F stage holds a dead op (head %b, FIFO %b)",
+                stg_v_f & dead(stg_rob_f), fsq_dead);
+      if (fsq_any & ~stg_v_f)
+         $fatal(1, "smolrv64_core: %0d ops wait behind an empty F stage head", fsq_n);
+      if ((fsq_tl - fsq_hd) != fsq_n[FSQB-1:0])
+         $fatal(1, "smolrv64_core: the F stage FIFO's pointers (head %0d, tail %0d) disagree with its count %0d", fsq_hd, fsq_tl, fsq_n);
+      // the snoop against the pending table (query ports that only this check reads): a source the
+      // table calls ready must be ready by the snoop when its op becomes the head, or the op would
+      // wait for a wake already gone
+      if (hd_ft & (|(fpq_h1r & ~fsq_hr)))
+         $fatal(1, "smolrv64_core: the F FIFO's next head (rob %0d, sources %h) missed a wake: table %b, snoop %b",
+                fsq_rob[fsq_hd], fsq_ps[fsq_hd], fpq_h1r, fsq_hr);
    end
 
    // =========================================================== THE LANES
@@ -3179,15 +3291,15 @@ module smolrv64_core
    assign kchk = cf_red_fire & (kd_age >= KCHK) & ~fr_set_q;
    // not in a cycle that resolves an older restart: that one is walked to first
    assign fr_rel = fr_v & rob_wl_done & (kd_age >= KREL) & ~fpu_dead & ~fr_set & ~fr_set_q & ~redirect;
-   always @(posedge clk) if (!reset && fr_rel && ((stg_v_f & dead(stg_rob_f)) | (j_v & dead(j_rob)) | (f_valid & dead(f_rob))
+   always @(posedge clk) if (!reset && fr_rel && ((stg_v_f & dead(stg_rob_f)) | fsq_kill | (j_v & dead(j_rob)) | (f_valid & dead(f_rob))
                                      | (icr_v & dead(icr_tag[RN_PBITS +: ROB_IDXB])) | (md_v & dead(md_rob)) | (sy_v & dead(sy_rob))
                                      | (ho_v & dead(ho_rec[PLW +: ROB_IDXB])) | (m_valid & m_dead)))
       $fatal(1, "smolrv64_core: the release finds a dead op: stg_f %b j %b f %b icr %b md %b sy %b ho %b m %b",
-             stg_v_f, j_v, f_valid, icr_v, md_v, sy_v, ho_v, m_valid);
+             {fsq_dead, stg_v_f & dead(stg_rob_f)}, j_v, f_valid, icr_v, md_v, sy_v, ho_v, m_valid);
    always @(posedge clk) if (!reset && kchk) begin
-      if (stg_v_f | (rf_occ != 0) | j_v | f_valid | icr_v | md_v | sy_v | ho_v | m_valid | (|la_v) | (|sa_v))
+      if (stg_v_f | fsq_any | (rf_occ != 0) | j_v | f_valid | icr_v | md_v | sy_v | ho_v | m_valid | (|la_v) | (|sa_v))
          $fatal(1, "smolrv64_core: the kill left a live op: stg_f %b iq_f %0d j %b f %b icr %b md %b sy %b ho %b m %b la %b sa %b",
-                stg_v_f, rf_occ, j_v, f_valid, icr_v, md_v, sy_v, ho_v, m_valid, la_v, sa_v);
+                {fsq_n, stg_v_f}, rf_occ, j_v, f_valid, icr_v, md_v, sy_v, ho_v, m_valid, la_v, sa_v);
       if (lq_occ != 0)
          $fatal(1, "smolrv64_core: the kill left %0d live loads", lq_occ);
 `ifndef SYNTHESIS
@@ -4089,7 +4201,11 @@ module smolrv64_core
    always @* for (crk = 0; crk < NL; crk = crk + 1)
       cr_i[crk] = {1'b0, l_free[crk]} > ({{(IBI+1){1'b0}}, l_stg_v[crk]} + {{(IBI+1){1'b0}}, ir_i[crk]});
    wire cr_l  = ~ho_inf & ~ir_l;                       // one head op in flight
-   wire cr_f  = {1'b0, rf_free}  > ({1'b0, stg_v_f}  + {1'b0, ir_f});
+   localparam integer FQ_M1I = FQ - 1;
+   localparam [7:0]   FQ_M1  = FQ_M1I[7:0];
+   wire [7:0] cr_f_room = {{(7-IBF){1'b0}}, rf_free} + FQ_M1;
+   wire [7:0] cr_f_need = {{(8-FQB){1'b0}}, fpq_n} + {7'd0, ir_f};
+   wire cr_f  = cr_f_room > cr_f_need;
    // A head op (an AMO, LR/SC or CBO) waits in M for the ROB head, so a CBO dispatches only once
    // every older load and store has its address (an AMO or LR/SC drains first), one head op is in
    // flight at a time (the head-op register holds one), and no load or store dispatches while one
@@ -4132,7 +4248,7 @@ module smolrv64_core
       for (crk = 0; crk < NL; crk = crk + 1)
          if (l_stg_v[crk] & ~l_ready[crk])
             $fatal(1, "smolrv64_core: lane %0d's dispatch-stage register waits for its scheduler: the credits are wrong", crk);
-      if (stg_v_f & ~rf_ready)
+      if ((FQ == 1) & stg_v_f & ~rf_ready)
          $fatal(1, "smolrv64_core: a dispatch-stage register waits for its scheduler: the credits are wrong");
    end
    // NOT GATED ON THIS CYCLE'S REDIRECT (2026-09-05, gate V3 at -0.919 ns). The redirect is
