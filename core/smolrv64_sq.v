@@ -193,7 +193,11 @@ module smolrv64_sq
     output wire [NENT-1:0]       kmask);
 
    reg [NENT-1:0]        v, av, dv;          // live / address known / data known
-   reg [PAW-1:0]         addr [0:NENT-1];
+   // THE PA, in two copies of one write each -- M's fill (addr_m) and the walker's answer (addr_w)
+   // -- and a table that says which holds an entry's: two writers, so not one array
+   (* ram_style = "distributed" *) reg [PAW-1:0] addr_m [0:NENT-1];
+   (* ram_style = "distributed" *) reg [PAW-1:0] addr_w [0:NENT-1];
+   reg [NENT-1:0]        addr_lv;            // entry k's PA is the walker's
    reg [VAW-1:0]         va   [0:NENT-1];
    reg [VAW-1:0]         pc   [0:NENT-1];
    reg [SEQW-1:0]        sqn  [0:NENT-1];
@@ -338,13 +342,15 @@ module smolrv64_sq
    assign c_v    = v[head] & av[head] & dv[head] & (cmt[head] | (k_take & (kcc == headc)));
    assign kc_v   = (kcc != tailc) & v[kc] & av[kc] & dv[kc] & tv[kc] & ~flt[kc];
    assign kc_rob = rob[kc];
-   assign kc_addr= addr[kc];
+   wire [PAW-1:0] kc_am = addr_m[kc], kc_aw = addr_w[kc];
+   assign kc_addr= addr_lv[kc] ? kc_aw : kc_am;
    // The same landing bypass as c_data: the entry commits in the cycle its bytes are still
    // in wb_q, and data[kc] holds the previous occupant's until the next edge.
    assign kc_data= (ln_v & (ln_idx == kc)) ? ln_data : data[kc];
    assign kc_size= sz[kc];
    assign c_rob  = rob[head];
-   assign c_addr = addr[head];
+   wire [PAW-1:0] hd_am = addr_m[head], hd_aw = addr_w[head];
+   assign c_addr = addr_lv[head] ? hd_aw : hd_am;
    // the landing bypass: the cycle dv rose, the bytes are still in wb_q
    assign c_data = (ln_v & (ln_idx == head)) ? ln_data : data[head];
    assign c_size = sz[head];
@@ -625,7 +631,7 @@ module smolrv64_sq
 
          // address only. The data comes from the snoop or the data read.
          if (a_v) begin
-            addr[a_idx] <= a_addr;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;  av[a_idx] <= 1'b1;  bare[a_idx] <= a_bare;
+            addr_lv[a_idx] <= 1'b0;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;  av[a_idx] <= 1'b1;  bare[a_idx] <= a_bare;
             unc[a_idx]  <= a_unc;  tv[a_idx] <= a_tv;  flt[a_idx] <= a_flt;  fc[a_idx] <= a_fc;
          end
          // the data read: the pick is a register, the value is in the cycle it is read (dv) and
@@ -636,7 +642,7 @@ module smolrv64_sq
          if (flush) rq_v <= 1'b0;                      // flush last (rule I11)
          // the walker's answer: the PA and NC bit, or the fault the store traps with at the head
          if (w_v) begin
-            addr[w_idx] <= w_pa;  unc[w_idx] <= w_unc;  flt[w_idx] <= w_flt;  fc[w_idx] <= w_fc;
+            addr_lv[w_idx] <= 1'b1;  unc[w_idx] <= w_unc;  flt[w_idx] <= w_flt;  fc[w_idx] <= w_fc;
             tv[w_idx]   <= 1'b1;
          end
 
@@ -693,6 +699,9 @@ module smolrv64_sq
       end
    end
 
+   // each PA copy's one write
+   always @(posedge clk) if (!reset & a_v) addr_m[a_idx] <= a_addr;
+   always @(posedge clk) if (!reset & w_v) addr_w[w_idx] <= w_pa;
    // the data array's one write: the landing
    always @(posedge clk) if (ln_v) data[ln_idx] <= ln_data;
 `ifndef SYNTHESIS

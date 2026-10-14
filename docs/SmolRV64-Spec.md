@@ -1550,6 +1550,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 413 | 15 694 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each |
 | `pend` | `smolrv64_pending` | 512 | 1 | 512 | flops | 3R, 1 set + 3 clear, bulk-clear |
 | `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the drain's head, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
+| `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the drain's head; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
 | `qbank[*].mem` | `smolrv64_frontend` | 8 | 416 | 3 328 | LUTRAM | the decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 3*PCW+PDW+SEQW+185`), its dispatch class (`gc`) included; decode reads the bundle register's slots, so the queue head feeds the IR with no logic but the record |
 
 Each PRF shard now has **its own write address** (`wa_ie`/`wa_ld`/`wa_fe`), which is §7 of
