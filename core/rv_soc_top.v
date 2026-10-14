@@ -458,19 +458,20 @@ module rv_soc_top #(
    endfunction
    wire [63:0] hpm_rdata;
    // build-id: 32b words @ 0x1000_F0{00,04,08,0c,10,14}, each read 32-bit at its own address, so
-   // the addressed word is in lane 0, where an unshifted device load takes it. The defines
-   // land in localparams first -- part-selecting a bare `define literal isn't legal in Vivado.
-   localparam [63:0] BID_STAMP  = `SMOLRV64_BUILD_STAMP;
-   localparam [31:0] BID_COMMIT = `SMOLRV64_GIT_COMMIT;
-   localparam        BID_DIRTY  = `SMOLRV64_GIT_DIRTY;
+   // the addressed word is in lane 0, where an unshifted device load takes it. The identity is
+   // the INIT value of kept flops (bid_q), not constants in this mux: a constant shapes the mux
+   // by its bits, so every commit hash and stamp would synthesize a different netlist and draw a
+   // different placement. In flops, two builds of one tree differ only in INIT bits.
+   (* dont_touch = "true" *) reg [96:0] bid_q = {`SMOLRV64_GIT_DIRTY, `SMOLRV64_GIT_COMMIT, `SMOLRV64_BUILD_STAMP};
+   always @(posedge clk) bid_q <= bid_q;
    reg [31:0] build_id_word;
    always @* case (dmem_raddr[5:2])
       4'h0:    build_id_word = 32'h534d_4f4c;   // "SMOL" magic -- monitor gates the block on this
       4'h1:    build_id_word = 32'h0000_0001;   // version
-      4'h2:    build_id_word = BID_STAMP[31:0];
-      4'h3:    build_id_word = BID_STAMP[63:32];
-      4'h4:    build_id_word = BID_COMMIT;      // <- rtl= identity (the loaded RTL commit)
-      4'h5:    build_id_word = {31'd0, BID_DIRTY};
+      4'h2:    build_id_word = bid_q[31:0];     // the stamp
+      4'h3:    build_id_word = bid_q[63:32];
+      4'h4:    build_id_word = bid_q[95:64];    // <- rtl= identity (the loaded RTL commit)
+      4'h5:    build_id_word = {31'd0, bid_q[96]};   // dirty
       default: build_id_word = 32'd0;
    endcase
    wire [63:0] dev_rdata = is_clint_r  ? clint_rdata

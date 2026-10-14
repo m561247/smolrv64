@@ -51,16 +51,6 @@
 `define PROBE_CLK_DIVIDE   (`PROBE_CLK_DIV8 / 24)   // ui_clk divisor, 1..8
 `default_nettype none
 
-`ifndef SMOLRV64_BUILD_STAMP
-`define SMOLRV64_BUILD_STAMP 64'h0
-`endif
-`ifndef SMOLRV64_GIT_COMMIT
-`define SMOLRV64_GIT_COMMIT 32'h0
-`endif
-`ifndef SMOLRV64_GIT_DIRTY
-`define SMOLRV64_GIT_DIRTY 1'b0
-`endif
-
 module rk_xcku5p(
     // Differential 200 MHz system clock (fed directly to DDR4 IP)
     input  wire       sys_clk_p,
@@ -425,7 +415,6 @@ module rk_xcku5p(
    reg  [15:0] spi_fast_half = 16'd6;    // 23.8 MHz default (HW-swept clean; ceiling ~28 MHz)
    wire        virtio_blk_sel = ui_mmio_address[19:12] == 8'h02;
    wire        virtio_net_sel = ui_mmio_address[19:12] == 8'h03;
-   wire        build_id_sel   = ui_mmio_address[19:8] == 12'h0f0;
    wire        vga_sel        = ui_mmio_address[19:12] == 8'h05;
    wire        kbd_sel        = ui_mmio_address[19:12] == 8'h04;
    wire        keys_sel       = ui_mmio_address[19:12] == 8'h06;
@@ -434,10 +423,6 @@ module rk_xcku5p(
    wire [31:0] sd_cd_gpio_readdata = {31'd0, sd_cd_sync};
    wire [31:0] virtio_blk_readdata;
    wire [31:0] virtio_net_readdata;
-   localparam [63:0] BUILD_ID_STAMP = `SMOLRV64_BUILD_STAMP;
-   localparam [31:0] BUILD_ID_GIT_COMMIT = `SMOLRV64_GIT_COMMIT;
-   localparam        BUILD_ID_GIT_DIRTY = `SMOLRV64_GIT_DIRTY;
-   reg  [31:0] build_id_readdata;
    wire        virtio_blk_irq;
    wire        virtio_net_irq;
    wire        virtio_net_queue_notify_pulse;
@@ -752,8 +737,8 @@ module rk_xcku5p(
    reg         mmio_read_d1 = 0;
    reg         mmio_read_d2 = 0;
    reg  [31:0] mmio_readdata_q = 32'd0;
-   reg  [ 7:0] rd_sel_q = 8'd0;   reg rd_dbg_q = 1'b0;
-   reg  [31:0] rd_spi_q, rd_cd_q, rd_blk_q, rd_blkdb_q, rd_net_q, rd_netdb_q, rd_vga_q, rd_kbd_q, rd_bid_q, rd_keys_q;
+   reg  [ 6:0] rd_sel_q = 7'd0;   reg rd_dbg_q = 1'b0;
+   reg  [31:0] rd_spi_q, rd_cd_q, rd_blk_q, rd_blkdb_q, rd_net_q, rd_netdb_q, rd_vga_q, rd_kbd_q, rd_keys_q;
 
    // 0x10006000, the board's keys: [3:0] key[3:0] held now, [11:8] pressed since the CPU's
    // reset (a write of 1 clears). Each key is synchronized and debounced: a level counts once it
@@ -802,14 +787,14 @@ module rk_xcku5p(
          // to mmio_readdata_q was the design's worst path at 333 MHz (-0.097 ns, from
          // virtio_net's queue_sel) once the keyboard and video pages joined it.
          if (ui_mmio_read) begin
-            rd_sel_q <= {keys_sel, build_id_sel, kbd_sel, vga_sel, virtio_net_sel, virtio_blk_sel,
+            rd_sel_q <= {keys_sel, kbd_sel, vga_sel, virtio_net_sel, virtio_blk_sel,
                          sd_cd_gpio_sel, spi_speed_sel};
             rd_dbg_q <= ui_mmio_address[11:8] == 4'hf;
             rd_spi_q <= {16'd0, spi_fast_half};       rd_cd_q    <= sd_cd_gpio_readdata;
             rd_blk_q <= virtio_blk_readdata;          rd_blkdb_q <= virtio_blk_debug_word;
             rd_net_q <= virtio_net_readdata;          rd_netdb_q <= virtio_net_debug_word;
             rd_vga_q <= vga_mmio_rdata;               rd_kbd_q   <= kbd_mmio_rdata;
-            rd_bid_q <= build_id_readdata;            rd_keys_q  <= keys_readdata;
+            rd_keys_q  <= keys_readdata;
          end
          if (mmio_read_d1)
             mmio_readdata_q <= ({32{rd_sel_q[0]}} & rd_spi_q)
@@ -818,21 +803,8 @@ module rk_xcku5p(
                              | ({32{rd_sel_q[3]}} & (rd_dbg_q ? rd_netdb_q : rd_net_q))
                              | ({32{rd_sel_q[4]}} & rd_vga_q)
                              | ({32{rd_sel_q[5]}} & rd_kbd_q)
-                             | ({32{rd_sel_q[6]}} & rd_bid_q)
-                             | ({32{rd_sel_q[7]}} & rd_keys_q);
+                             | ({32{rd_sel_q[6]}} & rd_keys_q);
       end
-   end
-
-   always @* begin
-      case (ui_mmio_address[5:2])
-        4'h0: build_id_readdata = 32'h534d4f4c; // "SMOL"
-        4'h1: build_id_readdata = 32'h00000001;
-        4'h2: build_id_readdata = BUILD_ID_STAMP[31:0];
-        4'h3: build_id_readdata = BUILD_ID_STAMP[63:32];
-        4'h4: build_id_readdata = BUILD_ID_GIT_COMMIT;
-        4'h5: build_id_readdata = {31'd0, BUILD_ID_GIT_DIRTY};
-        default: build_id_readdata = 32'd0;
-      endcase
    end
 
    assign ui_mmio_readdatavalid = mmio_read_d2;

@@ -63,7 +63,7 @@
 #define KEY0_PRESSED    0x100u
 #define KEY_GO          1                // what readline sees for a key[0] press
 
-// Platform build-id block (rk_xcku5p.v @ 0x1000F000). Same registers Linux userland
+// Platform build-id block (rv_soc_top.v @ 0x1000F000). Same registers Linux userland
 // can read via /dev/mem. Layout: [0]="SMOL" magic, [1]=version, [2:3]=RTL build stamp,
 // [4]=git commit (truncated HEAD), [5]=source-dirty flag.
 #define BUILD_ID_BASE   ((volatile uint32_t *)0x1000F000)

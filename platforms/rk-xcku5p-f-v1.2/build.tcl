@@ -307,10 +307,10 @@ puts "Git commit: $git_commit"
 puts "Source dirty: $source_dirty"
 lappend vdefines "SMOLRV64_GIT_COMMIT=32'h$git_commit"
 lappend vdefines "SMOLRV64_GIT_DIRTY=1'b$source_dirty"
-# The build stamp (rv_soc_top's BID_STAMP) is a constant in the netlist, so a stamp that differs
-# per build makes every build a different netlist with its own placement. A clean tree takes its
-# commit's date: two builds of one commit synthesize alike and their timing can be compared. A
-# dirty tree takes the wall clock; its netlist is nobody's reference.
+# The commit, the dirty bit and the build stamp are the INIT values of kept flops (rv_soc_top's
+# bid_q, csr_file's mimpid_q), so they do not shape the netlist: a probe of a dirty tree places as
+# the gate of its commit does. A clean tree takes its commit's date as the stamp, so two builds
+# of one commit make the same bitstream; a dirty tree takes the wall clock.
 set build_stamp [clock format [clock seconds] -format "%Y%m%d%H%M%S"]
 if {!$source_dirty && [catch {exec git -C $repo_root log -1 --format=%cd --date=format:%Y%m%d%H%M%S HEAD} git_date] == 0} {
     set build_stamp $git_date

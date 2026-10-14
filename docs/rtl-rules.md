@@ -1059,6 +1059,19 @@ own RTL plus one flop failed by 0.5 ns) -- bisect at `PROBE_CLK_DIV8=72`, where 
 cannot fail, and let the device tree's timebase be wrong; (c) when a cosim repro exists,
 do not bisect on the board at all.
 
+**A PROBE PREDICTS ITS GATE ONLY IF THE BUILD'S IDENTITY IS NOT LOGIC.** The commit hash, the dirty
+bit and the build stamp were constants in the read muxes that report them (the CSR file's `mimpid`,
+the SoC's build-id block, and a copy in the board top that no address reached). A constant shapes
+the logic it feeds by its bits, so every commit and every stamp synthesized a different netlist and
+drew its own placement: on 2026-10-13 the F FIFO stack's probe placed at -0.126 ns and met, and the
+gate of the same RTL, committed as 8e2bd380, placed at -0.475 and failed. The identity is now the
+INIT value of kept flops (`bid_q`, `mimpid_q`, DONT_TOUCH): two builds of one tree differ only in
+those INIT bits. Measured the same night: a dirty tree's synthesis and its clean commit's (every
+identity field different) wrote 207 MB EDIF netlists that differ in 34 lines, the INIT of the 34
+identity flops whose bit differs, and, implemented, the commit's gate and a dirty copy of its tree
+placed and routed alike, stage by stage, to WNS -0.117786 and TNS -46.204342 ns. Anything that
+varies per build -- a hash, a date, a counter -- enters the design that way or not at all.
+
 **I3. Bring a replacement up as a shadow, checked every cycle.**
 `smolrv64_rename` + `smolrv64_prf` ran against the real instruction stream with
 `rv_regfile` still the operand source and an always-on comparison between them

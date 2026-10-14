@@ -2,7 +2,9 @@
 
 // mimpid = the truncated git commit of the build's HEAD, injected by the build
 // (build.tcl for FPGA, the sim run-scripts for simulation) -- mirrors SmolRV64's
-// SMOLRV64_GIT_COMMIT mechanism. Fallback 0 for an un-passed build.
+// SMOLRV64_GIT_COMMIT mechanism. Fallback 0 for an un-passed build. It is the INIT value of
+// kept flops (mimpid_q), not a constant in the read mux: a constant shapes the mux by its bits,
+// so every commit hash would synthesize a different netlist and draw a different placement.
 `ifndef SMOLRV64_GIT_COMMIT
  `define SMOLRV64_GIT_COMMIT 32'h0
 `endif
@@ -173,6 +175,8 @@ module csr_file
    // 0) fit in 39 bits with bit38=0 so they round-trip exactly.  See va_codec.vh.
    reg [39:0] mepc, mtval, sepc, stval;
    reg [63:0] mcycle, minstret;      // Zicntr: free-running cycles + retired instructions
+   (* dont_touch = "true" *) reg [31:0] mimpid_q = `SMOLRV64_GIT_COMMIT;
+   always @(posedge clk) mimpid_q <= mimpid_q;
    reg        minstret_wr_q;         // a minstret write last cycle: drop the writer's own (delayed) retirement
 
    // Zihpm: HPMN programmable counters mhpmcounter3 .. mhpmcounter(2+HPMN) (matches the DTB's
@@ -497,7 +501,7 @@ module csr_file
         // mimpid = the build's truncated HEAD commit).
         MVENDORID:  rdata = 64'd0;
         MARCHID:    rdata = 64'd9;
-        MIMPID:     rdata = {32'd0, `SMOLRV64_GIT_COMMIT};
+        MIMPID:     rdata = {32'd0, mimpid_q};
         MHARTID:    rdata = 64'd0;
         FFLAGS:     rdata = {59'd0, fcsr[4:0]};
         FRM:        rdata = {61'd0, fcsr[7:5]};
