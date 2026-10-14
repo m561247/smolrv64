@@ -1235,9 +1235,11 @@ set in the stage register.
   PA of the same value, since a committed store outlives a trap's flush), its bytes covering the
   load's inside one doubleword. A load is forwardable (`l_fwd`, a register per load) when exactly
   one older live store overlaps it, `cov` holds for that store, its data is in, it is translated,
-  cached and not faulting, and no older store's address is unknown -- so no store can arrive that
-  the forward would go ahead of, and a forwarded load is never watched or replayed (`e_acc` leaves
-  it out). The flag clears in the edge its store drains, so the store it names never outlives it.
+  cached and not faulting, and no older store's address is unknown unless the load may go ahead of
+  unknown addresses (the dependence table's wait bit clear, as for a load that reads memory). A
+  forwarded load counts as having reached memory (`e_acc`): a store older than it whose address then
+  arrives and overlaps it flags it for replay; its own forwarding store's overlap is set aside while
+  the load stands forwarded (latched as the forward starts, dropped with a replay). The flag clears in the edge its store drains, so the store it names never outlives it.
   `smolrv64_lq` offers a forwardable held load like a clear one (`x_fwd`); it takes the port like
   any queued load and starts as a fast load in the LSU, which asks the D$ for nothing: the store's
   bytes, read in the start cycle through the same landing bypass as the drain's and placed as the D$

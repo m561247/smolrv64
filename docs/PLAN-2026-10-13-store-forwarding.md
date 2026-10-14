@@ -100,13 +100,16 @@ full queue in 4 K, and it starts 1,381,490.
 
 FWD-SIM (Navigation / HTML5 / SQLite / PDF Rendering, load-cycles, with the queue):
 
-- **An unknown address between the store and the load**: 5.15 M / 1.34 M / 1.81 M / 0.28 M. Unknown
-  stores older than the forwarding store cannot matter -- it covers the load -- but there are
-  almost none (5 K / 35 K / 29 K / 63 K): the unknowns lie between the store and the load. A load
-  can forward past them speculatively, as loads already go ahead of unknown addresses, if a store
-  between the two arriving and overlapping flags it for replay like a load that read memory
-  (`e_acc` would then include it, and the overlap check would exclude the forwarding store and the
-  stores older than it).
+- **An unknown address between the store and the load** (5.15 M / 1.34 M / 1.81 M / 0.28 M
+  load-cycles): done as speculative forwarding. A load forwards past older unknown addresses when
+  the dependence table lets it go ahead of them, counts as having reached memory, and is replayed if
+  a store's address arrives that overlaps it; its forwarding store's overlap is set aside while it
+  stands forwarded. Unknown stores older than the forwarding store cannot matter but are not told
+  apart (almost none: 5 K / 35 K / 29 K / 63 K), so one of them overlapping replays the load. GB5
+  slices, cycles: Navigation -0.71%, HTML5 -0.36%, SQLite -0.30%, PDF Rendering 0.00%. Training the
+  table only on addresses that arrive after the load's own (the overlap with a store whose address
+  was known first says nothing about the wait) speeds Navigation another 0.82% but costs the boot
+  0.58% in more replays; not taken.
 - **The port**: 5.33 M / 1.59 M / 1.82 M / 0.43 M load-cycles of forwardable loads waiting while
   another load starts, the drain has the port, or the LSU takes nothing; in the 300 M boot, 48.2 M,
   32.7 M of them behind the drain (a committed store at the queue head has the port first). A

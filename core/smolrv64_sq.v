@@ -493,13 +493,15 @@ module smolrv64_sq
          assign l_block_q[gl] = blk_q;
          // FORWARDABLE: exactly one older live store overlaps the load, it holds all the load's bytes
          // (cov), its data is in, it is translated, cached and not faulting, and no older store's
-         // address is unknown -- so no store can still arrive that a forward would go ahead of. A
-         // register, like the block; cleared in the edge its store drains, so the slot it names
-         // never outlives the store (and is read in the forward's start cycle, see f_data).
+         // address is unknown unless the load may go ahead of unknown addresses (its wait bit
+         // clear): a forwarded load counts as having reached memory, so a store whose address then
+         // arrives and overlaps it flags it for replay -- its forwarding store aside (fd_*, below). A
+         // register, like the block; cleared in the edge its store drains, so the slot it names never
+         // outlives the store (and is read in the forward's start cycle, see f_data).
          wire [NENT-1:0] kov = oldm & conf[gl];
          wire            k1  = (kov != {NENT{1'b0}}) & ((kov & (kov - 1'b1)) == {NENT{1'b0}});
          wire            fwn = l_av[gl] & k1 & (|(kov & cov[gl] & dv & tv & ~flt & ~unc))
-                             & ~(|(oldm & ~av)) & ~(c_take & kov[head]);
+                             & ~(l_wt[gl] & (|(oldm & ~av))) & ~(c_take & kov[head]);
          reg             fw_q;  reg [IDXB-1:0] fws_q;
          initial begin fw_q = 1'b0; fws_q = {IDXB{1'b0}}; end
          always @(posedge clk) begin
@@ -508,6 +510,19 @@ module smolrv64_sq
          end
          assign l_fwd[gl] = fw_q;
          assign fws_w[gl*IDXB +: IDXB] = fws_q;
+         // THE FORWARDING STORE, while the load stands forwarded: latched as the forward starts and
+         // held while the load counts as having reached memory (a replay or the entry's end drops it).
+         // Its overlap is the one that does not overtake the load: the violation check and the
+         // training leave it out, and the overlap matrix itself is never written for it.
+         reg             fd_v;  reg [IDXB-1:0] fd_s;
+         initial begin fd_v = 1'b0; fd_s = {IDXB{1'b0}}; end
+         wire            fd_go = f_go & (f_lix == gl[LQIB-1:0]);
+         always @(posedge clk) begin
+            fd_v <= ~reset & (fd_go | (fd_v & l_acc[gl]));
+            if (fd_go) fd_s <= f_s;
+         end
+         wire [NENT-1:0] fdm = fd_v ? ({{(NENT-1){1'b0}}, 1'b1} << fd_s) : {NENT{1'b0}};
+         wire [NENT-1:0] ovr = oldm & conf[gl] & ~fdm;   // older stores overlapping it, its forwarding store aside
          reg unk_q;  initial unk_q = 1'b0;      // MEM_ALIAS_UNK: the unknown-address arm alone, a cycle old
          always @(posedge clk) unk_q <= l_av[gl] & (|(oldm & ~av));
          assign l_block_unk_q[gl] = unk_q;
@@ -516,7 +531,7 @@ module smolrv64_sq
          // store's address arrived earlier, or the load reached memory after it), and the store
          // address ARRIVING this cycle against a load that already has (the flag is then a flop in
          // the cycle the store's address is visible, before the store can commit and retire)
-         assign l_viol[gl]        = l_av[gl] & l_acc[gl] & ((|(oldm & conf[gl])) | arr_ov);
+         assign l_viol[gl]        = l_av[gl] & l_acc[gl] & ((|ovr) | arr_ov);
          // RESOLUTION: the cycle the last older store with an unknown address gets one, the load
          // learns whether it overlaps an older store. A pulse (registered), one of two: it did not
          // (l_res_c) or it did (l_res_a) -- the training signal of the wait table, whether the load
@@ -529,7 +544,7 @@ module smolrv64_sq
             if (!l_av[gl] || reset) was_unk <= 1'b0;
             else begin
                was_unk <= unk_now;
-               if (!unk_now && was_unk) begin r_c <= ~(|(oldm & conf[gl]));  r_a <= |(oldm & conf[gl]); end
+               if (!unk_now && was_unk) begin r_c <= ~(|ovr);  r_a <= |ovr; end
             end
          end
          assign l_res_c[gl] = r_c;  assign l_res_a[gl] = r_a;

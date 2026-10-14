@@ -335,9 +335,10 @@ module smolrv64_lq
    generate for (gd = 0; gd < NENT; gd = gd + 1) begin : g_pch
       assign e_pch[gd*PCHB +: PCHB] = pc[gd][PCHB:1];
    end endgenerate
-   // A forwarded load has not reached memory: it read the store it is ordered after, every older
-   // store's address was known, so no store can arrive that it went ahead of.
-   assign e_acc = v & sent & ~fwd;
+   // A forwarded load counts as having reached memory: a store older than it whose address arrives
+   // and overlaps it flags it for replay. Its forwarding store does not (the store queue sets that
+   // overlap aside while the load stands forwarded).
+   assign e_acc = v & sent;
    wire [IDXB-1:0] xi = ring_oldest(rdy_m, tail);
    assign x_head  = hd[xi];
    assign x_v     = |rdy_m;
@@ -499,9 +500,6 @@ module smolrv64_lq
       if (x_v & x_take & x_fwd & ~(e_fwd[x_idx] & mem[x_idx] & ~unc[x_idx] & ~fw_busy))
          $fatal(1, "smolrv64_lq: entry %0d forwards without a forwarding store (fwd=%b mem=%b unc=%b busy=%b)",
                 x_idx, e_fwd[x_idx], mem[x_idx], unc[x_idx], fw_busy);
-      if (l_v & fwd[l_idx] & (unk_q[l_idx] | rpl[l_idx] | viol[l_idx]))
-         $fatal(1, "smolrv64_lq: forwarded entry %0d lands watched (unk=%b rpl=%b viol=%b)",
-                l_idx, unk_q[l_idx], rpl[l_idx], viol[l_idx]);
       if (w_v & ~(v[w_idx] & av[w_idx] & ~tv[w_idx]))
          $fatal(1, "smolrv64_lq: the walker's answer for entry %0d is not for a live untranslated entry", w_idx);
       if (w_v & a_v & (a_idx == w_idx))
