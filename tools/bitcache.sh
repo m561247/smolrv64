@@ -36,7 +36,7 @@ tree_id() {
     local commit d
     commit=$(git -C "$here" rev-parse --short=12 HEAD)
     d=$( (cd "$here" && git diff HEAD -- "${diff_paths[@]}" "${excl[@]}" 2>/dev/null
-          git ls-files -o --exclude-standard -- "${diff_paths[@]}" 2>/dev/null | grep -v -E '\.(log|linehex|elf|bin)$' | sort | xargs -r cat) | sha1sum | cut -c1-8)
+          git ls-files -o --exclude-standard -- "${diff_paths[@]}" 2>/dev/null | grep -v -E '\.(log|linehex|elf|bin)$' | LC_ALL=C sort | xargs -r cat) | sha1sum | cut -c1-8)
     if [ -n "$(cd "$here" && git status --porcelain -- "${diff_paths[@]}" "${excl[@]}" 2>/dev/null | grep -v -E '\.(log|linehex|elf|bin)$')" ]
     then echo "$commit-d$d"; else echo "$commit"; fi
 }
@@ -44,13 +44,14 @@ tree_id() {
 # The CONTENT of the build's inputs, with no reference to a commit: every file under the build
 # paths and third_party (tracked, and untracked but not ignored), by path and git blob hash, as the
 # working tree holds them. A dirty probe and the commit made of it share it; the gate's identity
-# stamp (tools/gate.sh) relies on exactly that.
+# stamp (tools/gate.sh) relies on exactly that. The list is sorted by bytes (LC_ALL=C): a locale's
+# collation orders it differently on coffee (GNU, en_US) and on M5 (BSD), and so did the id.
 content_id() {
     local list
     local cexcl=(':(exclude)*.xpr' ':(exclude)*.log' ':(exclude)src/mem.linehex')
     list=$(cd "$here" && { git ls-files -c -- "${diff_paths[@]}" third_party "${cexcl[@]}"
                            git ls-files -o --exclude-standard -- "${diff_paths[@]}" | grep -v -E '\.(log|linehex|elf|bin|flock)$'
-                         } | sort -u | while read -r f; do [ -f "$f" ] && echo "$f"; done)
+                         } | LC_ALL=C sort -u | while read -r f; do [ -f "$f" ] && echo "$f"; done)
     (cd "$here" && paste <(echo "$list") <(echo "$list" | git hash-object --stdin-paths)) | sha1sum | cut -c1-12
 }
 
