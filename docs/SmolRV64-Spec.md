@@ -902,13 +902,15 @@ is empty, and no in-core op takes the register while one is in flight.
 
 A CSR or system op (SYSTEM opcode: `csr*`, `ecall`/`ebreak`/`xret`/`wfi`/`sfence.vma`, the
 irqop pseudo-op) is dispatch class S and goes alone, so in slot A: it issues in lane A, which
-hands the SYSQ its record and rs1 in its execute cycle (`iss_sys`); in the lane it is a late op
+hands the SYSQ its record and rs1 in its execute cycle (`sy_ld`); in the lane it is a late op
 that does nothing else (no multiply, divide, address or branch resolution, whatever its bits
 look like: a fetch fault's instruction is 0, which reads as a load), and its FP sources (an FP op
 trapping at FS off) are no sources to the lane. At most one is in flight: every one but a CSR op
 is serialising at dispatch (`ser_block` drains the ROB and the store queue before it and lets
 nothing dispatch behind it), and a CSR op dispatches without draining but only once the CSR op
-before it has fired (`csr_infl`), so the SYSQ is free when lane A hands one over. The SYSQ is one
+before it has fired (`csr_infl`), so the SYSQ is free when lane A hands one over -- or holds a
+load's or store's fault or replay, which the SYSQ takes at the ROB head with no credit: the system
+op is younger, dies at that record's redirect, and is not loaded over it. The SYSQ is one
 register `{rob, prd, rd_v, is_csr, func,
 addr, src (rs1 from lane A, or zimm), pc, seq, insn}` and its fire is from
 flops: `sy_fire = sy_at_head & sy_lane_ok & (~sy_instret | sy_head_q)`, where `sy_at_head` is

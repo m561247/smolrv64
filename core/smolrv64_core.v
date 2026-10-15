@@ -2407,14 +2407,17 @@ module smolrv64_core
    // is younger than the faulting head.
    wire qf_in = qfr_v & ~(sy_v & sy_qf);
    // A SYSTEM OP ISSUES IN LANE A (it goes alone, so in slot A), which hands the SYSQ its record and
-   // rs1 in its execute cycle: the serialising credits leave the SYSQ free then (a CSR op dispatches
-   // after the one before it fires, every other system op into a drained machine).
+   // rs1 in its execute cycle (sy_ld): the serialising credits leave the SYSQ free then (a CSR op
+   // dispatches after the one before it fires, every other system op into a drained machine), or
+   // holding a queue entry's fault or replay, which no credit orders. That record is the ROB head's,
+   // so the op is younger, dies at its redirect, and is not loaded over it.
    `PL_DECL(ya_)
    assign `PL_REC(ya_) = l_pl[0];
    wire                iss_sys  = l_iss[0] & is_sysq(ya_insn, ya_illegal, ya_fault);
+   wire                sy_ld    = iss_sys & ~(sy_v & sy_qf);
    wire                ya_trap  = ya_illegal | ya_fault;
-   wire                sy_v_n   = ~(reset | redirect) & (qf_in | iss_sys | (sy_v & ~sy_fire & ~dead(sy_rob)));
-   wire [ROB_IDXB-1:0] sy_rob_n = qf_in ? qfr_rob : iss_sys ? l_rob[0] : sy_rob;
+   wire                sy_v_n   = ~(reset | redirect) & (qf_in | sy_ld | (sy_v & ~sy_fire & ~dead(sy_rob)));
+   wire [ROB_IDXB-1:0] sy_rob_n = qf_in ? qfr_rob : sy_ld ? l_rob[0] : sy_rob;
    reg  sy_at_head;
    initial sy_at_head = 1'b0;
    always @(posedge clk) sy_at_head <= sy_v_n & (sy_rob_n == rob_head_n_idx);
@@ -2444,7 +2447,7 @@ module smolrv64_core
       sy_head_q <= ~reset & sy_at_head & ~sy_fire;
       if (sy_fire) sy_v <= 1'b0;
       if (dead(sy_rob)) sy_v <= 1'b0;                   // the kill, before the load arms: a new op wins
-      if (iss_sys) begin
+      if (sy_ld) begin
          sy_v <= 1'b1; sy_rob <= l_rob[0]; sy_prd <= ya_prd; sy_rd_v <= ya_rd_v;
          sy_is_csr <= ya_is_csr; sy_func <= ya_csr_func; sy_addr <= ya_imm[11:0];
          sy_instret <= ya_is_csr & ((ya_imm[11:0] == 12'hC02) | (ya_imm[11:0] == 12'hB02));
@@ -2470,7 +2473,11 @@ module smolrv64_core
       if (reset | redirect) sy_v <= 1'b0;                // flush arm last (I11); its own redirect included
    end
    always @(posedge clk) if (!reset) begin
-      if (iss_sys & sy_v & ~sy_fire)     $fatal(1, "smolrv64_core: a system op issued into a busy SYSQ (it is serialising)");
+      if (sy_ld & sy_v & ~sy_fire)
+         $fatal(1, "smolrv64_core: a system op (pc %h insn %h rob %0d) issued into a SYSQ holding system op rob %0d (csr=%b insn %h; head %0d): a serialising credit is wrong",
+                ya_pc, ya_insn, l_rob[0], sy_rob, sy_is_csr, sy_insn, rob_head_idx);
+      if (iss_sys & ~sy_ld & (l_rob[0] == sy_rob))
+         $fatal(1, "smolrv64_core: a system op dropped behind a queue entry's record is that entry (rob %0d)", sy_rob);
       if (qf_in & sy_v & ~sy_is_csr)      $fatal(1, "smolrv64_core: a queue entry's fault displaces a SYSQ op that is not a younger CSR op");
       if (qf_sq & qf_lq)                 $fatal(1, "smolrv64_core: a load and a store both fault as the ROB head");
       // (a queue entry's trap is a load's or store's: younger work may be in flight, and dies)
