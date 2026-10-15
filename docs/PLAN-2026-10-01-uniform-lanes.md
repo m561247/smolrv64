@@ -633,6 +633,40 @@ shards 3R1W each. **After 5.4f:** the IW=4 timing build and the default flipped 
 GB5), then the pipe trace (step 6, moved ahead of 5.5: Tommy wants to see the front end
 first), then 5.5.
 
+**Refined 2026-10-14 (Tommy), with the counts.** The retired ops each move takes, per 50 M
+instructions of the GB5 checkpoint slices at the 64-row ROB (tb FPORT-SIM):
+
+| slice | divides | int-to-FP | CSR reading rs1 | stores | FP stores | store data reads |
+|---|---:|---:|---:|---:|---:|---:|
+| Navigation | 1,859 | 0 | 3,718 | 8,864,976 | 0 | 4,511,307 |
+| HTML5 | 7,802 | 3,361 | 4,879 | 7,442,558 | 34,298 | 4,150,663 |
+| SQLite | 25,876 | 109,008 | 4,080 | 5,920,229 | 129,330 | 3,245,588 |
+| PDF Rendering | 5,063 | 31,152 | 3,307 | 9,341,570 | 64,341 | 1,071,906 |
+| Camera | 1,441 | 444,444 | 2,689 | 586,930 | 3,109,304 | 88,131 |
+| Gaussian Blur | 1,483 | 167,524 | 2,747 | 311,745 | 2,571,442 | 88,745 |
+| Structure from Motion | 1,323 | 243,344 | 2,461 | 376,652 | 2,678,320 | 81,211 |
+
+- **The order:** moves 2 (divides), 4 (system ops) and 3 (FP ops with an integer source), after
+  which the shared port reads FP registers only and the integer shards lose its three ports
+  (10 -> 7 at IW=3, 12 -> 9 at IW=4); then 5 (the FP file as two shards by writer: 24 LUTRAM
+  read copies -> 8); then the stores.
+- **A handoff, not a read.** Each moved op enters its slot's lane scheduler (lane A for a system
+  op, as a head op does), waits there for its integer sources, and the lane's execute stage hands
+  the values with the op's record to the unit behind the old port: the MD stage, the SYSQ, the
+  F stage. The rule that a group holds at most one op of those units stays: each unit still takes
+  one op at a time. A dispatch credit covers each handoff so a lane never issues into a full one:
+  one divide in flight (the MD stage, as today), the serialising ops' own credits for the SYSQ, and
+  for the int-to-FP ops a handoff register the F stage takes beside its FIFO's pick (0.9% of
+  Camera's instructions: its depth is measured, not assumed).
+- **The stores (Tommy: "insert STD pseudo ops for those stores that do not have their data ready").**
+  Today 44-56% of the integer slices' stores read their data through the store queue's port (in a
+  register at allocation, or left out when two snooped values arrive in one cycle: 5% of
+  Navigation's landings). Instead each store's data bank is fixed at dispatch -- its lane's, or
+  the FP pipe's for an FP store -- and one writer owns each bank: a store whose data is ready writes
+  it from its address op's own rs2 read; any other dispatches an STD pseudo-op that waits in its
+  scheduler for rs2, reads it and writes the bank. The snoop, the read port and the left-outs go.
+  It scales to several stores a cycle (Tommy). If it costs more than it saves, the read port stays.
+
 ## Step 5.5 in detail: load-hit speculation (design, 2026-10-05)
 
 **Today, a hit.** X is the load's execute cycle in its lane (address generation); M fills and

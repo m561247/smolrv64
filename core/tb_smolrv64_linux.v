@@ -538,6 +538,22 @@ module tb;
    // internally pipelined and only held to one outstanding by a busy flag / a discarded
    // tag, so their tier is cheap -- but cheap is not the same as worth doing.
    reg [63:0] n_stmul, n_stdiv, n_stfpu;
+   // FPORT-SIM: retired ops whose integer operands the FP/MD/SYS port reads -- divides, FP ops
+   // with an integer source, CSR ops reading rs1 and sfence.vma -- and the stores, integer and FP,
+   // whose data the store queue reads when it is in a register file at allocation
+   reg [63:0] fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd;
+   initial begin fx_div = 0; fx_i2f = 0; fx_sys = 0; fx_st = 0; fx_fst = 0; fx_rd = 0; end
+   function automatic [2:0] fx_cls(input [31:0] i);   // 1 div, 2 int->FP, 3 sys, 4 store, 5 FP store
+      begin
+         fx_cls = 3'd0;
+         if (((i[6:0] == 7'b0110011) || (i[6:0] == 7'b0111011)) && (i[31:25] == 7'b0000001) && i[14]) fx_cls = 3'd1;
+         else if ((i[6:0] == 7'b1010011) && ((i[31:27] == 5'b11010) || (i[31:27] == 5'b11110)))         fx_cls = 3'd2;
+         else if ((i[6:0] == 7'b1110011) && (((i[13:12] != 2'b00) && !i[14] && (i[19:15] != 5'd0))
+                                             || ((i[14:12] == 3'b000) && (i[31:25] == 7'b0001001))))      fx_cls = 3'd3;
+         else if (i[6:0] == 7'b0100011)                                                                    fx_cls = 3'd4;
+         else if (i[6:0] == 7'b0100111)                                                                    fx_cls = 3'd5;
+      end
+   endfunction
    // STORE BUFFER: is it actually reordering anything?
    //   n_ldstart  loads that began an access
    //   n_ldreord  ...of those, ones that passed an older UNCOMMITTED store
@@ -1005,6 +1021,14 @@ module tb;
       for (c = 0; ((ncyc == 0) || (c < ncyc)) && !tohost_done && ((max_ret == 0) || (nret < max_ret)); c = c + 1) begin
          @(negedge clk);
                   for (nrk = 0; nrk < `SMOLRV64_IW; nrk = nrk + 1) nret = nret + retire[nrk];
+                  if (meas && dut.core.sq_r_v) fx_rd = fx_rd + 1;   // the store queue's data read
+                  if (meas)
+                     for (nrk = 0; nrk < `SMOLRV64_IW; nrk = nrk + 1)
+                        if (retire[nrk])
+                           case (fx_cls(dut.core.retire_insn[nrk*32 +: 32]))
+                              3'd1: fx_div = fx_div + 1;  3'd2: fx_i2f = fx_i2f + 1;  3'd3: fx_sys = fx_sys + 1;
+                              3'd4: fx_st  = fx_st + 1;   3'd5: fx_fst = fx_fst + 1;  default: ;
+                           endcase
                   if (!meas && (nret >= meas_from)) begin
                      meas = 1'b1;  meas_c = c + 1;  meas_ret = nret;
                      $display("MEASURE-FROM retire %0d at cycle %0d: the statistics start here", nret, c + 1);
@@ -1093,6 +1117,8 @@ module tb;
 
       $display("MEMDEP replays=%0d", dut.core.rp_cnt);
       $display("SQ-SIM data landings=%0d left-out=%0d (fetched by the data read instead)", dut.core.u_sq.ln_n, dut.core.u_sq.ln_out);
+      $display("FPORT-SIM retired: divides=%0d int-to-FP=%0d csr/sfence reading rs1=%0d | stores=%0d FP stores=%0d | the store queue's data reads=%0d",
+               fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd);
       $display("MEMDEP loads blocked only by unknown older store addresses: resolved clear=%0d (waited %0d cycles), resolved aliased=%0d (waited %0d cycles)",
                dut.core.u_sq.sp_clear, dut.core.u_sq.sp_clear_cyc, dut.core.u_sq.sp_alias, dut.core.u_sq.sp_alias_cyc);
       $display("SQ  loads=%0d reordered=%0d (%0d.%0d%%)  ld_block cycles=%0d (%0d.%0d%%)  mean occ=%0d.%02d  full=%0d",
