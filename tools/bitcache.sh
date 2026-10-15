@@ -85,7 +85,8 @@ put)
     plat=${1:-$plat_default}
     bit=$plat/$PROJ.runs/impl_1/$PROJ.bit
     [ -f "$bit" ] || { echo "bitcache: no bitstream at $bit" >&2; exit 1; }
-    rpt=$plat/$PROJ.runs/impl_1/${PROJ}_timing_summary_postroute_physopted.rpt
+    rpt=$plat/$PROJ.runs/impl_1/${PROJ}_timing_summary_closed.rpt       # make physopt's, when it closed
+    [ -f "$rpt" ] || rpt=$plat/$PROJ.runs/impl_1/${PROJ}_timing_summary_postroute_physopted.rpt
     [ -f "$rpt" ] || rpt=$plat/$PROJ.runs/impl_1/${PROJ}_timing_summary_routed.rpt
     k=$(key "$plat")
     d=$BITCACHE/$k
@@ -93,7 +94,8 @@ put)
     mkdir -p "$d"
     cp "$bit" "$d/$PROJ.bit"
     [ -f "$rpt" ] && cp "$rpt" "$d/timing_summary.rpt"
-    dcp=$plat/$PROJ.runs/impl_1/${PROJ}_postroute_physopt.dcp
+    dcp=$plat/$PROJ.runs/impl_1/${PROJ}_closed.dcp
+    [ -f "$dcp" ] || dcp=$plat/$PROJ.runs/impl_1/${PROJ}_postroute_physopt.dcp
     [ -f "$dcp" ] || dcp=$plat/$PROJ.runs/impl_1/${PROJ}_routed.dcp
     [ -f "$dcp" ] && cp "$dcp" "$d/routed.dcp"
     grep -o 'Verilog_Define Name="[^"]*" Val="[^"]*"' "$plat/$PROJ.xpr" | sed 's/Verilog_Define Name="//; s/" Val="/=/; s/"$//; s/&apos;/'"'"'/g; s/&quot;/"/g' > "$d/defines.txt" || true

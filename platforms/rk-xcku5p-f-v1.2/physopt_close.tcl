@@ -1,39 +1,44 @@
 # physopt_close.tcl -- last-mile timing closure on the routed checkpoint (no re-place/route).
-# The impl run (Performance_ExplorePostRoutePhysOpt + ExtraTimingOpt place / AggressiveExplore
-# route+post-route physopt) landed NO_VIRTIO_NET at WNS=-0.023 -- route/placement-bound, not
-# logic: (A) blk-FSM state[2] high fanout -> dma_cmd_wdata_reg[*]/CE (5 levels, 75% route);
-# (B) probe_core/u_arb mem_wdata -> probe_cdc, 0 logic levels, pure wire (CDC).
-# The build's post-route physopt used AggressiveExplore; AggressiveFanoutOpt (fanout-driver
-# replication) was NOT tried and directly targets (A). Emit the bit iff WNS reaches >= 0.
+# phys_opt_design directives in rounds -- fanout-driver replication, alternate replication,
+# AggressiveExplore, Explore -- each pass working on the paths the one before left worst, while a
+# round still gains. Writes the closed checkpoint, its timing summary and the bitstream iff WNS
+# reaches >= 0; `make physopt` banks them (tools/bitcache.sh), and tools/gate.sh runs it on a
+# build that misses.
 set rundir rk_xcku5p.runs/impl_1
 # START FROM THE RUN'S OWN POST-ROUTE PHYS_OPT RESULT, not from the routed checkpoint before
 # it. The impl strategy already runs post-route phys_opt (build.tcl: AggressiveExplore), and
 # on 2026-09-03 that pass was worth 134 ps: routed -0.169 / 709 failing endpoints became
-# -0.035 / 82. Opening rk_xcku5p_routed.dcp here threw that away and REPLACED the run's pass
-# with this walk instead of stacking on it -- which is why `make physopt` recovered only
-# 67 ps on 2026-09-01 against the 134 the run itself found. The physopted checkpoint is the
-# one the run's WNS gate judged; it is the one a last-mile pass must start from.
+# -0.035 / 82. A walk that opens rk_xcku5p_routed.dcp throws that away and REPLACES the run's
+# pass instead of stacking on it. The physopted checkpoint is the one the run's WNS gate
+# judged; it is the one a last-mile pass starts from.
 set start_dcp $rundir/rk_xcku5p_postroute_physopt.dcp
 if {![file exists $start_dcp]} { set start_dcp $rundir/rk_xcku5p_routed.dcp }
+# what a closed walk writes, and nothing an earlier walk left: `make physopt` banks what it finds
+file delete -force $rundir/rk_xcku5p_closed.dcp $rundir/rk_xcku5p_timing_summary_closed.rpt
 puts "PHYSOPT-CLOSE: opening $start_dcp"
 open_checkpoint $start_dcp
 proc curwns {} { return [get_property SLACK [lindex [get_timing_paths -max_paths 1 -nworst 1 -setup] 0]] }
-puts "PHYSOPT-CLOSE: start WNS=[curwns]"
-foreach d {AggressiveFanoutOpt AlternateReplication AggressiveExplore Explore} {
-    if {[curwns] >= 0} { break }
-    puts "PHYSOPT-CLOSE: phys_opt_design -directive $d ..."
-    if {[catch {phys_opt_design -directive $d} err]} { puts "  ($d skipped: $err)" }
-    puts "PHYSOPT-CLOSE: after $d WNS=[curwns]"
+set wns [curwns]
+puts "PHYSOPT-CLOSE: start WNS=$wns"
+for {set round 1} {$round <= 4 && $wns < 0} {incr round} {
+    set before $wns
+    foreach d {AggressiveFanoutOpt AlternateReplication AggressiveExplore Explore} {
+        if {$wns >= 0} { break }
+        if {[catch {phys_opt_design -directive $d} err]} { puts "  ($d skipped: $err)" }
+        set wns [curwns]
+        puts "PHYSOPT-CLOSE: round $round $d WNS=$wns"
+    }
+    if {$wns <= $before} { break }
 }
-set final [curwns]
-puts "PHYSOPT-CLOSE: FINAL WNS=$final ns"
-if {$final >= 0} {
+puts "PHYSOPT-CLOSE: FINAL WNS=$wns ns"
+if {$wns >= 0} {
     catch {set_property SEVERITY {Warning} [get_drc_checks MDRV-1]}
     write_checkpoint -force $rundir/rk_xcku5p_closed.dcp
+    report_timing_summary -file $rundir/rk_xcku5p_timing_summary_closed.rpt
     write_bitstream  -force $rundir/rk_xcku5p.bit
-    puts "PHYSOPT-CLOSE: BITSTREAM WRITTEN (WNS=$final)"
+    puts "PHYSOPT-CLOSE: BITSTREAM WRITTEN (WNS=$wns)"
 } else {
     write_checkpoint -force $rundir/rk_xcku5p_physopt2.dcp
-    puts "PHYSOPT-CLOSE: STILL NEGATIVE (WNS=$final) -- no bit; checkpoint saved for inspection"
+    puts "PHYSOPT-CLOSE: STILL NEGATIVE (WNS=$wns) -- no bit; checkpoint saved for inspection"
 }
 close_project
