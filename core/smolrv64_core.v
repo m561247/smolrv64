@@ -407,23 +407,25 @@ module smolrv64_core
    // ---- renaming and the sharded PRF ----------------------------------------------
    localparam integer RN_IDXB  = 7;
    localparam integer RN_PBITS = RN_IDXB + 3;   // 3 shard bits: room for a 5th shard (the 3rd ALU)
+   // the shards' sizes, one place for rename's free lists and the PRF's arrays: each lane's, and
+   // the FP file's SH_FL (FP loads) and SH_FF (the F stage)
+   localparam integer RN_NINT = 64, RN_NFL = 64, RN_NFF = 64;
 `include "smolrv64_shards.vh"
    localparam integer NL = IW;                     // the lanes: slot k's ALU-class ops go to lane k
    function automatic [3:0] ones_nl(input [NL-1:0] v);   // how many of the lanes' bits are set
       integer i;
       begin ones_nl = 4'd0; for (i = 0; i < NL; i = i + 1) ones_nl = ones_nl + {3'd0, v[i]}; end
    endfunction
-   function automatic sh_used(input [2:0] sh);     // lanes 0..IW-1 and FP slices 4..4+IW-1
-      sh_used = ({1'b0, sh[1:0]} < IW[2:0]);
+   function automatic sh_used(input [2:0] sh);     // lanes 0..IW-1 and the two FP shards
+      sh_used = sh[2] ? ((sh == SH_FL) | (sh == SH_FF)) : ({1'b0, sh[1:0]} < IW[2:0]);
    endfunction
 
 
-   // An f-register destination takes the FP file's slice of its slot (SH_F0/F1/F2 for A/B/C),
-   // whoever writes it: the file has a bank per writer (smolrv64_prf). Every other destination
-   // takes its slot's lane shard (SH_IE/IE2/IE3), whatever produces it: the lane's write
-   // register is the shard's one writer, carrying its ALU and multiply results and the
-   // landings of every other unit (loads, AMOs, CSR reads, the FP ops' integer results,
-   // divides). Assigned after the class wires below (d_cls_f is declared there).
+   // An f-register destination takes its writer's FP shard: an FP load's SH_FL, the load
+   // landing's, any other SH_FF, the F stage's. Every other destination takes its slot's lane
+   // shard (SH_IE/IE2/IE3), whatever produces it: the lane's write register is the shard's one
+   // writer, carrying its ALU and multiply results and the landings of every other unit (loads,
+   // AMOs, CSR reads, the FP ops' integer results, divides).
 
    // rename's ports, a field per slot (slot k at [k])
    wire [IW*RN_PBITS-1:0] rn_prs1v, rn_prs2v, rn_prs3v, rn_sprs1v, rn_sprs2v, rn_sprs3v;
@@ -447,7 +449,7 @@ module smolrv64_core
    // completion in front of every dispatch write (gate V3, 2026-09-05).
    wire rn_valid = d_take;      // dispatch is no longer gated on M being free
 
-   smolrv64_rename #(.IDXB(RN_IDXB), .IW(IW)) u_rename
+   smolrv64_rename #(.IDXB(RN_IDXB), .N_INT(RN_NINT), .N_FL(RN_NFL), .N_FF(RN_NFF), .IW(IW)) u_rename
      (.clk(clk), .reset(reset),
       .r_valid(s_takev), .r_cand(fe_dv),
       .r_rs1(s_rs1v), .r_rs2(s_rs2v), .r_rs3(s_rs3v), .r_rd(s_rdv), .r_rd_v(s_rd_vv), .r_shard(s_shardv),
@@ -473,7 +475,7 @@ module smolrv64_core
    wire [2*NL*64-1:0]     l_opv;                      // ...and their values
    // Operands are read AT ISSUE, addressed by the entry the scheduler selected -- doc 1's
    // "values live in one place".
-   smolrv64_prf #(.IDXB(RN_IDXB), .NL(NL)) u_prf
+   smolrv64_prf #(.IDXB(RN_IDXB), .NL(NL), .N_INT(RN_NINT), .N_FL(RN_NFL), .N_FF(RN_NFF)) u_prf
      (.clk(clk),
       .we_l(l_qvv), .wa_l(l_qprdv), .wd_l(l_qvalv),
       .we_ld(we_ld), .wa_ld(wa_ld), .wd_ld(wb_ld),
@@ -800,11 +802,10 @@ module smolrv64_core
    // From the opcode alone, never from the trap decode: a trapping op writes nothing, so any
    // shard serves it, and the trap decode carries mstatus.FS (an FP op with FS off is illegal)
    // into the new register's number and every pending-table set behind it.
-   function [2:0] shard_of(input rd_fp, input [31:0] i, input mem, input amo, input fp,
-                           input mul, input [2:0] f_slice, input [2:0] alu);
-      shard_of = rd_fp                                ? f_slice   // an f-register
-               : (mem | amo)                          ? alu       // the lane's landing slot
-               :                                        alu;      // the lane: an ALU op, a link, a load, an AMO, a CSR read
+   function [2:0] shard_of(input rd_fp, input mem, input [2:0] lane);
+      shard_of = ~rd_fp ? lane     // the lane: an ALU op, a link, a load, an AMO, a CSR read, ...
+               : mem    ? SH_FL    // an FP load's f-register
+               :          SH_FF;   // any other f-register: an FP op's
    endfunction
 
    // ======================================================== THE SLOTS
@@ -831,9 +832,9 @@ module smolrv64_core
    generate for (gs = 0; gs < IW; gs = gs + 1) begin: sl
       `IR_DECL(q_)
       assign `IR_REC(q_) = fe_rec[gs*IRW +: IRW];
-      localparam [2:0] LANE = gs, SLICE = SH_F0 + gs;
+      localparam [2:0] LANE = gs;
       wire st_nb = q_gc[GC_ST], ld_nb = q_gc[GC_LD];
-      wire [2:0] shard = shard_of(q_rd[5], q_insn, q_is_mem, q_is_amo, q_is_fp, q_is_mul, SLICE, LANE);
+      wire [2:0] shard = shard_of(q_rd[5], q_is_mem, LANE);
       wire [RN_PBITS-1:0] prs1 = rn_prs1v[gs*RN_PBITS +: RN_PBITS], prs2 = rn_prs2v[gs*RN_PBITS +: RN_PBITS],
                           prs3 = rn_prs3v[gs*RN_PBITS +: RN_PBITS], prd = rn_prdv[gs*RN_PBITS +: RN_PBITS];
       // readiness: both map candidates' pending bits, the late lv picking the RESULT; a source that
@@ -2325,7 +2326,7 @@ module smolrv64_core
       if (reset | redirect) mq_v <= 1'b0;   // flush last (rule I11)
    end
    always @(posedge clk) if (!reset) begin
-      if (dg_any & dg_rdv & (dg_prd[RN_PBITS-1:RN_IDXB] >= SH_F0))
+      if (dg_any & dg_rdv & dg_prd[RN_PBITS-1])
          $fatal(1, "smolrv64_core: a divide issued with an FP destination p%0d", dg_prd);
       if (dg_n > 3'd2)                   $fatal(1, "smolrv64_core: %0d lanes hand the MD stage a divide at once", dg_n);
       if (mq_ld & mq_live & ~st_q)       $fatal(1, "smolrv64_core: a divide handed to a full MD queue (the credit is wrong)");
@@ -2629,7 +2630,7 @@ module smolrv64_core
    // result, so the register is kept free for it: an FPU op with an integer destination starts
    // only while no other is in flight and the register is empty, and no in-core op takes the
    // register while one is in flight. One integer result on the F port at a time; the FPU's
-   // f-register results are never held, their slice always has room.
+   // f-register results are never held, their shard always has room.
    wire        f_ic     = f_valid & ~ff_use_fpu;
    wire        f_int    = f_rd_v & ~ff_wrfp;                  // the op writes an integer register
    wire        fp_start = f_valid & ff_use_fpu & ~redirect & ~(f_int & (icr_v | fpu_int_inflight));
@@ -2881,7 +2882,7 @@ module smolrv64_core
       begin
          ld_dst = (m_valid & m_is_amo & m_rd_v & (m_prd == p)) | (sy_v & sy_rd_v & (sy_prd == p));
          for (k = 0; k < LQ_N; k = k + 1)
-            if ((lq_e_dprd[k*RN_PBITS +: RN_PBITS] == p) & (p[RN_PBITS-1:RN_IDXB] < SH_F0)) ld_dst = 1'b1;
+            if ((lq_e_dprd[k*RN_PBITS +: RN_PBITS] == p) & ~p[RN_PBITS-1]) ld_dst = 1'b1;
          for (k = 0; k < NL*LBN; k = k + 1)
             if ((lb_live[k*RN_PBITS +: RN_PBITS] == p) & (p != {RN_PBITS{1'b0}})) ld_dst = 1'b1;
       end
@@ -2896,13 +2897,13 @@ module smolrv64_core
       end
    end
    wire dep_ld    = no_issue & ((rf_blk_vq & ld_dst(rf_blk_pq)) | dep_ld_l);
-   // An f-register (FP slices: an FP op's or an FP load's), or an FP op's or divide's integer
+   // An f-register (an FP op's or an FP load's), or an FP op's or divide's integer
    // result: in the F stage, in the F port's result register, in the MD stage, or waiting in a
    // lane's landing buffer.
    function automatic fe_dst(input [RN_PBITS-1:0] p);
       integer k;
       begin
-         fe_dst = (p[RN_PBITS-1:RN_IDXB] >= SH_F0) | (f_valid & (f_prd == p)) | (icr_v & (icr_tag[RN_PBITS-1:0] == p))
+         fe_dst = p[RN_PBITS-1] | (f_valid & (f_prd == p)) | (icr_v & (icr_tag[RN_PBITS-1:0] == p))
                 | (md_v & md_rd_v & (md_prd == p));
          for (k = 0; k < NL*LBN; k = k + 1)
             if ((lb_live_fe[k*RN_PBITS +: RN_PBITS] == p) & (p != {RN_PBITS{1'b0}})) fe_dst = 1'b1;
@@ -3708,26 +3709,26 @@ module smolrv64_core
 
    // PER-SHARD WRITE PORTS. Each lane's shard is written by its lane's write register alone,
    // which takes, in order, its landing buffer's head, the ALU at issue and the multiply in its
-   // reserved slot; the FP slices by the LD and FE streams.
+   // reserved slot; the FP shards by the LD and FE streams, SH_FL and SH_FF.
    // A lane's wake and write-register enables do not read the live redirect (rule I11): a redirect
    // fires at the ROB head, so the op executing in a lane then is younger and flushed everywhere
    // (each flush arm is ordered last); its write lands at T+1 in a register the rollback frees,
    // before any new producer of it can dispatch. A multiply writes in its reserved slot.
    // THE LD STREAM: a landing load or M's AMO result, one a cycle. An FP load's lands on the LD
-   // port in its FP slice; an integer load's or AMO's in its lane (ldw_int, the lane by its
-   // register's shard).
+   // port in SH_FL; an integer load's or AMO's in its lane (ldw_int, the lane by its register's
+   // shard).
    wire ld_any = m_wb | ld_wb;
    wire [2:0] ldw_sh = wa_ld[RN_PBITS-1:RN_IDXB];
    assign ldw_int = ld_any & ~ldw_sh[2];
-   wire we_ld = ld_any & ~ldw_int;                 // ...an FP slice's write
+   wire we_ld = ld_any & ~ldw_int;                 // ...SH_FL's write
    // THE FE STREAM: the F stage's landing or the MD stage's result, one a cycle (the divide yields
-   // to the FPU). An f-register's lands on the FE port in its FP slice; an integer one in its lane.
+   // to the FPU). An f-register's lands on the FE port in SH_FF; an integer one in its lane.
    wire fe_any = fp_wb | md_wr;
    wire [2:0] few_sh = wa_fe[RN_PBITS-1:RN_IDXB];
    assign few_int = fe_any & ~few_sh[2];
    wire we_fe = fe_any & ~few_int;
    // Each stream broadcasts on its own port (wake, pending clear, the store queue's snoop) what
-   // it writes this cycle: an FP slice's register, or an integer one straight through a lane's
+   // it writes this cycle: an FP shard's register, or an integer one straight through a lane's
    // write register. A landing that waits in a lane's buffer broadcasts on the lane's port when
    // it drains.
    wire wk_ld = we_ld | (|by0);
@@ -3847,7 +3848,7 @@ module smolrv64_core
    always @(posedge clk) if (!reset) begin
       if (m_wb & ld_wb)
          $fatal(1, "smolrv64_core: LD shard written by both M and a landing load");
-      // an integer result lands in its lane, an f-register's in its FP slice, every one in a shard
+      // an integer result lands in its lane, an f-register's in its FP shard, every one in a shard
       // this width uses: an unused shard has no bank, and a result routed there would be dropped
       if ((ld_any & ~sh_used(ldw_sh)) | (fe_any & ~sh_used(few_sh)))
          $fatal(1, "smolrv64_core: a result routed to shard %0d, which this width does not use (pc %h)",

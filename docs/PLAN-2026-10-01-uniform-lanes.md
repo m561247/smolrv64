@@ -665,6 +665,13 @@ instructions of the GB5 checkpoint slices at the 64-row ROB (tb FPORT-SIM):
   integer shard. So the FP port keeps its first operand's integer read, and its second and third
   read FP registers only (an FP op's rs2 and rs3 always are): the integer shards go 10 -> 8 at
   IW=3 (12 -> 10 at IW=4) with no handoff.
+- **Move 5 measured.** The FP file as two 64-entry shards by writer (SH_FL the load landing's,
+  SH_FF the F stage's) instead of three slot slices of two banks and a live-value table: 24 LUTRAM
+  read copies and 192 bits of table -> 8 copies. The GB5 slices in cycles: Camera -2.23%,
+  Gaussian Blur -6.02%, Structure from Motion -3.06%, the integer four identical to the cycle, the
+  60 M lockstep identical (no FP in the boot). The slot slices stalled rename whenever the one a
+  slot's FP op lands in ran low; by writer, rename runs short only of SH_FL (RENAME-SIM), and at
+  128 entries those stalls go while the cycles move 0.04% at most, so it stays at 64.
 - **The stores (Tommy: "insert STD pseudo ops for those stores that do not have their data ready").**
   Today 44-56% of the integer slices' stores read their data through the store queue's port (in a
   register at allocation, or left out when two snooped values arrive in one cycle: 5% of

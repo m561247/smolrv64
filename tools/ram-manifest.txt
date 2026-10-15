@@ -25,8 +25,7 @@ psmem_f : source tags, the FP scheduler
 
 # ---- the physical register file: the largest array in the design ------------------------
 ish[*].mem x3 : PRF integer shards, one per lane; sharded by WRITER so each has ONE write port
-fp[*].mem_l x3 : PRF FP file, each slice's bank written by the load port
-fp[*].mem_f x3 : PRF FP file, each slice's bank written by the F stage
+fp[*].mem x2 : PRF FP file, a shard per writer (the load landing's, the F stage's), so each has ONE write port
 
 # ---- rename: free lists and maps, initialised by the bitstream and never reset ----------
 # A `for` loop over every entry in the reset branch pinned all five into flops (~3,400 bits)

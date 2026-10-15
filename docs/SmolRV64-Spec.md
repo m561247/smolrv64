@@ -413,11 +413,12 @@ them. Full OoO will need them back.
 
 Architectural registers are a **unified 64-entry space**: 0–31 integer, 32–63 FP, matching
 `decode_operands`' `{fp_bit, field}` encoding. The physical registers are not: f0–f31 rename
-only into the **FP file**, three slices SH_F0–SH_F2, and x1–x31 only into the integer shards.
+only into the **FP file**, two shards SH_FL and SH_FF, and x1–x31 only into the integer shards.
 A physical register is `{shard[2:0], index}` (`core/smolrv64_shards.vh`): lane k's integer
-shard is k and slot k's FP slice is 4 + k, so an f-register is exactly one with `shard[2]` set.
-A width-IW core uses lanes 0..IW-1 and slices 4..4+IW-1; rename builds free lists for those
-alone, and a result routed to any other shard is asserted.
+shard is k, SH_FL (4) holds the FP loads' destinations and SH_FF (5) the FP ops', so an
+f-register is exactly one with `shard[2]` set. A width-IW core uses lanes 0..IW-1 and the two
+FP shards; rename builds free lists for those alone, and a result routed to any other shard
+is asserted.
 
 `smolrv64_rename` carries a full speculative/committed split — SMAP/RMAP/lv for the map, and a
 per-shard free list with a speculative head and a committed head. Rollback is `h := hc` in
@@ -436,7 +437,7 @@ lanes' (SH_IE, SH_IE2, SH_IE3: lane k's is shard k), one write register each: th
 result and link at issue, a multiply in its reserved slot (§7), and every other integer result
 -- a load's, AMO's or CSR read's (§8), an FP op's integer destination, a divide's -- through the
 lane's landing buffer (§8). The F stage
-writes the FP slices; its writes include the in-core FP ops (FSGNJ, FEQ/FLT/FLE, FMV both ways, FCLASS; C4b step 1(c)):
+writes SH_FF; its writes include the in-core FP ops (FSGNJ, FEQ/FLT/FLE, FMV both ways, FCLASS; C4b step 1(c)):
 one cycle off the stage's operand registers into a one-entry result register (`icr_*`) that
 lands through the FPU's own landing in any cycle the FPU is not landing; a waiting result
 holds the stage. An FP op with mstatus.FS off is illegal at dispatch and traps from the SYSQ.
@@ -444,22 +445,22 @@ holds the stage. An FP op with mstatus.FS off is illegal at dispatch and traps f
 shard at issue, so a jal/jalr never waits for a port and its squash waits for nothing (rule D13
 is satisfied by construction). **The read ports**: each integer shard has 2 x NL + 2, eight at
 three lanes -- the lanes' rs1/rs2, the store queue's data read and the FP port's first operand
-(an int-to-FP op's rs1: `fcvt.d.l`, `fmv.d.x`) -- and each FP slice's two banks have four, the
-store queue's data read and the FP port's three operands. A lane never names an f-register,
+(an int-to-FP op's rs1: `fcvt.d.l`, `fmv.d.x`) -- and each FP shard has four, the store
+queue's data read and the FP port's three operands. A lane never names an f-register,
 and the FP port's second and third operands never an integer register (both asserted).
 
 | shard | entries | written by | why the size |
 |---|---|---|---|
 | IE, IE2, IE3 | 64 each | **lane A, B, C's write register, alone**: its ALU results and links, its multiplies, its landings (loads, AMOs, CSR reads, FP ops' integer results, divides) | > 32 (integer arch regs) each |
-| F0, F1, F2 | 64 each | f0–f31 only: FP loads (the load port) and FP results (the F stage's port) | > 32 (FP arch regs) each |
+| FL | 64 | f0–f31 only: **the load landing, alone** (FP loads) | > 32 (FP arch regs). The shard rename runs short of on the FP slices (Camera: every `be:rename` cycle, RENAME-SIM); at 128 those stalls are gone and the cycles move 0.04% at most (Camera, Gaussian Blur, Structure from Motion, PDF Rendering): the window waits on something else instead |
+| FF | 64 | f0–f31 only: **the F stage, alone** (FP results) | > 32 (FP arch regs) |
 
-**The FP file is sliced by rename slot and banked by writer.** An f-register destination
-renamed in slot A allocates from SH_F0, B from SH_F1, C from SH_F2, so no FP allocation counts
-the slots before it (a trapping FP op too: it writes nothing). At reset f0–f31 map to SH_F0.
-Each slice has two banks, one written by the load landing (`we_ld`, an FP load) and one by the
-F stage (`we_fe`, an FP result), through the address, data and wakeup broadcast each writer
-already had, and a live-value bit per register, set by the write, picks the bank a read takes.
-So the FP file adds no wakeup port and no write ever waits. It is read by the store queue's
+**The FP file is sharded by writer.** An FP load's f-register destination allocates from SH_FL,
+any other's from SH_FF (a trapping FP op too: it writes nothing), and a group holds at most one
+load and one FP op, so neither FP free list hands out more than one register a cycle. At reset
+f0–f31 map to SH_FL. Each shard is written by its writer alone, the load landing (`we_ld`) or
+the F stage (`we_fe`), through the address, data and wakeup broadcast it already had, so the
+FP file adds no wakeup port, no write ever waits, and a read never chooses between banks. It is read by the store queue's
 data read (`fsw`/`fsd`) and the FP port's three operands.
 
 **A destination's shard is chosen by the UNIT that writes it, never by the data type.** A
@@ -790,11 +791,11 @@ only `fmadd` has: 20 bits/entry against 29.
 - **Wakeup**: every PRF write broadcasts its destination on one of `NWB` = IW + 2 ports: each
   lane's port (its ALU and multiply results, and what its landing buffer drains: a waiting
   landing or the SYSQ's result) and the two streams' (the LD stream -- a landing load or M's
-  result -- and the FE stream -- the F stage's landing or a divide -- each an FP slice's
+  result -- and the FE stream -- the F stage's landing or a divide -- each an FP shard's
   register or an integer one straight through a lane's write register). The FP queue, the
   pending table and the store queue watch all of them; an integer lane's queue watches the
   lane ports and, of the two streams, only the writes bypassed into a lane's write register
-  (`by0`, `by2`) -- the streams' FP-slice writes can never name one of its sources, and they
+  (`by0`, `by2`) -- the streams' FP-shard writes can never name one of its sources, and they
   carry M's and the FPU's live completion cones (rule I12). A lane's port selects only on
   registers and the SYSQ's fire, so no completion cone selects a lane's broadcast address.
   A source not yet ready is also compared against the live ports **in its dispatch cycle**,
@@ -1004,10 +1005,10 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   never a retired op's and a redirect empties the buffers. The SYSQ never
   waits: a system op goes alone (lane A), lane A holds its select while one is the ROB head, and
   the SYSQ fires only into a free lane A, so a redirecting op writes and completes in its fire
-  cycle. FP loads land on the LD port in their FP slices as before. Waking a load's consumers
+  cycle. FP loads land on the LD port in SH_FL. Waking a load's consumers
   from its D$ lookup (load-hit speculation, with replay on a miss) is a later step.
 - **So does an FP op's or divide's integer result (5.2e).** The FE stream (the F stage's
-  landing or the MD stage's divide, `md_wr`) writes an f-register into its FP slice; an integer
+  landing or the MD stage's divide, `md_wr`) writes an f-register into SH_FF; an integer
   destination (`few_int`, by its shard) takes its lane's landing buffer the same way, behind
   the buffer's own entries, the SYSQ and the load landing, and completes when it drains.
   SH_FE has no writer and no bank. A cycle can enqueue a load's and an FE result in the same
@@ -1547,12 +1548,11 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 |---|---|---|---|---|---|---|
 | `ish[0..IW-1].mem` | `smolrv64_prf` | 64 each | 64 | 12 288 | LUTRAM | lane k's integer shard: 1W (lane k's write register), 8R at IW=3 (2 per lane, the store queue's, the FP port's first operand) |
 | `lb_prd`, `lb_dat`, `lb_rob`, `lb_fe` | `smolrv64_core` | 3×4 | 10/64/5/1 | 960 | flops | the lanes' landing buffers (§8) |
-| `fp[0..IW-1].mem_l`, `fp[0..IW-1].mem_f` | `smolrv64_prf` | 64 each | 64 | 24 576 | LUTRAM | 4R (the store queue's, the FP port's 3), 1W each: the FP file's load and F-stage banks |
-| `fp[0..IW-1].lvt` | `smolrv64_prf` | 64 each | 1 | 192 | flops | which bank holds each FP register |
+| `fp[0].mem`, `fp[1].mem` | `smolrv64_prf` | 64 each | 64 | 8 192 | LUTRAM | 4R (the store queue's, the FP port's 3), 1W each: SH_FL (the load landing) and SH_FF (the F stage) |
 | `cp[0..IW-1].smap` | `smolrv64_rename` | 64 each | 10 | 1 920 | LUTRAM | one copy per rename slot (1W each, `newer` picks), 3*IW reads |
 | `cp[0..IW-1].rmap` | `smolrv64_rename` | 64 each | 10 | 1 920 | LUTRAM | one copy per commit port (1W each, `rnewer` picks), 4*IW reads |
 | `lv` | `smolrv64_rename` | 64 | 1 | 64 | flops | bulk-cleared on flush |
-| `fl[*].u.bank[*].mem` | `smolrv64_rename` | 64 per shard | 7 | 448 per shard | LUTRAM | one free list per shard in use (lanes 0..IW-1, FP slices 4..4+IW-1), `next_pow2(IW)` banks each |
+| `fl[*].u.bank[*].mem` | `smolrv64_rename` | 64 per shard | 7 | 448 per shard | LUTRAM | one free list per shard in use (lanes 0..IW-1, SH_FL, SH_FF), `next_pow2(IW)` banks each |
 | `ent0`, `ent1` | `smolrv64_rob` | 8 each | 16 | 256 | LUTRAM | entry parity: 1W dispatch each, read at head and head+1 |
 | *(two-wide dispatch and retire)* | | | | | | items 10b/10c: on the board since 2026-09-06 (gate W2F, 319cd248), after four silent bitstreams whose renamer Vivado had folded (docs/rtl-rules.md F4/F5) |
 | `v`, `done` | `smolrv64_rob` | 16 | 1 each | 32 | flops | bulk-clearable |

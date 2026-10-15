@@ -38,7 +38,8 @@ module smolrv64_rename
   #(parameter IDXB  = 7,
     parameter PBITS = IDXB + 3,           // 3 shard bits (smolrv64_shards.vh)
     parameter N_INT = 64,                 // each lane's shard
-    parameter N_FP  = 64,                 // each FP slice, one per rename slot
+    parameter N_FL  = 64,                 // the FP loads' shard
+    parameter N_FF  = 64,                 // the F stage's shard
     parameter LOWAT = 4,                  // stall fetch when any shard has < LOWAT free
     parameter IW    = 2)                  // the group width -> FLNB = next_pow2(IW) free-list banks
    (input  wire                  clk,
@@ -92,8 +93,8 @@ module smolrv64_rename
     output wire [7:0]            shard_low);   // per shard, for the hpm counters
 
 `include "smolrv64_shards.vh"
-   function automatic sh_used(input integer sh);   // lanes 0..IW-1 and FP slices 4..4+IW-1
-      sh_used = (sh % 4) < IW;
+   function automatic sh_used(input integer sh);   // lanes 0..IW-1 and the two FP shards
+      sh_used = (sh < SH_FL) ? (sh < IW) : ((sh == SH_FL) || (sh == SH_FF));
    endfunction
    localparam integer NB = (IW > 1) ? $clog2(IW) : 1;   // a copy number: which slot wrote it
    localparam integer NS = 3 * IW;                       // the map's source reads
@@ -127,7 +128,7 @@ module smolrv64_rename
    reg [PBITS-1:0] cm [0:63];
    integer cmi;
    initial for (cmi = 0; cmi < 32; cmi = cmi + 1) begin
-      cm[cmi] = {SH_IE, cmi[IDXB-1:0]};  cm[32 + cmi] = {SH_F0, cmi[IDXB-1:0]};
+      cm[cmi] = {SH_IE, cmi[IDXB-1:0]};  cm[32 + cmi] = {SH_FL, cmi[IDXB-1:0]};
    end
    reg [PBITS-1:0] cm_after [0:63];
    integer cmr, cmq;
@@ -145,10 +146,10 @@ module smolrv64_rename
       (* ram_style = "distributed" *) reg [PBITS-1:0] rmap [0:63];
       integer j;
       // x0 -> physical 0 (SH_IE index 0), which smolrv64_prf hardwires to read zero and never
-      // writes. Integer registers start in SH_IE, FP registers in SH_F0 (see the reset note).
+      // writes. Integer registers start in SH_IE, FP registers in SH_FL (see the reset note).
       initial for (j = 0; j < 32; j = j + 1) begin
          rmap[j] = {SH_IE, j[IDXB-1:0]};       smap[j] = {SH_IE, j[IDXB-1:0]};
-         rmap[32 + j] = {SH_F0, j[IDXB-1:0]};  smap[32 + j] = {SH_F0, j[IDXB-1:0]};
+         rmap[32 + j] = {SH_FL, j[IDXB-1:0]};  smap[32 + j] = {SH_FL, j[IDXB-1:0]};
       end
       wire sw = r_valid[gc] & r_rd_v[gc];            // this slot's allocation
       wire cw = c_valid[gc] & c_rd_v[gc];
@@ -243,19 +244,19 @@ module smolrv64_rename
    // NO FUNCTION READS THESE ARRAYS (rule F4): Vivado keeps one read port for a function that
    // reads a RAM, the last call site's, and folds the earlier calls to 0.
    //
-   // The FP slices hold f0-f31 and nothing else, one slice per rename slot: an FP destination
-   // in slot k allocates from SH_F0 + k, so no FP allocation counts the slots before it.
+   // The FP shards hold f0-f31 and nothing else, one per writer: an FP load's destination
+   // allocates from SH_FL, any other f-register from SH_FF.
    localparam integer NSH  = 8;
    localparam integer FLNB = 1 << $clog2(IW);   // free-list banks = next_pow2(IW); >=2
    localparam integer FLLB = $clog2(FLNB);
    localparam integer CW   = $clog2(IW + 1);    // a count of 0..IW
-   // A shard's size, and the first free index at reset: SH_IE and SH_F0 hold the reset
+   // A shard's size, and the first free index at reset: SH_IE and SH_FL hold the reset
    // mappings of x0-x31 and f0-f31 at indices 0..31, so their lists start at 32.
    function automatic integer n_of(input integer sh);
-      n_of = (sh < SH_F0) ? N_INT : N_FP;
+      n_of = (sh < SH_FL) ? N_INT : (sh == SH_FL) ? N_FL : N_FF;
    endfunction
    function automatic integer base_of(input integer sh);
-      base_of = (sh == SH_IE || sh == SH_F0) ? 32 : 0;
+      base_of = (sh == SH_IE || sh == SH_FL) ? 32 : 0;
    endfunction
 
    // Commit and flush can land in the SAME cycle: a mispredicting branch commits while the
@@ -497,9 +498,9 @@ module smolrv64_rename
             $fatal(1, "smolrv64_rename: slot %0d renamed without the one before it", ik);
          if (r_valid[ik] & ~r_cand[ik])
             $fatal(1, "smolrv64_rename: slot %0d renamed and was not a candidate", ik);
-         // f-registers and FP slices go together, and each slot owns one slice.
-         if (alloc[ik] && (r_rd[ik*6 + 5] != r_shard[ik*3 + 2]
-                           || (r_shard[ik*3 + 2] && r_shard[ik*3 +: 3] != SH_F0 + ik[2:0])))
+         // an f-register goes to an FP shard, any other register to its slot's lane
+         if (alloc[ik] && (r_rd[ik*6 + 5] ? ((r_shard[ik*3 +: 3] != SH_FL) && (r_shard[ik*3 +: 3] != SH_FF))
+                                          : (r_shard[ik*3 +: 3] != ik[2:0])))
             $fatal(1, "smolrv64_rename: slot %0d renames r%0d into shard %0d", ik, r_rd[ik*6 +: 6], r_shard[ik*3 +: 3]);
          if (alloc[ik] & ~sh_used(r_shard[ik*3 +: 3]))
             $fatal(1, "smolrv64_rename: slot %0d allocates from shard %0d, which this width does not use",
@@ -509,7 +510,7 @@ module smolrv64_rename
 
    initial begin
       if (N_INT <= 32)  $fatal(1, "smolrv64_rename: N_INT=%0d must exceed 32", N_INT);
-      if (N_FP <= 32)   $fatal(1, "smolrv64_rename: N_FP=%0d must exceed 32", N_FP);
+      if (N_FL <= 32 || N_FF <= 32) $fatal(1, "smolrv64_rename: N_FL=%0d and N_FF=%0d must exceed 32", N_FL, N_FF);
       if (LOWAT < IW)   $fatal(1, "smolrv64_rename: LOWAT=%0d must cover a group of %0d", LOWAT, IW);
    end
 endmodule
