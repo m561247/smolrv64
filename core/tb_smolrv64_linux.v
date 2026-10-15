@@ -957,8 +957,8 @@ module tb;
                dut.core.fe.q_cnt, dut.core.fe.q_room,
                dut.core.s_v, dut.core.s_takev, dut.core.fe.redirect);
 
-   // +watch_pc=<hex pc>: follow ONE instruction through the F/CTF pipe -- its F issue (the link the
-   // unit computed), its CTF landing, and every FE-shard PRF write to the physreg it was given.
+   // +watch_pc=<hex pc>: follow ONE instruction -- its issue into the F stage or in a lane, its
+   // retirement, and every F-stage PRF write to the physreg it was given.
    // Built for a jal whose link retired as another instruction's data (2026-09-21); a generated
    // straight-line program executes a PC once, so the three lines are the whole story.
    reg [63:0] watch_pc;  reg watch_on;  reg [15:0] watch_prd;  reg watch_prd_v;  reg [15:0] watch_rob;

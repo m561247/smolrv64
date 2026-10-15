@@ -28,7 +28,7 @@
 //   F : PC -> iMMU -> I$ window -> aligner -> RVC expand -> decode   (smolrv64_frontend)
 //   X : regfile read + M-bypass -> exec_alu (ALU/AGU/compare) -> branch_unit
 //   M : LSU (dMMU + D$) | csr_file | trap | redirect | regfile write
-//   (mul/div: the MD stage, the F/CTF port's third drain, since C1 2026-09-17)
+//   (multiplies: the lanes; divides: the MD stage, which the lanes hand their operands)
 //
 // M IS THE ONLY COMMIT POINT. Every architectural side effect happens there and
 // nowhere else, which is what makes traps precise for free: when an instruction is
@@ -759,9 +759,8 @@ module smolrv64_core
    // ALU op, which is exactly what queues up behind a consumer waiting on a load.
    // An FP load/store is a MEMORY op, not an FP-unit op -- it must go to the load scheduler
    // or memory ordering is silently broken for half the accesses.
-   // FP ARITH NOW HAS ITS OWN SCHEDULER AND ITS OWN UNIT (the F stage below), so it no
-   // longer queues behind every load, CSR and branch in the in-order stream (mul/div and
-   // the branches left it too: the F/CTF/MD port, below).
+   // FP ARITH HAS ITS OWN SCHEDULER AND ITS OWN UNIT (the F stage below), so it never queues
+   // behind a load, a CSR op or a branch (those, multiplies and divides issue in the lanes).
    //
    // Three schedulers used to deadlock because all three fed ONE execute stage: an op
    // reached M, found it had to be ROB head to retire, and an older op in a different
@@ -773,10 +772,9 @@ module smolrv64_core
    // needs no trap path. The class is smolrv64_gclass's, carried in the instruction's record.
 
    wire d_cls_f = d_gc[GC_F];
-   // Control flow (jal/jalr/bXX) is its OWN class now: it leaves the ordered/M pipe for the
-   // FP/CTF pipe so a branch co-issues with a load (CTF-on-FP). A fetch-faulted CTI or an
-   // irqop pseudo-op stays ordered (d_cls_l), so M keeps the single trap site; a real CTI
-   // never traps at execute (RVC targets are 2-byte aligned, jalr clears bit 0).
+   // Control flow (jal/jalr/bXX) resolves in its slot's lane. A fetch-faulted CTI or an irqop
+   // pseudo-op is a system op (the SYSQ keeps the single trap site); a real CTI never traps at
+   // execute (RVC targets are 2-byte aligned, jalr clears bit 0).
    wire d_cls_c = d_gc[GC_C];
    // A divide issues in its slot's lane, which hands its operands to the MD stage; its result
    // lands by the stage's tag like the FPU's.
@@ -934,7 +932,7 @@ module smolrv64_core
    // THE F STAGE HOLDS FQ OPS: a head register, the one the scheduler fills from, and behind it a
    // FIFO of FQ-1 in distributed RAM (one write, one read; nothing moves but the pointers). At
    // FQ = 1 it is the one-deep stage above, which the credits keep from ever waiting; at 8 it holds
-   // a burst of FP/CTF/MD ops while dispatch goes on, and the head waits for the scheduler's room:
+   // a burst of FP ops while dispatch goes on, and the head waits for the scheduler's room:
    // GB5's FP slices take 16-20% fewer cycles, as many as a 16-entry scheduler saves, with none of
    // a scheduler's wakeup.
    localparam integer FQ = 8, FQB = $clog2(FQ + 1);
@@ -1007,7 +1005,7 @@ module smolrv64_core
    // into the scheduler this cycle (~stg_v | sched_room). A stuck stage (scheduler full) thus
    // holds dispatch at the frontend rather than losing the op behind the stage register.
    wire f_room    = (fpq_n < FQ[FQB-1:0]) | rf_ready;
-   // the group's FP/control-flow op (at most one) and what its slot hands the F/CTF stage
+   // the group's FP op (at most one) and what its slot hands the F stage
    wire [IW-1:0]         s_tf = s_takev & s_cls_fc;
    reg  [ROB_IDXB-1:0]   f_rob_in;
    reg  [3*RN_PBITS-1:0] f_ps_in;
@@ -1027,8 +1025,8 @@ module smolrv64_core
    // ISSUE ARBITRATION, one per cycle into the single issue register. Long-latency classes
    // win: they are gated on M being free anyway, so they only bid when they can make
    // progress, while an ALU op can always go next cycle instead.
-   // The F scheduler no longer shares this port: it issues into its own select register
-   // j_* (CTF-on-FP). i_* is M-only now, so no arbitration and no class mux here.
+   // The FP scheduler issues into its own select register, j_*, so no arbitration and no class
+   // mux here.
    // THE SCHEDULER'S JOB IS TO PRODUCE AN INDEX; everything else about the uop is looked up
    // with it. The source tags used to come OUT of each queue as `iss_ps` -- an async read of
    // the entry array (e_ps[sel], a 16:1 mux over FLOPS) then a 3-way class mux, two levels
@@ -1066,15 +1064,13 @@ module smolrv64_core
    // so each array keeps one write per cycle; the issue-side select on pick_* was already a
    // 3:1 mux, now on three reads instead of three indexes.
    reg  [3*RN_PBITS-1:0] psmem_f [0:NF-1];
-   wire [3*RN_PBITS-1:0] ps_out_f = psmem_f[rf_iss_ent];   // FP/CTF source tags into j_*
+   wire [3*RN_PBITS-1:0] ps_out_f = psmem_f[rf_iss_ent];   // FP source tags into j_*
    always @(posedge clk) begin
       // Written when the stage op moves into its scheduler (T+1), at the entry that scheduler
       // allocates (*_d_ent), from the REGISTERED stage payload -- co-timed with the e_ps write.
       if (mv_f)  psmem_f[rf_d_ent]  <= stg_ps_f;
    end
-   // The shared FP/CTF queue feeds j_* directly (single source). j_isctf, from the picked op's
-   // payload, routes the drain: control flow to cf_*, FP to f_valid. (CTF-over-FP priority is a
-   // later addition; for now the queue picks by its own policy.)
+   // The FP queue feeds j_* directly (single source), and j_* drains into the F stage (f_valid).
    wire j_adv     = ~j_v | f_advance;                    // j_* holds an FP op, for the F stage
    wire j_ready   = ~j_v | j_adv;
    assign rf_take = rf_iss_v;   // rf_iss_v is already gated by unit_busy = j_v & ~j_adv
@@ -1097,11 +1093,8 @@ module smolrv64_core
    // forwarding exists anywhere here: every producer's write has landed before its consumer
    // reads.
 
-   // The independent FP/CTF select register (CTF-on-FP). i_* is M-only now; this port has its
-   // OWN three PRF read ports, so a branch or FP op issues in the same cycle as a load instead
-   // of contending for the M select slot. Shared by the FP scheduler (rf) and the control-flow
-   // scheduler (rc), with CTF winning the slot (pick_ctf). j_isctf says which side it holds:
-   // a control-flow op drains into cf_* (the branch completion stage), an FP op into f_valid.
+   // The FP port's select register: the FP scheduler's pick (rf), whose three source tags address
+   // the PRF's FP port (smolrv64_prf), drained into the F stage (f_valid).
    reg                 j_v;
    reg [IBF-1:0]       j_ent;
    reg [ROB_IDXB-1:0]  j_rob;
@@ -1113,8 +1106,8 @@ module smolrv64_core
    wire   iss_f       = j_v & f_advance & ~redirect;          // j_* drains an FP op into f_valid
 
 
-   // j_* loads the FP/CTF queue's pick when it can accept (empty, or its op draining into
-   // cf_*/f_valid this cycle).
+   // j_* loads the FP queue's pick when it can accept (empty, or its op draining into f_valid
+   // this cycle).
    always @(posedge clk) begin
       if (reset | redirect) j_v <= 1'b0;
       else if (j_ready) begin
@@ -1184,7 +1177,7 @@ module smolrv64_core
    // match of its own sources (wkq_f, the cycle before) to what it hands the scheduler, ORs both
    // matches into its readiness every cycle it stays, and the op the scheduler takes is caught by its
    // fill's hit(d_ps) (this cycle): the same readiness, in every cycle, as reading the pending table.
-   // F (FP/CTF/MD): whichever slot is the (single) FC goes into the head when the head is free
+   // F: whichever slot holds the group's (single) FP op goes into the head when the head is free
    // this cycle and nothing waits behind it, else behind the ops that wait.
    wire [2:0] snp_f   = {wk(stg_ps_f[2*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[RN_PBITS +: RN_PBITS]), wk(stg_ps_f[0 +: RN_PBITS])};
    assign     wkq_f   = wkq3(stg_ps_f);
@@ -1533,12 +1526,12 @@ module smolrv64_core
    // entry issues no earlier than the cycle after its dispatch, so a read never meets its
    // own write.
    reg  [PLW-1:0] plf_q;
-   always @(posedge clk) if (rf_take) plf_q <= plmem_f[rf_iss_ent];   // the FP/CTF port's payload
+   always @(posedge clk) if (rf_take) plf_q <= plmem_f[rf_iss_ent];   // the FP port's payload
    wire [PLW-1:0] plf_out  = plf_q;
    // Co-timed with the scheduler fill (T+1), from the REGISTERED stage payload.
    always @(posedge clk) if (mv_f) plmem_f[rf_d_ent] <= stg_pl_f;
 
-   // the F/CTF port's payload, unpacked (unused fields fall away)
+   // the FP port's payload, unpacked (unused fields fall away)
    `PL_DECL(qf_)
    assign `PL_REC(qf_) = plf_out;
 
@@ -2345,7 +2338,7 @@ module smolrv64_core
 
    // ---- the SYSQ (C3 step 3, 2026-09-18): system ops fire at the ROB head from flops ------------
    // A CSR/system op (SYSTEM opcode: csr*, ecall/ebreak/xret/wfi/sfence.vma, the irqop pseudo-op)
-   // is the F/CTF/MD port's fourth drain. At most ONE is in flight: every one but a CSR op is
+   // issues in lane A, which hands the SYSQ its record and rs1. At most ONE is in flight: every one but a CSR op is
    // serialising at dispatch (ser_block drains the ROB and the store queue before it and lets
    // nothing dispatch behind it), and a CSR op waits at dispatch for the one before it (csr_infl).
    // The queue is this one register, and its fire is a flop compare at the ROB head. csr_file's
@@ -4239,7 +4232,7 @@ module smolrv64_core
    // ops already used (FS, the data-translation bits, satp, frm, the envcfg/stateen enables)
    // refetches them through csr_file's redirect, and anything else (sstatus.SIE above all, the
    // kernel's irq save and restore) changes nothing a younger op computed. One CSR op is in
-   // flight at a time (csr_infl): the SYSQ holds one, and the F/CTF/MD/SYS queue reorders, so a
+   // flight at a time (csr_infl): the SYSQ holds one, and lane A's scheduler reorders, so a
    // second could take the SYSQ before an older one and never reach the head.
    wire d_csr_op = d_gc[GC_CSR];
    wire d_ser    = d_gc[GC_SER];
@@ -4478,7 +4471,7 @@ module smolrv64_core
    wire [GHL-1:0] fe_red_ghr = (m_red_fire | sy_red) ? {GHL{1'b0}} : fr_set ? fr_ghr : dec_ghr;
    always @(posedge clk) fe_red_ghr_q <= fe_red_ghr;
    always @(posedge clk) if (!reset) begin
-      // a group dispatches whole and holds at most one load, one store and one F/CTF op
+      // a group dispatches whole and holds at most one load, one store and one op of the F stage, the MD stage or the SYSQ
       if (|(s_takev & ~s_v))           $fatal(1, "smolrv64_core: a slot dispatched without an instruction");
       if ((ones_nl(g_st) > 4'd1) | (ones_nl(g_ld) > 4'd1))
          $fatal(1, "smolrv64_core: two allocations into one memory queue");

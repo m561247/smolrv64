@@ -142,10 +142,10 @@ decode (`smolrv64_gclass`, read from the queue record). A load behind a store in
 takes the store-seqno after the store's. A member pops only with a **credit** for everything it allocates, from
 flops, counted against what is already between the head and there: the ROB against the IR
 group, the LQ and SQ against the IR's load or store, each lane's scheduler against its
-dispatch-stage register and the IR's op, the F/CTF/MD scheduler against its FIFO (below) and the
+dispatch-stage register and the IR's op, the FP scheduler against its FIFO (below) and the
 IR's op (`crd`, `CR_*`; this cycle's frees are not credited). The IR loads every cycle and
 dispatches the next, and a lane's dispatch-stage register never waits for its scheduler; both are
-always-on assertions. **The F/CTF/MD stage is a FIFO of 8** (`FQ`) whose head is the register its
+always-on assertions. **The F stage is a FIFO of 8** (`FQ`) whose head is the register its
 scheduler fills from: a burst of FP ops waits there while dispatch goes on, and the head waits for
 the scheduler's room. The FIFO's entries watch a registered copy of the wake buses, a cycle late:
 an entry ORs the copy's match of its sources into the readiness it had at dispatch, the head adds
@@ -727,7 +727,7 @@ moves the wall.
 | holds | slot A's, B's, C's ALU ops, multiplies, divides, branches, jumps, loads, stores and head ops; slot A's system ops | FP arithmetic |
 | ordering | **reorders freely** | **reorders freely** |
 | unit | completes at issue (a mispredict at its squash), writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8), a divide its operands to the MD stage, a system op its record and rs1 to the SYSQ | stage F |
-| `unit_busy` | the lane's multiply slot | `j_v & ~j_adv`: the F/CTF select register is full and not draining |
+| `unit_busy` | the lane's multiply slot | `j_v & ~j_adv`: the FP select register is full and not draining |
 
 **One scheduler per unit is what makes four safe.** Three schedulers feeding ONE execute
 stage deadlock (`Area-Efficient-Scalar-OoO.md` 12.2): an op reaches the shared stage, finds
@@ -2013,8 +2013,8 @@ closure above is real; the branch cannot ship until that defect is found (handof
 
 ## 14. Known limits
 
-- **Up to `LQ_N`=16 fast loads outstanding (by tag), one slow one, and one mul/div in the MD
-  stage** (the stage holds one tag; a second one waits in the F/CTF/MD queue). FP is no longer
+- **Up to `LQ_N`=16 fast loads outstanding (by tag), one slow one, and two divides in the MD
+  stage** (the stage and its queue register; the divide credit holds a third at dispatch). FP is no longer
   among them: `NFLIGHT`=4 and results return by tag, out of issue order (§7). `LQ_N = 1 << LQ_IB`;
   `LQ_IB` = `SMOLRV64_LQB` = 4 (`smolrv64_tags.vh`, which the core, `rv_soc_top` and the benches
   read), and the D$ read tag is `{client[1:0], lq_idx}`, `DRTW = LQ_IB + 2`. 8 -> 16 entries:
