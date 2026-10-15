@@ -22,7 +22,7 @@ the 2026-09 release; their history is in git, and the dated records in `docs/his
 | Also implemented | Zicsr, Zifencei, Zicntr, Zihpm (13 counters), Sscofpmf, Sstc, Smstateen, Ssvnapot |
 | Decoded but not in `misa` | Zba, Zbb, Zbs, Zicond (`src/decode_exec.v`) |
 | Fetch / dispatch / retire | **three-wide** (`SMOLRV64_IW=3`, the RTL and build default; `SMOLRV64_IW=2` and `4` build the two- and four-wide machines); fetch is one 16-byte pair per cycle into the fetch ring (§4) |
-| Issue | **dynamic**: ALU ops, multiplies, divides, branches and jumps issue in their slot's lane (three schedulers, three ALUs, three multipliers; a divide's operands go to the one MD stage) and reorder freely; FP ops reorder on the FP/SYS port (§7); loads, stores, AMOs, LR/SC and CBOs generate their address in their slot's lane and reach M through their LQ/SQ entry or the head-op register (§8) |
+| Issue | **dynamic**: ALU ops, multiplies, divides, branches and jumps issue in their slot's lane (three schedulers, three ALUs, three multipliers; a divide's operands go to the one MD stage) and reorder freely; a system op issues in lane A and fires from the SYSQ at the ROB head; FP ops reorder on the FP port (§7); loads, stores, AMOs, LR/SC and CBOs generate their address in their slot's lane and reach M through their LQ/SQ entry or the head-op register (§8) |
 | Completion | **out of order** (non-blocking loads, tagged FP results, ALU at issue) |
 | Commit | in order, from the ROB head, up to `IW`/cycle |
 | Speculation | branch/jump prediction only; no memory speculation, no value speculation |
@@ -68,9 +68,9 @@ and FP arithmetic both reorder freely**, in `u_iq_i`/`u_iq_i2`/`u_iq_i3` and `u_
 respectively. **Slot k's ALU op goes to lane k** (lanes plan step 5.2a): three integer
 schedulers, each with its own ALU and shard, and no steering. An ALU op completes at issue; an FP op goes to stage F. Neither ever enters M.
 
-Everything else carries an `ord` bit; of those, FP and system ops go to the FP/SYS queue, and
-branches, jumps, multiplies, divides, loads, stores and the head ops (AMO, LR/SC, CBO) run in the
-lanes (§7, §8). Memory ordering lives in the LQ and SQ and in M's in-order fill. Memory
+Everything else carries an `ord` bit; of those, FP ops go to the FP queue, and branches, jumps,
+multiplies, divides, system ops (lane A), loads, stores and the head ops (AMO, LR/SC, CBO) run in
+the lanes (§7, §8). Memory ordering lives in the LQ and SQ and in M's in-order fill. Memory
 ordering lives in the LQ and SQ, not in issue order.
 
 That split is what makes the rest unnecessary rather than merely deferred:
@@ -725,9 +725,9 @@ moves the wall.
 |---|---|---|
 | entries (`NENT`) | 10 each | 8 |
 | sources (`NSRC`) | 2 | 3 |
-| holds | slot A's, B's, C's ALU ops, multiplies, divides, branches, jumps, loads, stores and head ops | FP arithmetic, system ops |
+| holds | slot A's, B's, C's ALU ops, multiplies, divides, branches, jumps, loads, stores and head ops; slot A's system ops | FP arithmetic |
 | ordering | **reorders freely** | **reorders freely** |
-| unit | completes at issue (a mispredict at its squash), writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8), a divide its operands to the MD stage | stage F, the SYSQ |
+| unit | completes at issue (a mispredict at its squash), writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8), a divide its operands to the MD stage, a system op its record and rs1 to the SYSQ | stage F |
 | `unit_busy` | the lane's multiply slot | `j_v & ~j_adv`: the F/CTF select register is full and not draining |
 
 **One scheduler per unit is what makes four safe.** Three schedulers feeding ONE execute
@@ -902,13 +902,16 @@ is empty, and no in-core op takes the register while one is in flight.
 ### 7.y The SYSQ: system ops fire at the ROB head from flops (C3 step 3, 2026-09-18)
 
 A CSR or system op (SYSTEM opcode: `csr*`, `ecall`/`ebreak`/`xret`/`wfi`/`sfence.vma`, the
-irqop pseudo-op) is dispatch class S, shares the F/CTF/MD queue and is its fourth drain
-(`iss_sys`). At most one is in flight: every one but a CSR op is serialising at dispatch
-(`ser_block` drains the ROB and the store queue before it and lets nothing dispatch behind it),
-and a CSR op dispatches without draining but only once the CSR op before it has fired
-(`csr_infl`: the SYSQ holds one, and the queue it comes through reorders). The SYSQ is one
+irqop pseudo-op) is dispatch class S and goes alone, so in slot A: it issues in lane A, which
+hands the SYSQ its record and rs1 in its execute cycle (`iss_sys`); in the lane it is a late op
+that does nothing else (no multiply, divide, address or branch resolution, whatever its bits
+look like: a fetch fault's instruction is 0, which reads as a load), and its FP sources (an FP op
+trapping at FS off) are no sources to the lane. At most one is in flight: every one but a CSR op
+is serialising at dispatch (`ser_block` drains the ROB and the store queue before it and lets
+nothing dispatch behind it), and a CSR op dispatches without draining but only once the CSR op
+before it has fired (`csr_infl`), so the SYSQ is free when lane A hands one over. The SYSQ is one
 register `{rob, prd, rd_v, is_csr, func,
-addr, src (rs1 or zimm from the port's forwarded read), pc, seq, insn}` and its fire is from
+addr, src (rs1 from lane A, or zimm), pc, seq, insn}` and its fire is from
 flops: `sy_fire = sy_at_head & sy_lane_ok & (~sy_instret | sy_head_q)`, where `sy_at_head` is
 computed a cycle ahead from the SYSQ's and the ROB's next state, `sy_at_head <= sy_v_n &
 (sy_rob_n == rob_head_n_idx)`, so it is set in the cycle the op is the head, as a live compare
@@ -926,7 +929,7 @@ asserted); a trap through `c_kill`; a redirect through
 the one redirect gate (`redirect`, `fe_red_pulse`, `fe_red_tgt/seq`, `redirect_is_trap`).
 
 The SYSQ also takes FENCE and FENCE.I and every instruction that traps at dispatch (a fetch fault,
-an illegal instruction) -- `is_sysq()`, one definition for dispatch and the port (C4b step 1). All
+an illegal instruction) -- `is_sysq()`, one definition for dispatch and lane A (C4b step 1). All
 serialise. A trap from dispatch drives `csr_file`'s `xtrap_*` inputs from the register's
 `{xt, xcause, xtval}` flops and is its own redirect (`csr_file` leaves `xtrap` out of
 `redir_valid`; an always-on check asserts that every trap presented to it redirects). FENCE

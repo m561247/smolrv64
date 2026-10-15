@@ -377,7 +377,7 @@ module smolrv64_frontend
    // and nothing behind a CTI that redirects fetch at decode. The IR takes the group when it is
    // empty or dispatching whole this cycle, and dispatch takes a group whole or not at all:
    // there are no survivors.
-   localparam integer G_M = 2, G_L = 4, G_I = 5, G_FC = 6, G_PLAIN = 7, G_DCR = 11,   // smolrv64_gclass's gc order
+   localparam integer G_M = 2, G_S = 3, G_L = 4, G_I = 5, G_FC = 6, G_PLAIN = 7, G_DCR = 11,   // smolrv64_gclass's gc order
                       G_LD = 12, G_ST = 13, G_CSR = 14, G_SER = 15;
    // the credits: a member pops only with room for it in everything it allocates, counted
    // against what is already between here and there (smolrv64_core computes crd from flops)
@@ -389,7 +389,7 @@ module smolrv64_frontend
    // the units behind the FP/MD/SYS port (the F stage, the MD stage, the SYSQ) each take one op at
    // a time: a group holds at most one op of theirs, wherever it issues
    function automatic unit_op(input [15:0] gc);
-      unit_op = gc[G_FC] | gc[G_M];
+      unit_op = gc[G_FC] | gc[G_M] | gc[G_S];
    endfunction
    // the rules: which heads may go together (cumulative classes of the slots before)
    // slot k reads slot k-1: per-bit variables, so the chain is not a loop to the simulator

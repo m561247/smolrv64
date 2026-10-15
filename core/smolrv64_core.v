@@ -884,8 +884,11 @@ module smolrv64_core
       // queue's), their readiness with this cycle's wakes folded in, its destination and payload
       assign sl_li[gs]  = s_takev[gs] & q_gc[GC_I];
       assign sl_rob[gs] = s_rob[gs];
-      assign sl_ps[gs]  = st_nb ? {prs3, {RN_PBITS{1'b0}}, prs1} : {prs3, prs2, prs1};
-      assign sl_rdy[gs] = s_srdy_hit[gs][1:0];
+      // a lane reads integer registers only: an FP source (an FP op that traps at FS off, a system
+      // op in lane A) is no source to it, its tag zero and ready
+      wire f1 = prs1[RN_PBITS-1], f2 = prs2[RN_PBITS-1];
+      assign sl_ps[gs]  = {prs3, (st_nb | f2) ? {RN_PBITS{1'b0}} : prs2, f1 ? {RN_PBITS{1'b0}} : prs1};
+      assign sl_rdy[gs] = s_srdy_hit[gs][1:0] | {f2, f1};
       assign sl_prd[gs] = prd_g;
       assign sl_pl[gs]  = s_pl_in[gs];
       always @(posedge clk) if (!reset)
@@ -971,8 +974,9 @@ module smolrv64_core
       is_hop = (i[6:2] == 5'b01011) | ((i[6:2] == 5'b00011) & (i[14:12] == 3'b010));
    endfunction
    // a lane op that does not complete in its execute cycle: no write, wake or ROB completion there
-   function automatic lane_late(input [31:0] i);
-      lane_late = is_mulop(i) | is_divop(i) | is_lmem(i) | is_hop(i);
+   // (a system op completes when the SYSQ fires it)
+   function automatic lane_late(input [31:0] i, input ill, input flt);
+      lane_late = is_mulop(i) | is_divop(i) | is_lmem(i) | is_hop(i) | is_sysq(i, ill, flt);
    endfunction
    localparam integer PL_INSN = PLW - PCW - 32;   // the instruction's place in the payload (pl_in)
 
@@ -1070,12 +1074,7 @@ module smolrv64_core
    // The shared FP/CTF queue feeds j_* directly (single source). j_isctf, from the picked op's
    // payload, routes the drain: control flow to cf_*, FP to f_valid. (CTF-over-FP priority is a
    // later addition; for now the queue picks by its own policy.)
-   wire j_istrap  = qf_illegal | qf_fault;               // a trap: the SYSQ, whatever its decode says
-   wire j_issys   = is_sysq(qf_insn, qf_illegal, qf_fault);  // ...or a system op, a fence or a trap: the SYSQ's drain
-   wire sy_advance;                                      // the SYSQ can take one (defined with it)
-   wire j_needs_s = j_v & j_issys;                       // j_* holds a system op...
-   wire j_needs_f = j_v & ~j_issys;                      // ...or an FP op
-   wire j_adv     = j_needs_s ? sy_advance : (j_needs_f ? f_advance : 1'b1);
+   wire j_adv     = ~j_v | f_advance;                    // j_* holds an FP op, for the F stage
    wire j_ready   = ~j_v | j_adv;
    assign rf_take = rf_iss_v;   // rf_iss_v is already gated by unit_busy = j_v & ~j_adv
    wire iq_blk_v = rf_blk_v | l_blk_v[0];
@@ -1110,8 +1109,7 @@ module smolrv64_core
 
    // An ordered op completes when M takes it; an ALU op completes unconditionally, because
    // SH_IE has exactly one writer and it is this one. Nothing can be in the way.
-   wire   iss_f       = j_needs_f & f_advance & ~redirect;    // j_* drains an FP op into f_valid
-   wire   iss_sys     = j_needs_s & sy_advance & ~redirect;   // ...or a system op into the SYSQ (C3 step 3)
+   wire   iss_f       = j_v & f_advance & ~redirect;          // j_* drains an FP op into f_valid
 
 
    // j_* loads the FP/CTF queue's pick when it can accept (empty, or its op draining into
@@ -1325,6 +1323,9 @@ module smolrv64_core
       wire [RN_PBITS-1:0]  blk_pr;
       wire [IBI:0]         occ, free;
       wire                 mv = stg_v & ready;
+      `PL_DECL(sg_)
+      assign `PL_REC(sg_) = stg_pl;
+      wire                 stg_late = lane_late(sg_insn, sg_illegal, sg_fault);
       wire [1:0]           snp = {wk_i(stg_ps[RN_PBITS +: RN_PBITS]), wk_i(stg_ps[0 +: RN_PBITS])};
       always @(posedge clk) begin
          if (reset) stg_v <= 1'b0;
@@ -1346,7 +1347,7 @@ module smolrv64_core
                 .FIXEDL(1),.INORDER(0)) u_iq
         (.clk(clk),.reset(reset),
          .d_valid(mv),.d_ready(ready),.d_rob(stg_rob),
-         .d_ps(stg_ps[2*RN_PBITS-1:0]),.d_r(stg_r),.d_prd(stg_prd),.d_long(lane_late(stg_pl[PL_INSN +: 32])),.d_ent(d_ent),
+         .d_ps(stg_ps[2*RN_PBITS-1:0]),.d_r(stg_r),.d_prd(stg_prd),.d_long(stg_late),.d_ent(d_ent),
          .wb_v(wkv_i),.wb_preg(wkp),
          // busy: the multiply's reserved slot, a waiting landing, and in lane 0 a system op at the ROB head
          .unit_busy(m1 | lb_any[gl] | ((gl == 0) & sy_at_head)),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
@@ -1357,7 +1358,7 @@ module smolrv64_core
       reg  [3*RN_PBITS:0]   psmem [0:NI-1];
       reg  [PLW-1:0]        plmem [0:NI-1];
       // written as the stage's op moves into the scheduler (T+1), at the entry it allocates
-      always @(posedge clk) if (mv) psmem[d_ent] <= {lane_late(stg_pl[PL_INSN +: 32]), stg_ps};
+      always @(posedge clk) if (mv) psmem[d_ent] <= {stg_late, stg_ps};
       always @(posedge clk) if (mv) plmem[d_ent] <= stg_pl;
       wire [3*RN_PBITS:0]   ps_out = psmem[iss_ent];
       // ---- the select register: the picked op, executing the next cycle ----
@@ -1409,7 +1410,8 @@ module smolrv64_core
          if (q_rs2_v & ~pnd_q[6*IW + 2*gl + 1] & ~(q_is_store & is_lmem(q_insn)))
             $fatal(1, "core: lane %0d executed with rs2 p%0d still pending (rob=%0d)", gl, ps2, rob);
       end
-      wire cti  = iss & (q_is_branch | q_is_jump | q_is_jalr);
+      wire sys  = is_sysq(q_insn, q_illegal, q_fault);   // a system op or a trap: the SYSQ's, nothing here
+      wire cti  = iss & ~sys & (q_is_branch | q_is_jump | q_is_jalr);
       wire mis  = cti & red;
       // ---- the multiplier (lanes step 5.2c) ----
       // mul3 starts from the lane's forwarded operands in the execute cycle T, and the lane
@@ -1417,7 +1419,7 @@ module smolrv64_core
       // unit_busy), so nothing else executes at T+2. That slot carries the multiply's wake (its
       // consumers execute at T+3 off the write register), its ROB completion, and its result
       // into the write register at the edge, which the PRF writes at T+3.
-      wire                 m_go = iss & is_mulop(q_insn);
+      wire                 m_go = iss & ~sys & is_mulop(q_insn);
       reg                  m2, mrdv1, mrdv2;
       reg [ROB_IDXB-1:0]   mrob1, mrob2;
       reg [RN_PBITS-1:0]   mprd1, mprd2;
@@ -1437,7 +1439,9 @@ module smolrv64_core
       wire m_wr = m2 & mrdv2;
       // ---- a divide: the lane reads its operands and hands them to the one MD stage, which the
       // dispatch credit (cr_div) keeps free for it; the result lands through the lane's landing buffer
-      assign l_dgo[gl] = iss & is_divop(q_insn);
+      assign l_dgo[gl] = iss & ~sys & is_divop(q_insn);
+      always @(posedge clk) if (!reset & iss & sys & (gl != 0))
+         $fatal(1, "smolrv64_core: lane %0d executes a system op (it goes alone, in lane A)", gl);
       assign l_xs1[gl] = rs1;  assign l_dprd[gl] = q_prd;  assign l_drdv[gl] = q_rd_v;
       assign l_dop[gl] = {q_insn[6:2] == 5'b01110, q_insn[14:12]};
       always @(posedge clk) if (!reset & fr_rel & ((stg_v & dead(stg_rob)) | (v & dead(rob)) | (m1 & dead(mrob1)) | (m2 & dead(mrob2))))
@@ -1506,7 +1510,7 @@ module smolrv64_core
       assign l_qvv[gl] = qv;  assign l_qprdv[gl*RN_PBITS +: RN_PBITS] = qprd;  assign l_qvalv[gl*64 +: 64] = qval;
       assign l_psv[(2*gl)*RN_PBITS +: RN_PBITS] = ps1;  assign l_psv[(2*gl+1)*RN_PBITS +: RN_PBITS] = ps2;
       assign l_rd1[gl] = l_opv[(2*gl)*64 +: 64];  assign l_rd2[gl] = l_opv[(2*gl+1)*64 +: 64];
-      assign l_lm[gl] = v & is_lmem(q_insn);  assign l_st[gl] = q_is_store;
+      assign l_lm[gl] = v & ~sys & is_lmem(q_insn);  assign l_st[gl] = q_is_store;
       assign l_br[gl] = q_is_branch;  assign l_jmp[gl] = q_is_jump;  assign l_jalr[gl] = q_is_jalr;
       assign l_rvc[gl] = q_rvc;  assign l_rdv[gl] = q_rd_v;  assign l_seq[gl] = q_seq;  assign l_pc[gl] = q_pc;
       assign l_pdet[gl] = q_pdet;  assign l_rd[gl] = q_rd;  assign l_rs1[gl] = q_rs1;
@@ -2074,7 +2078,7 @@ module smolrv64_core
    reg  [63:0]       ho_va, ho_dat;
    reg  [SPW-1:0]    ho_rec;
    initial ho_v = 1'b0;
-   wire              hA = l_v[0] & is_hop(ln[0].q_insn);   // a head op goes alone: slot A, lane A
+   wire              hA = l_v[0] & ~ln[0].sys & is_hop(ln[0].q_insn);   // a head op goes alone: slot A, lane A
    wire              h_go = ho_v & ~s_win & m_advance & ~redirect;
    always @(posedge clk) begin
       if (rn_valid & d_cls_l) ho_rec <= {s_rob[0], s_pl_in[0]};   // a head op goes alone: slot A
@@ -2411,8 +2415,15 @@ module smolrv64_core
    // The record loads once: not again while the SYSQ holds it (sy_qf), and over a CSR op, which
    // is younger than the faulting head.
    wire qf_in = qfr_v & ~(sy_v & sy_qf);
+   // A SYSTEM OP ISSUES IN LANE A (it goes alone, so in slot A), which hands the SYSQ its record and
+   // rs1 in its execute cycle: the serialising credits leave the SYSQ free then (a CSR op dispatches
+   // after the one before it fires, every other system op into a drained machine).
+   `PL_DECL(ya_)
+   assign `PL_REC(ya_) = l_pl[0];
+   wire                iss_sys  = l_iss[0] & is_sysq(ya_insn, ya_illegal, ya_fault);
+   wire                ya_trap  = ya_illegal | ya_fault;
    wire                sy_v_n   = ~(reset | redirect) & (qf_in | iss_sys | (sy_v & ~sy_fire & ~dead(sy_rob)));
-   wire [ROB_IDXB-1:0] sy_rob_n = qf_in ? qfr_rob : iss_sys ? j_rob : sy_rob;
+   wire [ROB_IDXB-1:0] sy_rob_n = qf_in ? qfr_rob : iss_sys ? l_rob[0] : sy_rob;
    reg  sy_at_head;
    initial sy_at_head = 1'b0;
    always @(posedge clk) sy_at_head <= sy_v_n & (sy_rob_n == rob_head_n_idx);
@@ -2438,22 +2449,21 @@ module smolrv64_core
    // the CSR read's value into lane A. A CSR op that csr_file traps writes its register too: the
    // trap flushes every reader, and the write and its wake stay clear of csr_file's decision.
    wire sy_wr      = sy_fire & sy_rd_v & ~sy_xt;
-   assign sy_advance = ~sy_v | sy_fire;
    always @(posedge clk) begin
       sy_head_q <= ~reset & sy_at_head & ~sy_fire;
       if (sy_fire) sy_v <= 1'b0;
       if (dead(sy_rob)) sy_v <= 1'b0;                   // the kill, before the load arms: a new op wins
       if (iss_sys) begin
-         sy_v <= 1'b1; sy_rob <= j_rob; sy_prd <= qf_prd; sy_rd_v <= qf_rd_v;
-         sy_is_csr <= qf_is_csr; sy_func <= qf_csr_func; sy_addr <= qf_imm[11:0];
-         sy_instret <= qf_is_csr & ((qf_imm[11:0] == 12'hC02) | (qf_imm[11:0] == 12'hB02));
-         sy_src <= qf_csr_func[2] ? {59'b0, qf_imm[16:12]} : xf_rs1;
-         sy_pc <= qf_pc; sy_seq <= qf_seq; sy_insn <= qf_insn;
-         sy_xt <= j_istrap;  sy_rp <= 1'b0;
-         sy_fn <= ~j_istrap & (qf_insn[6:2] == 5'b00011);
-         sy_fi <= ~j_istrap & (qf_insn[6:2] == 5'b00011) & qf_insn[12];
-         sy_xcause <= qf_fault ? qf_fault_cause : 4'd2;
-         sy_xtval  <= qf_fault ? {{(64-PCW){1'b0}}, qf_fault_tval} : 64'd0;
+         sy_v <= 1'b1; sy_rob <= l_rob[0]; sy_prd <= ya_prd; sy_rd_v <= ya_rd_v;
+         sy_is_csr <= ya_is_csr; sy_func <= ya_csr_func; sy_addr <= ya_imm[11:0];
+         sy_instret <= ya_is_csr & ((ya_imm[11:0] == 12'hC02) | (ya_imm[11:0] == 12'hB02));
+         sy_src <= ya_csr_func[2] ? {59'b0, ya_imm[16:12]} : l_xs1[0];
+         sy_pc <= ya_pc; sy_seq <= ya_seq; sy_insn <= ya_insn;
+         sy_xt <= ya_trap;  sy_rp <= 1'b0;
+         sy_fn <= ~ya_trap & (ya_insn[6:2] == 5'b00011);
+         sy_fi <= ~ya_trap & (ya_insn[6:2] == 5'b00011) & ya_insn[12];
+         sy_xcause <= ya_fault ? ya_fault_cause : 4'd2;
+         sy_xtval  <= ya_fault ? {{(64-PCW){1'b0}}, ya_fault_tval} : 64'd0;
          sy_qf     <= 1'b0;
       end
       if (qf_in) begin
