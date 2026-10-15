@@ -658,6 +658,13 @@ instructions of the GB5 checkpoint slices at the 64-row ROB (tb FPORT-SIM):
   one divide in flight (the MD stage, as today), the serialising ops' own credits for the SYSQ, and
   for the int-to-FP ops a handoff register the F stage takes beside its FIFO's pick (0.9% of
   Camera's instructions: its depth is measured, not assumed).
+- **Move 3 measured, and not taken.** A one-entry int-to-FP handoff cost the FP slices 3-6% in
+  cycles (Camera +6%, Structure from Motion +4.6%, Gaussian Blur +3.2%: the head waiting on the
+  handoff credit), four entries still cost Camera 0.86%, and the depth that held them flat, 16, is
+  a 16 x 64-bit queue with its trackers and a pick beside the FIFO's, to save one read copy per
+  integer shard. So the FP port keeps its first operand's integer read, and its second and third
+  read FP registers only (an FP op's rs2 and rs3 always are): the integer shards go 10 -> 8 at
+  IW=3 (12 -> 10 at IW=4) with no handoff.
 - **The stores (Tommy: "insert STD pseudo ops for those stores that do not have their data ready").**
   Today 44-56% of the integer slices' stores read their data through the store queue's port (in a
   register at allocation, or left out when two snooped values arrive in one cycle: 5% of

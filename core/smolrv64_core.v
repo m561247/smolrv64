@@ -465,7 +465,7 @@ module smolrv64_core
       .stall(rn_stall), .shard_low(rn_shard_low));
 
    wire [63:0]            prf_sq;                     // the store queue's data read
-   wire [63:0]            prf_f1, prf_f2, prf_f3;     // the F/CTF port's
+   wire [63:0]            prf_f1, prf_f2, prf_f3;     // the FP port's
    wire [NL-1:0]          l_qvv;                      // the lanes' write registers, packed
    wire [NL*RN_PBITS-1:0] l_qprdv;
    wire [NL*64-1:0]       l_qvalv;
@@ -2006,20 +2006,17 @@ module smolrv64_core
    // can have re-allocated before the edge after the flush, and its pending bit was
    // cleared at issue, as before.
 
-   // 3-producer forward: a source can be waiting on any of the three ALUs' writeback registers.
-   // A physical register has one writer, so at most one of {fwd,fwdb,fwdc} is true -- the mux
-   // order is immaterial.
-   // The F/CTF port's operands, forwarded from the ALUs exactly like M's x_rs* (an FP op with
-   // an integer source, or a CTF op, may consume an ALU result produced the same cycle).
-   reg [63:0] xf_rs1, xf_rs2, xf_rs3;
+   // The FP port's operands. Its first may be an integer register (an int-to-FP op's rs1), which a
+   // lane may have written the cycle before: it is forwarded from the lanes' write registers like a
+   // lane operand (a physical register has one writer, so at most one lane matches). Its others are
+   // FP registers, which no lane writes.
+   reg  [63:0] xf_rs1;
+   wire [63:0] xf_rs2 = prf_f2, xf_rs3 = prf_f3;
    integer xfl;
    always @* begin
-      xf_rs1 = prf_f1;  xf_rs2 = prf_f2;  xf_rs3 = prf_f3;
-      for (xfl = NL - 1; xfl >= 0; xfl = xfl - 1) begin
+      xf_rs1 = prf_f1;
+      for (xfl = NL - 1; xfl >= 0; xfl = xfl - 1)
          if (l_qv[xfl] & (j_ps1 == l_qprd[xfl])) xf_rs1 = l_qval[xfl];
-         if (l_qv[xfl] & (j_ps2 == l_qprd[xfl])) xf_rs2 = l_qval[xfl];
-         if (l_qv[xfl] & (j_ps3 == l_qprd[xfl])) xf_rs3 = l_qval[xfl];
-      end
    end
 
 

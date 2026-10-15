@@ -57,20 +57,22 @@ module smolrv64_prf
     output wire [2*NL*64-1:0]    rd_l,
     input  wire [PBITS-1:0]      ra_sq,    // the store queue's data: an integer shard or an FP slice
     output wire [63:0]           rd_sq,
-    input  wire [3*PBITS-1:0]    ra_f,     // the F/CTF port's three operands: either
+    input  wire [3*PBITS-1:0]    ra_f,     // the FP port's three operands: the first either, the others FP slices only
     output wire [3*64-1:0]       rd_f);
 
 `include "smolrv64_shards.vh"
    localparam integer AB_INT = $clog2(N_INT);
    localparam integer AB_FP  = $clog2(N_FP);
-   // the read ports: the lanes' 2*NL, then the store queue's, then the F port's three; the last
-   // NF read the FP file too
-   localparam integer NR = 2*NL + 4;
-   localparam integer NF = 4;
+   // the read ports: the lanes' 2*NL, then the store queue's, then the FP port's three. The integer
+   // shards serve the first NRI (an FP op's rs2 and rs3 are FP registers; its rs1 is an integer
+   // register's in an int-to-FP op), the FP slices the last NF.
+   localparam integer NR  = 2*NL + 4;
+   localparam integer NRI = 2*NL + 2;
+   localparam integer NF  = 4;
    wire [NR*PBITS-1:0] ra = {ra_f, ra_sq, ra_l};
-   // every shard's value at every port's index, and every FP slice's at the FP ports' (a wire per
-   // read: no function reads an array, rule F4)
-   wire [63:0] iv [0:NL*NR-1];
+   // every shard's value at the integer ports' index, and every FP slice's at the FP ports' (a wire
+   // per read: no function reads an array, rule F4)
+   wire [63:0] iv [0:NL*NRI-1];
    wire [63:0] fv [0:NL*NF-1];
 
    genvar gs, gp;
@@ -89,8 +91,8 @@ module smolrv64_prf
          end
       end
       always @(posedge clk) if (we_l[gs]) mem[wa_l[gs*PBITS +: AB_INT]] <= wd_l[gs*64 +: 64];
-      for (gp = 0; gp < NR; gp = gp + 1) begin: r
-         assign iv[gs*NR + gp] = mem[ra[gp*PBITS +: AB_INT]];
+      for (gp = 0; gp < NRI; gp = gp + 1) begin: r
+         assign iv[gs*NRI + gp] = mem[ra[gp*PBITS +: AB_INT]];
       end
    end endgenerate
 
@@ -125,17 +127,19 @@ module smolrv64_prf
       end
    end endgenerate
 
-   // each port: its shard's value, or (the FP ports) its FP slice's; physical register 0 reads 0
+   // each port: its integer shard's value or its FP slice's, as the port reads that file; physical
+   // register 0 reads 0
    wire [63:0] rd [0:NR-1];
    generate for (gp = 0; gp < NR; gp = gp + 1) begin: rp
       localparam integer FQ = (gp >= NR - NF) ? gp - (NR - NF) : 0;   // its FP port, if it has one
+      localparam integer IQ = (gp < NRI) ? gp : 0;                     // its integer port, if it has one
       wire [2:0] sh = ra[gp*PBITS + IDXB +: 3];
       reg  [63:0] x;
       integer k;
       always @* begin
          x = 64'd0;
          for (k = 0; k < NL; k = k + 1) begin
-            if (sh == k[2:0]) x = iv[k*NR + gp];
+            if ((gp < NRI) && (sh == k[2:0])) x = iv[k*NRI + IQ];
             if ((gp >= NR - NF) && (sh == SH_F0 + k[2:0])) x = fv[k*NF + FQ];
          end
       end
@@ -162,6 +166,9 @@ module smolrv64_prf
          if (ra_l[(2*i)*PBITS + IDXB + 2] | ra_l[(2*i+1)*PBITS + IDXB + 2])
             $fatal(1, "smolrv64_prf: lane %0d's read port names an FP register", i);
       end
+      for (i = 1; i < 3; i = i + 1)
+         if ((ra_f[i*PBITS +: PBITS] != {PBITS{1'b0}}) & ~ra_f[i*PBITS + IDXB + 2])
+            $fatal(1, "smolrv64_prf: the FP port's operand %0d names an integer register (pr=%h)", i + 1, ra_f[i*PBITS +: PBITS]);
       if (we_l[0] && wa_l[0 +: PBITS] == {PBITS{1'b0}})
          $fatal(1, "smolrv64_prf: write to physical register 0 (architectural zero)");
       // an integer result is its lane's, so the load and F-stage ports write the FP slices only
