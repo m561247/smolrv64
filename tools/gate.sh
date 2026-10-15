@@ -46,13 +46,25 @@ git log -1 --format='%H%n%s%n%ci' > "$RES/commit.txt"
 # does not compile is a test that cannot fail, which is the same defect as a test that passes
 # vacuously. A build failure here is a GATE failure, and a new run-*-tb.sh is picked up
 # without editing this file.
+# The benches are simulations, and simulations run on the simulation host (Tommy, 2026-10-15:
+# none on coffee). GATE_TB_LOGS=<dir> names their results, produced there from these sources:
+# content.txt (tools/bitcache.sh content: every input the benches read) and each bench's <name>.log
+# and <name>.rc; the verdict is the same.
+if [ -n "${GATE_TB_LOGS:-}" ] && [ "$(cat "$GATE_TB_LOGS/content.txt" 2>/dev/null)" != "$("$REPO"/tools/bitcache.sh content)" ]; then
+   echo "GATE: FAIL (GATE_TB_LOGS holds other sources' benches)"; exit 1
+fi
 for tb in "$REPO"/core/run-*-tb.sh; do
    [ -x "$tb" ] || continue
    n=$(basename "$tb" .sh)
-   (cd "$REPO/core" && "$tb") > "$RES/$n.log" 2>&1
-   rc=$?
+   if [ -n "${GATE_TB_LOGS:-}" ]; then
+      cp "$GATE_TB_LOGS/$n.log" "$RES/$n.log" 2>/dev/null || { echo "GATE: FAIL ($n: no log in GATE_TB_LOGS)"; exit 1; }
+      rc=$(cat "$GATE_TB_LOGS/$n.rc" 2>/dev/null || echo 1)
+   else
+      (cd "$REPO/core" && "$tb") > "$RES/$n.log" 2>&1
+      rc=$?
+   fi
    grep -E 'PASS|FAIL|BUILD FAILED' "$RES/$n.log" | sed "s/^/  [$n] /"
-   if [ $rc -ne 0 ] || grep -q 'FAIL' "$RES/$n.log"; then
+   if [ "$rc" != 0 ] || grep -q 'FAIL' "$RES/$n.log"; then
       echo "GATE: FAIL ($n)"; exit 1
    fi
 done
