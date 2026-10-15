@@ -487,6 +487,12 @@ A physical register's shard is encoded in its number and never changes, so a com
   group takes a row, slot k in column k, so an entry's index is `{row, column}` and that index
   is its age. A row has 2^⌈log2 `IW`⌉ columns (at IW=3 the fourth is never valid); the
   dispatch credit is a free row.
+- **Sized by one knob**, `SMOLRV64_ROB_ROWS` (a power of two; 32 in the shipping build). The
+  fetch sequence number that orders the restarts (`older()`, the sign of a difference) is
+  sized from the window it spans: `SEQW` = ⌈log2 `SEQ_LIVE`⌉ + 1, `SEQ_LIVE` = FW + QD + IW +
+  `ROB_ROWS` × IW, every op from the bundle register to the ROB head (121 at IW=3: 8 bits; 9 at
+  IW=4 or at 64 rows). An always-on check fatals when the seqno order of the mispredicts and
+  the pending restart disagrees with their order in the ROB.
 - Column k is one array, written only by slot k and read only by commit port k. Commit runs
   along the head's row from its first uncommitted column; a row may take several cycles, and
   the head moves to the next row when the row's last valid column commits.

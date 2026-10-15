@@ -44,7 +44,7 @@
  `define SMOLRV64_IW 3                 // pipeline width (must match smolrv64_core.v)
 `endif
 module rv_soc_top #(
-   parameter HW=`SMOLRV64_HW, IW=`SMOLRV64_IW, PCW=64, SEQW=8,   // fetch window halfwords / pipeline width
+   parameter HW=`SMOLRV64_HW, IW=`SMOLRV64_IW, PCW=64,   // fetch window halfwords / pipeline width
    parameter [63:0] BASE     = 64'h8000_0000,   // DDR
    parameter        RAM_LG2  = 21,              // 2 MiB DDR
    parameter [63:0] LBASE    = 64'h7000_0000,   // on-chip local SRAM (boot/monitor) -- MEM_BASEADDR on the FPGA
@@ -153,7 +153,7 @@ module rv_soc_top #(
    wire                ptw_rvalid, dptw_rvalid;
    wire                redirect;  wire [PCW-1:0] redirect_target;
 
-   smolrv64_core #(.HW(HW), .IW(IW), .PCW(PCW), .SEQW(SEQW), .RESET_PC(RESET_PC), .LBASE(LBASE), .LRAM_LG2(LRAM_LG2),
+   smolrv64_core #(.HW(HW), .IW(IW), .PCW(PCW), .RESET_PC(RESET_PC), .LBASE(LBASE), .LRAM_LG2(LRAM_LG2),
                .PABITS(PABITS), .LQ_IB(LQ_IB)) core
      (.clk(clk), .reset(reset),
       .imem_addr(imem_addr), .imem_ctx_chg(imem_ctx_chg), .imem_hold(imem_hold), .imem_cancel(imem_cancel), .hw_ip(hw_ip), .mtime(clint_mtime),

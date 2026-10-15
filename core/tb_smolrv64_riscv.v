@@ -21,7 +21,7 @@ module tb;
    // exercise the width the board runs -- until 2026-09-13 this tb hardcoded HW=2 (a full 32-bit
    // window every cycle, no partial window, no two-wide aligner path), the biggest coverage hole
    // for a width-parameterizable front end. Override with VDEFS=-DSMOLRV64_HW=2 for the old point.
-   localparam PCW = 64, SEQW = 8, HW = `SMOLRV64_HW;
+   localparam PCW = 64, HW = `SMOLRV64_HW;
    localparam AVW = $clog2(HW+2);
    localparam [63:0] BASE = 64'h8000_0000;
    // 4 MiB. 2 MiB is NOT enough: rv64ssvnapot-p-napot stores to PA 0x80208010 and
@@ -63,7 +63,7 @@ module tb;
    wire [15:0]      fe_err;    // the frontend's integrity-log bits, likewise
    always @(posedge clk) if (|fe_err)
       $fatal(1, "tb: smolrv64_frontend fe_err=%h rose without its $fatal -- an integrity-log condition is wired wrong", fe_err);
-   smolrv64_core #(.PCW(PCW), .SEQW(SEQW), .HW(HW), .RESET_PC(BASE)) dut
+   smolrv64_core #(.PCW(PCW), .HW(HW), .RESET_PC(BASE)) dut
      (.clk(clk), .reset(reset),
       .imem_addr(imem_addr), .imem_ctx_chg(), .ic_busy(1'b0),
       .ic_req(ic_req), .ic_va(), .ic_pa(ic_pa), .ic_tag(ic_tag),

@@ -60,9 +60,11 @@
 `ifndef SMOLRV64_QD
  `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif
+`ifndef SMOLRV64_ROB_ROWS
+ `define SMOLRV64_ROB_ROWS 32          // the ROB's rows of IW entries (a power of two)
+`endif
 module smolrv64_core
   #(parameter PCW  = 64,
-    parameter SEQW = 8,
     parameter HW   = `SMOLRV64_HW,
     parameter IW   = `SMOLRV64_IW,
     parameter AW   = 64,
@@ -144,6 +146,14 @@ module smolrv64_core
     output wire [15:0]             lsu_err,
     output wire [15:0]             fe_err,         // the frontend's invariants (smolrv64_frontend)
     output wire [127:0]            core_dbg);      // why nothing retires: the board's wedge ILA (ILA_MEM)
+
+   // THE SEQNO WIDTH. older() orders two seqnos by the sign of their difference, which is right
+   // while no two live ones are 2^(SEQW-1) or more apart. An op is live from the bundle register
+   // to its retirement: the bundle (FW), the decoupling queue (QD), the IR's group (IW) and the
+   // ROB (ROB_ROWS rows of IW), so SEQW is sized from them.
+   localparam integer ROB_ROWS = `SMOLRV64_ROB_ROWS;
+   localparam integer SEQ_LIVE = `SMOLRV64_FW + `SMOLRV64_QD + IW + ROB_ROWS * IW;
+   localparam integer SEQW     = $clog2(SEQ_LIVE) + 1;
 
    // =========================================================== stage F
    wire                     d_valid, d_rvc, d_rd_v, d_rs1_v, d_rs2_v, d_rs3_v;
@@ -483,8 +493,8 @@ module smolrv64_core
    // free list with separate speculative and committed heads, where rollback is a pointer
    // restore. That already supports N uncommitted instructions; N is only ever 1 today
    // because M blocks. So the ROB holds the commit RECORD and re-orders it, nothing else.
-   // 32 rows of a group each: an entry is {row, column}, slot k's in column k (smolrv64_rob).
-   localparam integer ROB_ROWS = 32, ROB_CB = (IW > 1) ? $clog2(IW) : 1, ROB_IDXB = 5 + ROB_CB;
+   // ROB_ROWS rows of a group each: an entry is {row, column}, slot k's in column k (smolrv64_rob).
+   localparam integer ROB_CB = (IW > 1) ? $clog2(IW) : 1, ROB_IDXB = $clog2(ROB_ROWS) + ROB_CB;
    localparam integer ROB_DEPTH = ROB_ROWS << ROB_CB;   // the index space
    // THE KILL (5.4e): every entry younger than the walked-to branch, from the ROB's flops. Each
    // structure holding an op clears it when dead(its rob); the kill holds until the flush.
@@ -510,7 +520,7 @@ module smolrv64_core
    wire [IW*ROB_IDXB-1:0] rob_d_idxv;           // the entry each slot takes
    wire [IW-1:0]          rob_readyv;           // a row is free
    wire                   rob_empty;
-   wire [5:0]             rob_occ;              // rows
+   wire [ROB_IDXB-ROB_CB:0] rob_occ;            // rows
    wire                ldw_int;            // the LD stream's write goes to a lane (completes at its drain)
    wire                few_int;            // ...and the FE stream's
    wire                sy_lane_ok;                   // lane A's slot is free for the SYSQ
@@ -3355,6 +3365,23 @@ module smolrv64_core
       else if (fr_set)   begin fr_v <= 1'b1; fr_seq <= cf_seq; fr_rob <= cf_rob; fr_br <= cf_is_branch; fr_jalr <= cf_is_jalr; end
       fr_set_q <= ~reset & fr_set;
    end
+   // THE SEQNO ORDER IS THE ROB'S. The pending restart and the mispredicts resolving beside it are
+   // all in the ROB, so the seqno compares that pick the oldest (lw, cf_older) must order them as
+   // their entries do from the head. They disagree only when two live seqnos are 2^(SEQW-1) or
+   // more apart: SEQW too narrow for the window (SEQ_LIVE, above).
+   function rob_older(input [ROB_IDXB-1:0] a, input [ROB_IDXB-1:0] b);   // a is older than b
+      rob_older = (a - rob_head_idx) < (b - rob_head_idx);
+   endfunction
+   integer sok;
+   always @(posedge clk) if (!reset) begin
+      for (sok = 0; sok < NL; sok = sok + 1)
+         if (lm[sok] && sok[NLB-1:0] != wl && !rob_older(cf_rob, lr_rob[sok]))
+            $fatal(1, "smolrv64_core: the oldest mispredict by seqno (lane %0d, seq %0d, rob %0d) is younger than lane %0d's (seq %0d, rob %0d): SEQW=%0d is too narrow",
+                   wl, cf_seq, cf_rob, sok, lr_seq[sok], lr_rob[sok], SEQW);
+      if (cf_mis && fr_v && cf_older != rob_older(cf_rob, fr_rob))
+         $fatal(1, "smolrv64_core: the restart order by seqno (%0d vs the pending %0d) is not the ROB's (rob %0d vs %0d, head %0d): SEQW=%0d is too narrow",
+                cf_seq, fr_seq, cf_rob, fr_rob, rob_head_idx, SEQW);
+   end
 `ifndef SYNTHESIS
    // the restart's coverage (WALK-SIM): squashes at the head, those the walk had reached and the
    // map was checked at, the rows walked, the squashes the kill was checked at, the releases
@@ -4200,7 +4227,7 @@ module smolrv64_core
    wire       ir_ld = |(s_v & s_ld_nb);
    wire       ir_st = |(s_v & s_st_nb);
    wire [3:0] ir_n  = ones_nl(s_v);
-   wire [6:0]  rob_inflt = {1'b0, rob_occ} + {6'd0, |s_v};          // rows: the ROB's and the IR group's
+   wire [ROB_IDXB-ROB_CB+1:0] rob_inflt = {1'b0, rob_occ} + {{(ROB_IDXB-ROB_CB+1){1'b0}}, |s_v};   // rows: the ROB's and the IR group's
    reg  [NL-1:0] cr_i;                                 // ...and lane k has room for one more
    integer crk;
    always @* for (crk = 0; crk < NL; crk = crk + 1)
@@ -4405,7 +4432,7 @@ module smolrv64_core
       end
    end
    // ---- core_dbg: the state that says what the pipe waits on, for the board's wedge ILA ----
-   // [127:112] the FPU's state (fp_unit dbg), [111:91] flags, [90:85] SQ occupancy, [84:79] LQ occupancy, [78:72] ROB head index,
+   // [127:112] the FPU's state (fp_unit dbg), [111:91] flags, [90:85] SQ occupancy, [84:79] LQ occupancy, [78:72] the ROB head's row,
    // [71:40] M's instruction, [39] the FPU busy, [38:0] hpm_ev[38:0] (this cycle's event and stall
    // attribution, the counters' bus; the top-down depth bits above 38 stay off this ILA).
    wire [15:0] fpu_dbg;
@@ -4414,7 +4441,7 @@ module smolrv64_core
                       ic_req, ic_ack, ic_valid, ic_busy, imem_ok, immu_ready,
                       dmem_ren, dmem_idle, lq_x_devwait, redirect,
                       sq_occ6, lq_occ6,
-                      {(7-ROB_IDXB){1'b0}}, rob_head_idx, m_insn, fpu_busy, hpm_ev[38:0]};
+                      {(7-(ROB_IDXB-ROB_CB)){1'b0}}, rob_head_idx[ROB_IDXB-1:ROB_CB], m_insn, fpu_busy, hpm_ev[38:0]};
 endmodule
 
 `undef PL_DECL
