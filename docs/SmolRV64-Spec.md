@@ -2018,7 +2018,10 @@ closure above is real; the branch cannot ship until that defect is found (handof
   among them: `NFLIGHT`=4 and results return by tag, out of issue order (§7). `LQ_N = 1 << LQ_IB`;
   `LQ_IB` = `SMOLRV64_LQB` = 4 (`smolrv64_tags.vh`, which the core, `rv_soc_top` and the benches
   read), and the D$ read tag is `{client[1:0], lq_idx}`, `DRTW = LQ_IB + 2`. 8 -> 16 entries:
-  Dhrystone 1,660,876 -> 1,585,889 cycles (lockstep, IW=3).
+  Dhrystone 1,660,876 -> 1,585,889 cycles (lockstep, IW=3). 16 -> 32, measured at the 64-row ROB
+  on the GB5 slices: PDF Rendering's `be:lq-full` (38% of its cycles) goes, yet its cycles rise
+  0.48% (Navigation +0.82%, SQLite -0.81%, HTML5 -0.26%), and the D$'s mean busy MSHRs stay at
+  1.05: PDF waits on misses that do not overlap, not on the queue, so it stays at 16.
 - **Up to `SQ_N`=32 stores between dispatch and their drain.** `SQ_N = 1 << SQ_IB`, `SQ_IB` =
   `SMOLRV64_SQB` = 5 (`smolrv64_tags.vh`). A store holds its entry from dispatch until the LSU
   drains it after commit, and a load whose bytes overlap an older queued store waits for that
