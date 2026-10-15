@@ -1326,12 +1326,13 @@ Two independent `mmu` instances — **iTLB** in `smolrv64_core`, **dTLB** in `sm
 | | |
 |---|---|
 | TLB | **direct-mapped** on the VPN's low bits, read in the translate cycle: the dTLB **2048 entries** (LUTRAM, 8 MiB of 4 KiB pages), the iTLB 64 (one LUTRAM depth: no read mux) |
+| iTLB second level | **512 entries** (`L2N`), direct-mapped, on the miss path: read in the cycle after a first-level miss (`L2LK`) from the walker's registered VA, so the fetch path keeps the first level's one LUTRAM depth. A hit (perms checked as on the first level) answers as a one-cycle walk and refills the first level; a miss walks, and the walk installs its leaf in both. It looks up only where a walk could start (`walk_ok`) |
 | Scheme | Sv39, 3-level hardware page-table walk |
 | PTW | reads through the D$ read port (§8); a miss fills through the D$ |
 | Superpages | 2 MiB / 1 GiB; misaligned superpage → fault |
 | Ssvnapot | level-0 NAPOT leaves recognised |
 | PA width | 56 bits produced (`AW`), 34 significant to the caches |
-| Flush | `sfence.vma` and `satp` writes advance a 16-bit generation (`GB`); an entry hits only when it was installed in the current one (`tlb_g` = {installed, generation}, LUTRAM beside the entry). No entry is written on a flush; the array is cleared over `TLBN` cycles at reset and when the generation wraps, and nothing hits or installs while it is |
+| Flush | `sfence.vma` and `satp` writes advance a 16-bit generation (`GB`); an entry hits only when it was installed in the current one (`tlb_g` = {installed, generation}, LUTRAM beside the entry). No entry is written on a flush; the arrays are cleared over `max(TLBN, L2N)` cycles at reset and when the generation wraps, and nothing hits or installs while they are |
 
 **No iTLB walk past a weak branch.** The core counts the conditionals dispatched on a weak
 direction (the effective counter, the corrector's when it hit, is 01 or 10) until each resolves in
@@ -1653,6 +1654,7 @@ Address translation, two instances (iTLB in `smolrv64_core`, dTLB in `smolrv64_l
 | array | shape | width | bits |
 |---|---|---|---|
 | iTLB `tlb_v`/`tag`/`ppn`/`lvl`/`perm`/`nc`/`n` | 64 | 1+27+44+2+8+1+1 = 84 | 5 376 |
+| iTLB second level `tlb2_*`, the same fields | 512 | 84 | 43 008 |
 | dTLB, the same fields | 2048, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 84 | 172 032 per copy |
 
 Also in `rv_soc_top`: `lmem` — the 256 KiB on-chip boot/monitor SRAM, `NLLINE × 512`; and

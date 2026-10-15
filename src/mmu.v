@@ -18,6 +18,11 @@ module mmu
   #(parameter AW   = 56,           // physical address width produced
     parameter TLBN = 16,           // TLB entries (direct-mapped)
     parameter TLBI = 4,            // clog2(TLBN)
+    // A SECOND LEVEL on the miss path: L2N entries, direct-mapped on the VPN's low L2I bits (0: none).
+    // It is read in the cycle after a first-level miss, from the walker's registered VA, so the
+    // first level's hit path keeps its one LUTRAM depth; a hit answers like a one-cycle walk.
+    parameter L2N  = 0,
+    parameter L2I  = 1,            // clog2(L2N), at least 1
     parameter GB   = 16,           // generation bits: the array is cleared once per 2^GB flushes
     // The top of physical memory: a PA at or above it does not exist and takes an access
     // fault. Every device lies below DRAM, so everything below the top is addressable and the
@@ -103,9 +108,10 @@ module mmu
    // in one cycle made 2048 flops and their read muxes (9.1K LUTs, the core's largest single
    // structure). The array is cleared only when the generation wraps, and at reset: a scan
    // writes every entry in TLBN cycles, during which nothing hits and nothing is installed.
+   localparam integer SCI = (L2N > 0 && L2I > TLBI) ? L2I : TLBI;   // the scan covers both levels
    reg [GB-1:0]     cg;                   // the current generation
-   reg              scan;                 // clearing the array
-   reg [TLBI-1:0]   scan_i;
+   reg              scan;                 // clearing the arrays
+   reg [SCI-1:0]    scan_i;
    (* ram_style = "distributed" *) reg [GB:0] tlb_g [0:TLBN-1];   // {installed, generation}
    reg [26:0]       tlb_tag [0:TLBN-1];   // VPN[26:0] (vpn2,vpn1,vpn0)
    reg [43:0]       tlb_ppn [0:TLBN-1];   // page PPN (leaf)
@@ -119,7 +125,7 @@ module mmu
    // leaves the page-offset bits defined.
    initial begin
       for (t=0;t<TLBN;t=t+1) begin tlb_g[t]={(GB+1){1'b0}}; tlb_n[t]=1'b0; end
-      cg = {GB{1'b0}};  scan = 1'b0;  scan_i = {TLBI{1'b0}};
+      cg = {GB{1'b0}};  scan = 1'b0;  scan_i = {SCI{1'b0}};
    end
 
    wire [26:0]     vpn_all = {vpn2, vpn1, vpn0};
@@ -159,7 +165,8 @@ module mmu
    endfunction
 
    // -------------------- walk FSM --------------------
-   localparam IDLE=2'd0, REQ=2'd1, RCV=2'd2;
+   // L2LK (L2N > 0 only): the second level's lookup, between a first-level miss and the walk.
+   localparam IDLE=2'd0, REQ=2'd1, RCV=2'd2, L2LK=2'd3;
    reg [1:0]  st;
    reg [1:0]  lvl;
    reg [43:0] walk_ppn;       // current table PPN
@@ -291,22 +298,81 @@ module mmu
    wire             leaf_oob = {{(64-AW){1'b0}}, leaf_acc} >= DRAM_TOP;                 // PA above the cap
    wire             fill     = (st==RCV) & ptw_rvalid & req_match & ~pte_inv & pte_leaf
                              & ~leaf_mis & ~leaf_nap & ~leaf_prm & ~leaf_oob;
-   wire             g_we    = ~reset & (scan | fill);
-   wire [TLBI-1:0]  g_wa    = scan ? scan_i : va_q[12+:TLBI];
-   wire [GB:0]      g_wd    = scan ? {(GB+1){1'b0}} : {({1'b0, leaf_last} < TOP_PPN), cg};
+   // The second level, read at the walker's VA in L2LK (one LUTRAM read each; a hit whose perms
+   // fail is a miss, as on the first level, so a fault is always a fresh walk's).
+   wire          l2_hit;                    // L2LK finds the page
+   wire [43:0]   l2_ppn;
+   wire [1:0]    l2_lvl;
+   wire [7:0]    l2_perm;
+   wire          l2_nc, l2_n;
+   wire          l2_fill = (st == L2LK) & req_match & l2_hit;   // refills the first level
+   // the first level's entry: the walk's leaf, or the second level's on its hit
+   wire             f1      = fill | l2_fill;
+   wire [43:0]      f1_ppn  = l2_fill ? l2_ppn  : ptw_rdata[53:10];
+   wire [1:0]       f1_lvl  = l2_fill ? l2_lvl  : lvl;
+   wire [7:0]       f1_perm = l2_fill ? l2_perm : ptw_rdata[7:0];
+   wire             f1_nc   = l2_fill ? l2_nc   : (ptw_rdata[62] | ptw_rdata[61]);
+   wire             f1_n    = l2_fill ? l2_n    : ptw_rdata[63];
+   // a second-level entry was installed only below the cap, so its refill is installed too
+   wire             f1_in   = l2_fill | ({1'b0, leaf_last} < TOP_PPN);
+   wire             g_we    = ~reset & (scan | f1);
+   wire [TLBI-1:0]  g_wa    = scan ? scan_i[TLBI-1:0] : va_q[12+:TLBI];
+   wire [GB:0]      g_wd    = scan ? {(GB+1){1'b0}} : {f1_in, cg};
    always @(posedge clk) if (g_we) tlb_g[g_wa] <= g_wd;
+   // A NAPOT page still occupies one entry per 4 KiB VA (the tag is the full VPN); the N bit rides
+   // along so the hit path substitutes va[15:12] for the PTE's size-encoded ppn[3:0]. A page
+   // reaching past the cap is answered for its access only and never installed.
+   always @(posedge clk) if (f1) begin
+      tlb_tag[va_q[12+:TLBI]]  <= va_q[38:12];
+      tlb_ppn[va_q[12+:TLBI]]  <= f1_ppn;
+      tlb_lvl[va_q[12+:TLBI]]  <= f1_lvl;
+      tlb_perm[va_q[12+:TLBI]] <= f1_perm;
+      tlb_nc[va_q[12+:TLBI]]   <= f1_nc;
+      tlb_n[va_q[12+:TLBI]]    <= f1_n;
+   end
+   generate if (L2N > 0) begin : l2
+      (* ram_style = "distributed" *) reg [GB:0] tlb2_g [0:L2N-1];   // {installed, generation}
+      reg [26:0] tlb2_tag  [0:L2N-1];
+      reg [43:0] tlb2_ppn  [0:L2N-1];
+      reg [1:0]  tlb2_lvl  [0:L2N-1];
+      reg [7:0]  tlb2_perm [0:L2N-1];
+      reg        tlb2_nc   [0:L2N-1];
+      reg        tlb2_n    [0:L2N-1];
+      integer t2;
+      initial for (t2 = 0; t2 < L2N; t2 = t2 + 1) begin tlb2_g[t2] = {(GB+1){1'b0}}; tlb2_n[t2] = 1'b0; end
+      wire [L2I-1:0] ri = va_q[12+:L2I];
+      assign l2_hit  = ~scan & (tlb2_g[ri] == {1'b1, cg}) & (tlb2_tag[ri] == va_q[38:12])
+                     & ~perm_fault({56'd0, tlb2_perm[ri]}, acc_q, prv_q, sum_q, mxr_q);
+      assign l2_ppn  = tlb2_ppn[ri];   assign l2_lvl = tlb2_lvl[ri];  assign l2_perm = tlb2_perm[ri];
+      assign l2_nc   = tlb2_nc[ri];    assign l2_n   = tlb2_n[ri];
+      // the walk's fill writes the second level too (one write statement each, rule I10)
+      wire           we2 = ~reset & (scan | fill);
+      wire [L2I-1:0] wa2 = scan ? scan_i[L2I-1:0] : va_q[12+:L2I];
+      always @(posedge clk) if (we2) tlb2_g[wa2] <= scan ? {(GB+1){1'b0}} : {({1'b0, leaf_last} < TOP_PPN), cg};
+      always @(posedge clk) if (fill) begin
+         tlb2_tag[ri]  <= va_q[38:12];
+         tlb2_ppn[ri]  <= ptw_rdata[53:10];
+         tlb2_lvl[ri]  <= lvl;
+         tlb2_perm[ri] <= ptw_rdata[7:0];
+         tlb2_nc[ri]   <= ptw_rdata[62] | ptw_rdata[61];
+         tlb2_n[ri]    <= ptw_rdata[63];
+      end
+   end else begin : no_l2
+      assign l2_hit = 1'b0;  assign l2_ppn = 44'd0;  assign l2_lvl = 2'd0;  assign l2_perm = 8'd0;
+      assign l2_nc  = 1'b0;  assign l2_n   = 1'b0;
+   end endgenerate
 
    always @(posedge clk) begin
       if (reset) begin
          st<=IDLE; ptw_read<=1'b0; w_done<=1'b0;
-         scan<=1'b1; scan_i<={TLBI{1'b0}};
+         scan<=1'b1; scan_i<={SCI{1'b0}};
       end else begin
          w_done<=1'b0; ptw_read<=1'b0;
          // A flush advances the generation; the one that wraps it starts a clear, so an
          // entry from 2^GB generations ago can never match again.
          if (flush) begin
             cg <= cg + 1'b1;
-            if (&cg) begin scan<=1'b1; scan_i<={TLBI{1'b0}}; end
+            if (&cg) begin scan<=1'b1; scan_i<={SCI{1'b0}}; end
          end
          if (scan & ~(flush & (&cg))) begin
             scan_i <= scan_i + 1'b1;
@@ -316,8 +382,18 @@ module mmu
            IDLE: if (start_walk) begin
               va_q<=req_vaddr; acc_q<=req_access; prv_q<=priv; sum_q<=sum; mxr_q<=mxr;
               satp_q<=satp; ctx_poison<=1'b0;
-              walk_ppn<=satp[43:0]; lvl<=2'd2; st<=REQ;
+              walk_ppn<=satp[43:0]; lvl<=2'd2; st<=(L2N > 0) ? L2LK : REQ;
            end
+           // the second level: a hit answers now (its PA, as a walk's leaf would give it) and
+           // refills the first level (l2_fill, above); a miss walks
+           L2LK: if (L2N == 0) $fatal(1, "[mmu] a second-level lookup with no second level");
+                 else if (!req_match) st<=IDLE;
+                 else if (l2_hit) begin
+                    w_paddr <= leaf_pa(l2_ppn, l2_lvl, va_q, l2_n);
+                    w_lvl   <= l2_lvl;
+                    w_nc    <= l2_nc;
+                    w_fault <= 1'b0; w_done <= 1'b1; st <= IDLE;
+                 end else st <= REQ;
            REQ: if (!req_match) st<=IDLE;           // request changed -> abort stale walk
                 else if ({1'b0, walk_ppn} >= TOP_PPN) begin   // the table itself is above the cap
                    w_fault<=1'b1; w_cause<=af_cause_q; w_done<=1'b1; st<=IDLE;
@@ -336,21 +412,11 @@ module mmu
                     w_fault<=1'b1; w_cause<=pf_cause_q; w_done<=1'b1; st<=IDLE;
                  end else if (leaf_oob) begin
                     w_fault<=1'b1; w_cause<=af_cause_q; w_done<=1'b1; st<=IDLE;
-                 end else begin
+                 end else begin   // the leaf: answered, and installed by `fill` (above)
                     w_paddr <= leaf_acc;
                     w_lvl  <= lvl;
                     w_fault<=1'b0; w_done<=1'b1; st<=IDLE;
                     w_nc   <= ptw_rdata[62] | ptw_rdata[61];   // Svpbmt PBMT != 0
-                    // fill TLB. A NAPOT page still occupies one entry per 4 KiB VA (the tag
-                    // is the full VPN); the N bit rides along so the hit path substitutes
-                    // va[15:12] for the PTE's size-encoded ppn[3:0]. A page reaching past the
-                    // cap is answered for this access only and never installed.
-                    tlb_tag[va_q[12+:TLBI]] <= va_q[38:12];
-                    tlb_ppn[va_q[12+:TLBI]] <= ptw_rdata[53:10];
-                    tlb_lvl[va_q[12+:TLBI]] <= lvl;
-                    tlb_perm[va_q[12+:TLBI]]<= ptw_rdata[7:0];
-                    tlb_nc[va_q[12+:TLBI]]  <= ptw_rdata[62] | ptw_rdata[61];
-                    tlb_n[va_q[12+:TLBI]]   <= ptw_rdata[63];
                  end
               end else if (lvl==2'd0) begin
                  w_fault<=1'b1; w_cause<=pf_cause_q; w_done<=1'b1; st<=IDLE;    // no leaf at level 0
@@ -358,8 +424,8 @@ module mmu
                  walk_ppn<=ptw_rdata[53:10]; lvl<=lvl-1'b1; st<=REQ;           // descend
               end
            end
-           // st is 2 bits; encoding 3 is unused. Without an arm the walker parks there
-           // forever and every translation stalls behind it -- a silent whole-core wedge.
+           // st is 2 bits; without an arm the walker parks in an unknown state forever and every
+           // translation stalls behind it -- a silent whole-core wedge.
            default: if (^st !== 1'bx) $fatal(1, "[mmu] ILLEGAL FSM STATE st=%0d", st);
          endcase
          // context-staleness tracking (registered; see req_match). Runs every cycle

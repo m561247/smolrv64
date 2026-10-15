@@ -370,7 +370,7 @@ module smolrv64_core
    // forwarding, which needs the regime as well as the VA to name the same memory
    wire        m_bare     = (satp_data[63:60] != 4'd8);
 
-   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6)) u_immu
+   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6), .L2N(512), .L2I(9)) u_immu
      (.clk(clk), .reset(reset),
       .req_valid(1'b1), .req_vaddr(imem_va), .req_access(2'd0),
       .priv(mmu_priv), .sum(mmu_sum), .mxr(mmu_mxr), .satp(satp_fetch), .flush(mmu_flush_q),
