@@ -35,7 +35,11 @@ module smolrv64_async_fifo #(
       .RD_DATA_COUNT_WIDTH  ( ADDR_BITS + 1 ),
       .READ_DATA_WIDTH      ( WIDTH ),
       .READ_MODE            ( "fwft" ),
-      .RELATED_CLOCKS       ( 1 ),
+      // The clocks are treated as unrelated: the pointers cross through CDC_SYNC_STAGES of
+      // synchronizers, timed as a datapath bound rather than a cycle of the faster clock. Treated
+      // as related (1), the crossings sat at zero slack in every build and decided closures by
+      // picoseconds (Tommy, 2026-10-15: trade the latency for the margin; the L2 will win it back).
+      .RELATED_CLOCKS       ( 0 ),
       .SIM_ASSERT_CHK       ( 0 ),
       .USE_ADV_FEATURES     ( "0000" ),
       .WAKEUP_TIME          ( 0 ),
