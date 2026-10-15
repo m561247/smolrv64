@@ -776,8 +776,8 @@ module smolrv64_core
    // irqop pseudo-op stays ordered (d_cls_l), so M keeps the single trap site; a real CTI
    // never traps at execute (RVC targets are 2-byte aligned, jalr clears bit 0).
    wire d_cls_c = d_gc[GC_C];
-   // A divide is the F port's third drain into the MD stage; its result lands by the stage's
-   // tag like the FPU's.
+   // A divide issues in its slot's lane, which hands its operands to the MD stage; its result
+   // lands by the stage's tag like the FPU's.
    wire d_cls_m = d_gc[GC_M];
    // SYSTEM opcode (the irqop included), FENCE and FENCE.I (MISC-MEM, funct3 00x; CBO is 010),
    // and an instruction that traps at dispatch -- a fetch fault or an illegal instruction: every
@@ -812,7 +812,7 @@ module smolrv64_core
    // load, one store and one FP/control-flow op, a head op alone): its record, its classes, its
    // destination's shard, its renamed sources and their readiness, its payload and its ROB slot.
    // Slot k's ALU-class op goes to lane k.
-   wire [IW-1:0]          s_v, s_cls_i, s_cls_l, s_cls_fc, s_ld_nb, s_st_nb, s_dcr, s_r2rdy;
+   wire [IW-1:0]          s_v, s_cls_i, s_cls_l, s_cls_m, s_cls_fc, s_ld_nb, s_st_nb, s_dcr, s_r2rdy;
    wire [2:0]             s_srdy_hit [0:IW-1];
    wire [RN_PBITS-1:0]    s_prd_g [0:IW-1], s_prs2 [0:IW-1];
    wire [3*RN_PBITS-1:0]  s_ps_in [0:IW-1];
@@ -861,6 +861,7 @@ module smolrv64_core
       assign s_v[gs] = fe_dv[gs];
       assign s_takev[gs] = fe_dv[gs] & d_take;       // a group dispatches whole
       assign s_cls_i[gs] = q_gc[GC_I];  assign s_cls_l[gs] = q_gc[GC_L];  assign s_cls_fc[gs] = q_gc[GC_FC];
+      assign s_cls_m[gs] = q_gc[GC_M];
       assign s_ld_nb[gs] = ld_nb;  assign s_st_nb[gs] = st_nb;  assign s_dcr[gs] = dcr;
       assign s_rs1v[gs*6 +: 6] = q_rs1;  assign s_rs2v[gs*6 +: 6] = q_rs2;  assign s_rs3v[gs*6 +: 6] = q_rs3;
       assign s_rdv[gs*6 +: 6] = q_rd;    assign s_rd_vv[gs] = q_rd_v;     assign s_shardv[gs*3 +: 3] = shard;
@@ -960,6 +961,9 @@ module smolrv64_core
    function automatic is_mulop(input [31:0] i);     // MUL, MULH*, MULW: OP or OP-32, M, funct3 < 4
       is_mulop = ((i[6:2] == 5'b01100) | (i[6:2] == 5'b01110)) & (i[31:25] == 7'b0000001) & ~i[14];
    endfunction
+   function automatic is_divop(input [31:0] i);     // DIV*, REM*: OP or OP-32, M, funct3 >= 4
+      is_divop = ((i[6:2] == 5'b01100) | (i[6:2] == 5'b01110)) & (i[31:25] == 7'b0000001) & i[14];
+   endfunction
    function automatic is_lmem(input [31:0] i);      // a plain load or store: a lane generates its address
       is_lmem = (i[6:3] == 4'b0000) | (i[6:3] == 4'b0100);   // LOAD/LOAD-FP, STORE/STORE-FP
    endfunction
@@ -968,7 +972,7 @@ module smolrv64_core
    endfunction
    // a lane op that does not complete in its execute cycle: no write, wake or ROB completion there
    function automatic lane_late(input [31:0] i);
-      lane_late = is_mulop(i) | is_lmem(i) | is_hop(i);
+      lane_late = is_mulop(i) | is_divop(i) | is_lmem(i) | is_hop(i);
    endfunction
    localparam integer PL_INSN = PLW - PCW - 32;   // the instruction's place in the payload (pl_in)
 
@@ -1067,15 +1071,11 @@ module smolrv64_core
    // payload, routes the drain: control flow to cf_*, FP to f_valid. (CTF-over-FP priority is a
    // later addition; for now the queue picks by its own policy.)
    wire j_istrap  = qf_illegal | qf_fault;               // a trap: the SYSQ, whatever its decode says
-   wire j_ismd    = qf_is_mul & ~j_istrap;              // ...or a mul/div (C1): the MD stage's drain
    wire j_issys   = is_sysq(qf_insn, qf_illegal, qf_fault);  // ...or a system op, a fence or a trap: the SYSQ's drain
-   wire md_advance;                                      // the MD stage can take one (defined with it)
    wire sy_advance;                                      // the SYSQ can take one (defined with it)
-   wire j_needs_m = j_v & j_ismd;                        // j_* holds a mul/div...
-   wire j_needs_s = j_v & j_issys;                       // ...or a system op...
-   wire j_needs_f = j_v & ~j_ismd & ~j_issys;           // ...or an FP op
-   wire j_adv     = j_needs_m ? md_advance : j_needs_s ? sy_advance
-                  : (j_needs_f ? f_advance : 1'b1);
+   wire j_needs_s = j_v & j_issys;                       // j_* holds a system op...
+   wire j_needs_f = j_v & ~j_issys;                      // ...or an FP op
+   wire j_adv     = j_needs_s ? sy_advance : (j_needs_f ? f_advance : 1'b1);
    wire j_ready   = ~j_v | j_adv;
    assign rf_take = rf_iss_v;   // rf_iss_v is already gated by unit_busy = j_v & ~j_adv
    wire iq_blk_v = rf_blk_v | l_blk_v[0];
@@ -1111,7 +1111,6 @@ module smolrv64_core
    // An ordered op completes when M takes it; an ALU op completes unconditionally, because
    // SH_IE has exactly one writer and it is this one. Nothing can be in the way.
    wire   iss_f       = j_needs_f & f_advance & ~redirect;    // j_* drains an FP op into f_valid
-   wire   iss_md      = j_needs_m & md_advance & ~redirect;   // ...or a mul/div into the MD stage (C1)
    wire   iss_sys     = j_needs_s & sy_advance & ~redirect;   // ...or a system op into the SYSQ (C3 step 3)
 
 
@@ -1298,6 +1297,10 @@ module smolrv64_core
    wire [63:0]           l_addr [0:NL-1], l_tgt [0:NL-1], l_ttgt [0:NL-1];
    wire                  l_red [0:NL-1], l_taken [0:NL-1];
    wire                  l_lm [0:NL-1], l_st [0:NL-1];      // a load or store generating its address
+   wire                  l_dgo [0:NL-1], l_drdv [0:NL-1];   // a divide executes, handing the MD stage its operands
+   wire [RN_PBITS-1:0]   l_dprd [0:NL-1];
+   wire [3:0]            l_dop [0:NL-1];                    // ...its W form and funct3
+   wire [63:0]           l_xs1 [0:NL-1];                    // the lane's rs1 value (l_rs2: its rs2)
    wire                  l_br [0:NL-1], l_jmp [0:NL-1], l_jalr [0:NL-1], l_rvc [0:NL-1], l_rdv [0:NL-1];
    wire [SEQW-1:0]       l_seq [0:NL-1];
    wire [PCW-1:0]        l_pc [0:NL-1];
@@ -1432,6 +1435,11 @@ module smolrv64_core
          mrob2 <= mrob1;  mprd2 <= mprd1;  mrdv2 <= mrdv1;
       end
       wire m_wr = m2 & mrdv2;
+      // ---- a divide: the lane reads its operands and hands them to the one MD stage, which the
+      // dispatch credit (cr_div) keeps free for it; the result lands through the lane's landing buffer
+      assign l_dgo[gl] = iss & is_divop(q_insn);
+      assign l_xs1[gl] = rs1;  assign l_dprd[gl] = q_prd;  assign l_drdv[gl] = q_rd_v;
+      assign l_dop[gl] = {q_insn[6:2] == 5'b01110, q_insn[14:12]};
       always @(posedge clk) if (!reset & fr_rel & ((stg_v & dead(stg_rob)) | (v & dead(rob)) | (m1 & dead(mrob1)) | (m2 & dead(mrob2))))
          $fatal(1, "smolrv64_core: the release finds a dead op in lane %0d", gl);
       always @(posedge clk) if (!reset & kchk & (stg_v | (occ != 0) | v | m1 | m2))
@@ -2208,32 +2216,73 @@ module smolrv64_core
    // only older stores, so the wait ends.
    assign dmem_idle = lsu_idle & (sq_occ == 0);
 
-   // ---- the MD stage: mul/div off the ordered pipe (C1, 2026-09-17) ----
-   // The F port's third drain. One divide at a time (the divider is single-occupancy), its
-   // operands captured from the port's forwarded reads in the issue cycle exactly as the F stage
-   // captures them, and landing by its own tag like the FPU: rob and prd ride in the stage.
-   reg                md_v, md_div, md_rd_v, md_pend;
+   // ---- the MD stage: the one divider ----
+   // A divide issues in its slot's lane, which reads its operands and hands them here in its
+   // execute cycle. The divider is single-occupancy, and a divide and a remainder of the same
+   // operands come in pairs, so a second divide waits in the queue register (mq_*) with its
+   // operands rather than holding dispatch for the first's whole run: two are in flight at most
+   // (the dispatch credit cr_div), one in the stage and one queued, and so at most two lanes hand
+   // one over in a cycle. It lands by its own tag like the FPU: rob and prd ride in the stage.
+   reg                dg_any, dg_rdv, dq_any, dq_rdv;   // the lanes' divides this cycle: the first, the second
+   reg [ROB_IDXB-1:0] dg_rob, dq_rob;
+   reg [RN_PBITS-1:0] dg_prd, dq_prd;
+   reg [63:0]         dg_a, dg_b, dq_a, dq_b;
+   reg [3:0]          dg_op, dq_op;
+   reg [2:0]          dg_n;
+   integer            dgk;
+   always @* begin
+      dg_any = 1'b0;  dg_rdv = 1'b0;  dg_rob = {ROB_IDXB{1'b0}};  dg_prd = {RN_PBITS{1'b0}};
+      dg_a = 64'd0;  dg_b = 64'd0;  dg_op = 4'd0;
+      dq_any = 1'b0;  dq_rdv = 1'b0;  dq_rob = {ROB_IDXB{1'b0}};  dq_prd = {RN_PBITS{1'b0}};
+      dq_a = 64'd0;  dq_b = 64'd0;  dq_op = 4'd0;  dg_n = 3'd0;
+      for (dgk = 0; dgk < NL; dgk = dgk + 1)
+         if (l_dgo[dgk]) begin
+            if (dg_n == 3'd0) begin
+               dg_any = 1'b1;  dg_rdv = l_drdv[dgk];  dg_rob = l_rob[dgk];  dg_prd = l_dprd[dgk];
+               dg_a = l_xs1[dgk];  dg_b = l_rs2[dgk];  dg_op = l_dop[dgk];
+            end else begin
+               dq_any = 1'b1;  dq_rdv = l_drdv[dgk];  dq_rob = l_rob[dgk];  dq_prd = l_dprd[dgk];
+               dq_a = l_xs1[dgk];  dq_b = l_rs2[dgk];  dq_op = l_dop[dgk];
+            end
+            dg_n = dg_n + 3'd1;
+         end
+   end
+   reg                md_v, md_rd_v, md_pend;
+   reg                mq_v, mq_rdv;
+   reg [ROB_IDXB-1:0] mq_rob;
+   reg [RN_PBITS-1:0] mq_prd;
+   reg [63:0]         mq_a, mq_b;
+   reg [3:0]          mq_op;
+   initial mq_v = 1'b0;
    reg [ROB_IDXB-1:0] md_rob;
    reg [RN_PBITS-1:0] md_prd;
    reg [63:0]         md_res_q;
    initial begin md_v = 1'b0; md_pend = 1'b0; end
    wire        div_done, div_busy;
    wire [63:0] div_result;
-   wire        md_f3_2 = qf_insn[14];                     // funct3[2]: div/rem
    // The result is LATCHED on the unit's done pulse (mul3's persists, the divider's is one cycle)
    // and leaves when the FPU is not landing: the FPU cannot hold its result, this can.
    wire        md_kill = md_v & dead(md_rob);           // the kill: the divide is aborted
    wire        md_done = md_v & ~md_pend & div_done;
+   wire        md_wb;
+   // the stage takes a divide at this edge when it is empty, completing or killed: the queued one
+   // first (it is older), else the first lane's; the queue takes the lane divide the stage does not
+   wire        md_open = ~md_v | md_wb | md_kill;
+   wire        mq_live = mq_v & ~dead(mq_rob);
+   wire        st_q    = md_open & mq_live;
+   wire        st_l    = md_open & ~mq_live & dg_any;
+   wire        iss_md  = st_q | st_l;                     // never in a redirect's cycle (a lane's iss)
+   wire        mq_ld   = st_l ? dq_any : dg_any;
+   wire [RN_PBITS-1:0] md_in_prd = st_q ? mq_prd : dg_prd;
    // ...and, like every integer result of the F port, when its lane's buffer has room (lb_fe_room):
    // a flop that follows the stage's register, so md_wb stays one level (it is in the F/C
    // scheduler's unit_busy through md_advance)
    reg         md_room;
    initial md_room = 1'b1;
-   wire [RN_PBITS-1:0] md_prd_n = iss_md ? qf_prd : md_prd;
+   wire [RN_PBITS-1:0] md_prd_n = iss_md ? md_in_prd : md_prd;
    always @(posedge clk) md_room <= reset | lb_fe_room_n[md_prd_n[RN_IDXB +: 2]];
-   wire        md_wb   = md_pend & (~md_rd_v | (~fp_wb & md_room));   // the op completes (ROB)
+   assign      md_wb   = md_pend & (~md_rd_v | (~fp_wb & md_room));   // the op completes (ROB)
    wire        md_wr   = md_wb & md_rd_v;                                    // ...and writes its register
-   assign      md_advance = ~md_v | md_wb;
    // The divider starts a cycle after the issue, from registered operands: its start-cycle
    // operand preparation (sign, magnitude, the special cases) stays off the port's forwarded reads.
    reg         dv_go;
@@ -2242,8 +2291,9 @@ module smolrv64_core
    reg         dv_w;
    initial dv_go = 1'b0;
    always @(posedge clk) begin
-      dv_go <= ~reset & ~redirect & iss_md & md_f3_2;
-      dv_a <= xf_rs1;  dv_b <= xf_rs2;  dv_f3 <= qf_insn[14:12];  dv_w <= qf_insn[6:2] == 5'b01110;
+      dv_go <= ~reset & ~redirect & iss_md;
+      dv_a  <= st_q ? mq_a : dg_a;  dv_b <= st_q ? mq_b : dg_b;
+      dv_f3 <= st_q ? mq_op[2:0] : dg_op[2:0];  dv_w <= st_q ? mq_op[3] : dg_op[3];
    end
    divider u_div
      (.clk(clk), .reset(reset), .start(dv_go), .abort(redirect | md_kill),
@@ -2257,17 +2307,30 @@ module smolrv64_core
       if (md_wb)   begin md_v <= 1'b0; md_pend <= 1'b0; end
       if (md_kill) begin md_v <= 1'b0; md_pend <= 1'b0; end   // before the issue arm: a new op wins
       if (iss_md) begin
-         md_v <= 1'b1; md_div <= md_f3_2; md_rob <= j_rob; md_prd <= qf_prd; md_rd_v <= qf_rd_v; md_pend <= 1'b0;
+         md_v <= 1'b1;  md_pend <= 1'b0;
+         md_rob <= st_q ? mq_rob : dg_rob;  md_prd <= md_in_prd;  md_rd_v <= st_q ? mq_rdv : dg_rdv;
       end
       // abort(redirect) on the units: a redirect is head-gated, so an in-flight mul/div is
       // younger than the redirecting op = wrong-path. The flush arm is last (rule I11).
       if (redirect) begin md_v <= 1'b0; md_pend <= 1'b0; end
    end
+   always @(posedge clk) begin
+      if (st_q | (mq_v & dead(mq_rob))) mq_v <= 1'b0;   // drained into the stage, or the kill
+      if (mq_ld) begin
+         mq_v <= 1'b1;
+         mq_rob <= st_l ? dq_rob : dg_rob;  mq_prd <= st_l ? dq_prd : dg_prd;  mq_rdv <= st_l ? dq_rdv : dg_rdv;
+         mq_a <= st_l ? dq_a : dg_a;  mq_b <= st_l ? dq_b : dg_b;  mq_op <= st_l ? dq_op : dg_op;
+      end
+      if (reset | redirect) mq_v <= 1'b0;   // flush last (rule I11)
+   end
    always @(posedge clk) if (!reset) begin
-      if (iss_md & (qf_shard >= SH_F0))  $fatal(1, "smolrv64_core: a divide issued with an FP shard %0d", qf_shard);
-      if (iss_md & md_v & ~md_wb)        $fatal(1, "smolrv64_core: a mul/div issued into a busy MD stage");
+      if (dg_any & dg_rdv & (dg_prd[RN_PBITS-1:RN_IDXB] >= SH_F0))
+         $fatal(1, "smolrv64_core: a divide issued with an FP destination p%0d", dg_prd);
+      if (dg_n > 3'd2)                   $fatal(1, "smolrv64_core: %0d lanes hand the MD stage a divide at once", dg_n);
+      if (mq_ld & mq_live & ~st_q)       $fatal(1, "smolrv64_core: a divide handed to a full MD queue (the credit is wrong)");
+      if (st_l & dq_any & ~mq_ld)        $fatal(1, "smolrv64_core: the second divide of a cycle found no place");
+      if (~md_open & dg_any & mq_live)   $fatal(1, "smolrv64_core: a third divide in flight (the credit is wrong)");
       if (dv_go & div_busy)              $fatal(1, "smolrv64_core: a divide started into a busy divider (the start would be ignored)");
-      if (iss_md & ~md_f3_2)             $fatal(1, "smolrv64_core: a multiply reached the MD stage, not its lane");
       if (m_valid & ~(m_is_mem | m_is_amo)) $fatal(1, "smolrv64_core: M holds an op that is not a load, store or head op (pc %h)", m_pc);
       if (md_wr & fp_wb)                 $fatal(1, "smolrv64_core: the MD stage and the FPU wrote in one cycle");
    end
@@ -4257,6 +4320,35 @@ module smolrv64_core
       if (ho_end & ~ho_inf) $fatal(1, "smolrv64_core: a head op completes with none in flight");
    end
    wire cbo_any = ho_inf | ir_l;
+   // TWO DIVIDES IN FLIGHT at most, each from its dispatch to the MD stage's writeback (or its
+   // death): the stage and its queue register hold them, so a lane that issues one always finds a
+   // place; a group holds at most one (smolrv64_frontend's unit_op rule)
+   wire [IW-1:0]       s_md   = s_takev & s_cls_m;
+   wire                ir_m   = |(s_v & s_cls_m);
+   reg  [1:0]          dt_v;                       // the two in flight, by ROB entry
+   reg  [ROB_IDXB-1:0] dt_rob [0:1];
+   reg  [ROB_IDXB-1:0] s_md_rob;
+   integer             mik;
+   initial dt_v = 2'b00;
+   always @* begin
+      s_md_rob = s_rob[0];
+      for (mik = IW - 1; mik >= 0; mik = mik - 1) if (s_md[mik]) s_md_rob = s_rob[mik];
+   end
+   always @(posedge clk) begin
+      for (mik = 0; mik < 2; mik = mik + 1)
+         if (dt_v[mik] & ((md_wb & (md_rob == dt_rob[mik])) | dead(dt_rob[mik]))) dt_v[mik] <= 1'b0;
+      if (|s_md) begin
+         if (~dt_v[0]) begin dt_v[0] <= 1'b1;  dt_rob[0] <= s_md_rob; end
+         else          begin dt_v[1] <= 1'b1;  dt_rob[1] <= s_md_rob; end
+      end
+      if (reset | redirect) dt_v <= 2'b00;   // flush last (rule I11)
+   end
+   always @(posedge clk) if (!reset) begin
+      if ((|s_md) & (&dt_v)) $fatal(1, "smolrv64_core: a divide dispatched with two in flight (the credit is wrong)");
+      if (md_wb & ~((dt_v[0] & (dt_rob[0] == md_rob)) | (dt_v[1] & (dt_rob[1] == md_rob))))
+         $fatal(1, "smolrv64_core: the MD stage completes a divide (rob %0d) that is not in flight", md_rob);
+   end
+   wire cr_div = ~(&dt_v) & ~((|dt_v) & ir_m);
    wire cr_ld = ~cbo_any & (ir_ld ? lq_d_ready2 : lq_d_ready);
    wire cr_st = ~cbo_any & (ir_st ? sq_d_ready2 : sq_d_ready);
    wire cr_cbo = ~lq_uf_any & ~sq_uf_any & ~ir_ld & ~ir_st;
@@ -4267,7 +4359,7 @@ module smolrv64_core
    wire cr_pop = ~redirect_q & ~fr_v & ~dec_red_q & ~rn_stall & ~ser_inflight & ~(d_valid & d_ser);
    wire cr_ser = drained & ~d_valid & ~csr_infl;            // a serialising op drains first, alone
    wire cr_csr = ~csr_infl & ~(d_valid & d_csr_op);         // a CSR op waits for the one before it
-   assign crd = {cr_cbo, cr_csr, cr_ser, cr_pop, cr_rob, cr_st, cr_ld, cr_f, cr_l, cr_i};
+   assign crd = {cr_div, cr_cbo, cr_csr, cr_ser, cr_pop, cr_rob, cr_st, cr_ld, cr_f, cr_l, cr_i};
    // what the credits guarantee, checked where it is used
    reg  [IW-1:0] s_noroom;                           // a slot's op has no room in what it allocates
    integer       snk;

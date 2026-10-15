@@ -47,7 +47,7 @@ module smolrv64_frontend
     // ---- redirect (from M: mispredict, trap, xret, fence.i) ----
     input  wire                    redirect,
     input  wire                    fs_off,            // mstatus.FS is Off: an FP op decodes illegal
-    input  wire [2*IW+7:0]         crd,               // the dispatch credits (smolrv64_credits.vh)
+    input  wire [2*IW+8:0]         crd,               // the dispatch credits: CRW bits (smolrv64_credits.vh)
     output wire                    hd_v,              // the queue head has an instruction...
     output wire                    hd_take,           // ...and pops it this cycle
     output wire [15:0]             hd_gc,             // its dispatch class (the stall accounting's)
@@ -377,13 +377,19 @@ module smolrv64_frontend
    // and nothing behind a CTI that redirects fetch at decode. The IR takes the group when it is
    // empty or dispatching whole this cycle, and dispatch takes a group whole or not at all:
    // there are no survivors.
-   localparam integer G_L = 4, G_I = 5, G_FC = 6, G_PLAIN = 7, G_DCR = 11,   // smolrv64_gclass's gc order
+   localparam integer G_M = 2, G_L = 4, G_I = 5, G_FC = 6, G_PLAIN = 7, G_DCR = 11,   // smolrv64_gclass's gc order
                       G_LD = 12, G_ST = 13, G_CSR = 14, G_SER = 15;
    // the credits: a member pops only with room for it in everything it allocates, counted
    // against what is already between here and there (smolrv64_core computes crd from flops)
 `include "smolrv64_credits.vh"
-   function automatic room(input [15:0] gc, input lane, input l, input ld, input st, input f);
-      room = (~gc[G_I] | lane) & (~gc[G_L] | l) & (~gc[G_LD] | ld) & (~gc[G_ST] | st) & (~gc[G_FC] | f);
+   function automatic room(input [15:0] gc, input lane, input l, input ld, input st, input f, input dv);
+      room = (~gc[G_I] | lane) & (~gc[G_L] | l) & (~gc[G_LD] | ld) & (~gc[G_ST] | st) & (~gc[G_FC] | f)
+           & (~gc[G_M] | dv);
+   endfunction
+   // the units behind the FP/MD/SYS port (the F stage, the MD stage, the SYSQ) each take one op at
+   // a time: a group holds at most one op of theirs, wherever it issues
+   function automatic unit_op(input [15:0] gc);
+      unit_op = gc[G_FC] | gc[G_M];
    endfunction
    // the rules: which heads may go together (cumulative classes of the slots before)
    // slot k reads slot k-1: per-bit variables, so the chain is not a loop to the simulator
@@ -394,15 +400,15 @@ module smolrv64_frontend
    wire head_go = g[0][G_SER] ? crd[CR_SER] : g[0][G_CSR] ? crd[CR_CSR] : g0_cbo ? crd[CR_CBO] : 1'b1;
    assign rule[0] = ~q_empty;
    assign take[0] = rule[0] & crd[CR_POP] & head_go & crd[CR_ROB1]
-                  & room(g[0], crd[CR_IA], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F]);
-   assign c_fc[0] = g[0][G_FC];  assign c_ld[0] = g[0][G_LD];  assign c_st[0] = g[0][G_ST];
+                  & room(g[0], crd[CR_IA], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
+   assign c_fc[0] = unit_op(g[0]);  assign c_ld[0] = g[0][G_LD];  assign c_st[0] = g[0][G_ST];
    generate for (gk = 1; gk < IW; gk = gk + 1) begin: rl
       localparam [QAW:0] K = gk;
       assign rule[gk] = rule[gk-1] & (q_cnt > K) & g[0][G_PLAIN] & g[gk][G_PLAIN] & ~g[gk-1][G_DCR]
-                      & ~(g[gk][G_FC] & c_fc[gk-1]) & ~(g[gk][G_LD] & c_ld[gk-1]) & ~(g[gk][G_ST] & c_st[gk-1]);
+                      & ~(unit_op(g[gk]) & c_fc[gk-1]) & ~(g[gk][G_LD] & c_ld[gk-1]) & ~(g[gk][G_ST] & c_st[gk-1]);
       assign take[gk] = rule[gk] & take[gk-1] & crd[CR_ROB1 + gk]
-                      & room(g[gk], crd[CR_IA + gk], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F]);
-      assign c_fc[gk] = c_fc[gk-1] | g[gk][G_FC];
+                      & room(g[gk], crd[CR_IA + gk], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
+      assign c_fc[gk] = c_fc[gk-1] | unit_op(g[gk]);
       assign c_ld[gk] = c_ld[gk-1] | g[gk][G_LD];
       assign c_st[gk] = c_st[gk-1] | g[gk][G_ST];
    end endgenerate

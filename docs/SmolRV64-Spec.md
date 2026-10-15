@@ -22,7 +22,7 @@ the 2026-09 release; their history is in git, and the dated records in `docs/his
 | Also implemented | Zicsr, Zifencei, Zicntr, Zihpm (13 counters), Sscofpmf, Sstc, Smstateen, Ssvnapot |
 | Decoded but not in `misa` | Zba, Zbb, Zbs, Zicond (`src/decode_exec.v`) |
 | Fetch / dispatch / retire | **three-wide** (`SMOLRV64_IW=3`, the RTL and build default; `SMOLRV64_IW=2` and `4` build the two- and four-wide machines); fetch is one 16-byte pair per cycle into the fetch ring (§4) |
-| Issue | **dynamic**: ALU ops, multiplies, branches and jumps issue in their slot's lane (three schedulers, three ALUs, three multipliers) and reorder freely; FP ops and divides reorder on the F/MD port (§7); loads, stores, AMOs, LR/SC and CBOs generate their address in their slot's lane and reach M through their LQ/SQ entry or the head-op register (§8) |
+| Issue | **dynamic**: ALU ops, multiplies, divides, branches and jumps issue in their slot's lane (three schedulers, three ALUs, three multipliers; a divide's operands go to the one MD stage) and reorder freely; FP ops reorder on the FP/SYS port (§7); loads, stores, AMOs, LR/SC and CBOs generate their address in their slot's lane and reach M through their LQ/SQ entry or the head-op register (§8) |
 | Completion | **out of order** (non-blocking loads, tagged FP results, ALU at issue) |
 | Commit | in order, from the ROB head, up to `IW`/cycle |
 | Speculation | branch/jump prediction only; no memory speculation, no value speculation |
@@ -68,9 +68,9 @@ and FP arithmetic both reorder freely**, in `u_iq_i`/`u_iq_i2`/`u_iq_i3` and `u_
 respectively. **Slot k's ALU op goes to lane k** (lanes plan step 5.2a): three integer
 schedulers, each with its own ALU and shard, and no steering. An ALU op completes at issue; an FP op goes to stage F. Neither ever enters M.
 
-Everything else carries an `ord` bit; of those, FP, divides and system ops go to the F/MD
-queue, and branches, jumps, multiplies, loads, stores and the head ops (AMO, LR/SC, CBO) run in
-the lanes (§7, §8). Memory ordering lives in the LQ and SQ and in M's in-order fill. Memory
+Everything else carries an `ord` bit; of those, FP and system ops go to the FP/SYS queue, and
+branches, jumps, multiplies, divides, loads, stores and the head ops (AMO, LR/SC, CBO) run in the
+lanes (§7, §8). Memory ordering lives in the LQ and SQ and in M's in-order fill. Memory
 ordering lives in the LQ and SQ, not in issue order.
 
 That split is what makes the rest unnecessary rather than merely deferred:
@@ -725,9 +725,9 @@ moves the wall.
 |---|---|---|
 | entries (`NENT`) | 10 each | 8 |
 | sources (`NSRC`) | 2 | 3 |
-| holds | slot A's, B's, C's ALU ops, multiplies, branches, jumps, loads, stores and head ops | FP arithmetic, divides, system ops |
+| holds | slot A's, B's, C's ALU ops, multiplies, divides, branches, jumps, loads, stores and head ops | FP arithmetic, system ops |
 | ordering | **reorders freely** | **reorders freely** |
-| unit | completes at issue (a mispredict at its squash), writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8) | stage F, the MD stage, the SYSQ |
+| unit | completes at issue (a mispredict at its squash), writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8), a divide its operands to the MD stage | stage F, the SYSQ |
 | `unit_busy` | the lane's multiply slot | `j_v & ~j_adv`: the F/CTF select register is full and not draining |
 
 **One scheduler per unit is what makes four safe.** Three schedulers feeding ONE execute
@@ -933,7 +933,7 @@ serialise. A trap from dispatch drives `csr_file`'s `xtrap_*` inputs from the re
 completes at its fire; FENCE.I pulses `ifence` and redirects to its PC + 4. M holds no system
 op, fence or dispatch-time trap (all asserted); it keeps memory ops, AMOs, CBOs and data faults. The `xtq_*` shadow checks both M's trap payload and the SYSQ's.
 
-### 7.x Multiplies in the lanes, divides in the MD stage (lanes 5.2c, 2026-10-04)
+### 7.x Multiplies and divides in the lanes (lanes 5.2c, 2026-10-04; divides 5.4f, 2026-10-14)
 
 **A multiply runs in its slot's lane** (`smolrv64_gclass`: class I). `mul3` starts from the
 lane's forwarded operands in the execute cycle T and the lane reserves its slot at T+2 for it:
@@ -946,15 +946,19 @@ wake-at-select matrix (`e_long`): its dependents wake at its broadcast. The lane
 multiply a cycle. Invariants: nothing executes in a lane's reserved slot, and the multiply is at
 `mul3`'s stage B in it.
 
-**A divide** is class M at dispatch (`d_cls_m`), shares `u_iq_f` with FP arithmetic and system
-ops, and drains from the select register `j_*` into the MD stage (`iss_md`) with the port's
-forwarded reads as its operands. The stage holds one: the divider (3 to 35 cycles) starts in the
-issue cycle, the result is latched on its done pulse (`md_pend`, `md_res_q`) and leaves by the
-stage's own tag when the FPU is not writing (`md_wr`), into its lane's write slot like an FP
-op's integer result (§8). `abort(redirect)` and the flush arm last keep it sound while redirects
-fire at the ROB head. Invariants: an issue never starts a busy divider and no multiply reaches
-the stage; the writeback's clear precedes the issue's
-set in the stage register.
+**A divide** is class M at dispatch (`d_cls_m`) and issues in its slot's lane like a multiply:
+the lane reads both operands in its execute cycle and hands them, with the op's ROB index and
+destination, to the one MD stage (`l_dgo`, `iss_md`). The divider (3 to 35 cycles) starts the
+cycle after, from those registered operands. A second divide waits in the stage's queue register
+(`mq_*`) with its operands, so a divide and a remainder of the same operands do not hold dispatch
+for each other: a dispatch credit (`cr_div`, `dt_*`) keeps at most two divides in flight, each
+released at its writeback or its death, and a group holds at most one op of the units behind
+the FP/SYS port and the MD stage (`unit_op`). The result is latched on the divider's done pulse
+(`md_pend`, `md_res_q`) and leaves by the stage's own tag when the FPU is not writing (`md_wr`),
+into its lane's write slot like an FP op's integer result (§8). `abort(redirect)` and the flush
+arm last keep it sound while redirects fire at the ROB head. Invariants: no third divide in
+flight, none handed to a full queue, at most two lanes hand one over in a cycle, an issue never
+starts a busy divider; the writeback's clear precedes the issue's set in the stage register.
 
 ## 8. Load/store unit and MMU
 

@@ -1,7 +1,7 @@
 // smolrv64_gclass -- an instruction's dispatch class, from its decoded fields.
 //
 // The ONE definition of what an instruction is to dispatch: which scheduler it goes to
-// (its slot's lane, or the FP/MD/SYS pipe), whether it is a head op (an AMO, LR/SC or CBO),
+// (its slot's lane, or the FP/SYS pipe), whether it is a head op (an AMO, LR/SC or CBO),
 // whether it may go beside anything else (plain), and whether it redirects fetch at decode (an unpredicted
 // jal, or a backward conditional the BTB missed, predicted not taken). The frontend
 // evaluates it once per instruction at decode and the result rides in the decoupling
@@ -38,7 +38,8 @@ module smolrv64_gclass
    // control flow is the slot's lane; a fetch-faulted CTI or the irqop stays ordered, so M
    // keeps the single trap site
    wire cls_c = (is_branch | is_jump | is_jalr) & ~illegal & ~fault & ~irqop;
-   // a multiply runs in its slot's lane (5.2c); a divide in the shared MD stage
+   // a multiply runs in its slot's lane (5.2c); a divide issues there too, and the lane hands its
+   // operands to the one MD stage
    wire mul_l = is_mul & ~insn[14] & ~illegal & ~fault & ~irqop;
    wire cls_m = is_mul &  insn[14] & ~illegal & ~fault & ~irqop;
    // SYSTEM (the irqop included), FENCE and FENCE.I (MISC-MEM funct3 00x; CBO is 010), and an
@@ -52,8 +53,8 @@ module smolrv64_gclass
    // an AMO, LR/SC or CBO generates its address in its slot's lane too, and runs from the
    // head-op register at the ROB head
    wire cls_l  = ord & ~cls_f & ~cls_c & ~cls_m & ~cls_s & ~mul_l & ~mem_l;   // a head op (AMO, LR/SC, CBO)
-   wire cls_i  = ~ord | cls_c | mul_l | mem_l | cls_l;       // everything but FP, divide and system ops: the slot's lane
-   wire cls_fc = cls_f | cls_m | cls_s;                      // the FP/MD/SYS pipe (u_iq_f)
+   wire cls_i  = ~ord | cls_c | mul_l | cls_m | mem_l | cls_l;   // everything but FP and system ops: the slot's lane
+   wire cls_fc = cls_f | cls_s;                                  // the FP/SYS pipe (u_iq_f)
    // a serialising op, fence.i, CBO, AMO, CSR, a trap at dispatch or the irqop goes alone
    wire plain = ~(is_serialize | is_fencei | is_cbo | is_amo | is_csr | illegal | fault | irqop);
    wire dcr   = (is_jump & ~is_jalr & mis_taken)
