@@ -672,6 +672,15 @@ instructions of the GB5 checkpoint slices at the 64-row ROB (tb FPORT-SIM):
   60 M lockstep identical (no FP in the boot). The slot slices stalled rename whenever the one a
   slot's FP op lands in ran low; by writer, rename runs short only of SH_FL (RENAME-SIM), and at
   128 entries those stalls go while the cycles move 0.04% at most, so it stays at 64.
+- **The store move measured, and not taken.** Of the integer stores' lane issues, the share whose
+  data was not yet produced (in a register file or the store queue) when the address issued --
+  each would have stayed in its lane scheduler as an STD -- and the scheduler entries those STDs
+  would have held on average, of 3 x 10: Navigation 37% / 0.97, HTML5 39% / 0.54, SQLite
+  40% / 0.53, PDF Rendering 87% / 9.44, Camera 83% / 0.40. PDF's stores wait for late data in
+  the store queue, which is what its snoop is for; moved into the schedulers they would hold a
+  third of the window. The store queue keeps its snoop and its data read port, as Tommy allowed
+  ("We can keep the read port for store if the alternative is unpleasant"), and 5.4f ends with
+  2 x NL + 2 integer read ports per shard (8 at IW=3) and 4 per FP shard.
 - **The stores (Tommy: "insert STD pseudo ops for those stores that do not have their data ready").**
   Today 44-56% of the integer slices' stores read their data through the store queue's port (in a
   register at allocation, or left out when two snooped values arrive in one cycle: 5% of
