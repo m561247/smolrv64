@@ -207,7 +207,7 @@ module csr_file
                       HPMEV_ST_FPU = 16'h0303,   // M stalled on the CVFPU, + X held for a pending FP result
                       HPMEV_ST_DSP = 16'h0304,   // the queue head without a credit, not the ROB: the sum of ST_IQ..ST_SRZ
                       HPMEV_ST_ROB = 16'h0305,   // the queue head waits for ROB room
-                      HPMEV_ST_IQ  = 16'h0306,   // the queue head: its scheduler has no credit
+                      HPMEV_ST_IQ  = 16'h0306,   // the queue head: its scheduler, or a divide's MD stage, has no credit
                       HPMEV_ST_RN  = 16'h0307,   // the queue head: a rename shard is below LOWAT
                       HPMEV_ST_SQ  = 16'h0308,   // the queue head: no store-queue credit
                       HPMEV_ST_LQ  = 16'h0309,   // the queue head: no load-queue credit

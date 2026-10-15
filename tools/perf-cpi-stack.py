@@ -56,7 +56,7 @@ BACKEND = [("ST_MEM", "LSU  (D$ / dTLB / AMO)"), ("ST_DIV", "a divide in flight 
            ("ST_DSP", "queue head without a credit (scheduler / rename / queues / serializing)"),
            ("ST_ROB", "queue head without ROB room")]
 # ST_IQ..ST_SRZ are the disjoint parts of ST_DSP (the `hold` set): a breakdown underneath it.
-DSP_SUB = [("ST_IQ", "its scheduler has no credit"), ("ST_RN", "rename: a shard below LOWAT"),
+DSP_SUB = [("ST_IQ", "its scheduler (a divide: the MD stage) has no credit"), ("ST_RN", "rename: a shard below LOWAT"),
            ("ST_SQ", "no store-queue credit"), ("ST_LQ", "no load-queue credit"), ("ST_SRZ", "serializing op")]
 # What ST_MEM is made of (2026-09-17, the memory backend program): cycle buckets printed
 # underneath it as shares of all cycles, never added (they overlap ST_MEM and each other),

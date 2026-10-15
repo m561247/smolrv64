@@ -100,17 +100,17 @@
          else if (!dut.core.crd[CRV_ROB1 + k])             head_why = "O";   // no ROB row
          else if (g[5] & !dut.core.crd[CRV_IA + k])        head_why = "I";   // its lane's scheduler
          else if (g[6] & !dut.core.crd[CRV_F])             head_why = "I";   // the FP queue
+         else if (g[2] & !dut.core.crd[CRV_DIV])           head_why = "I";   // the MD stage, for a divide
          else if (g[4] & !dut.core.crd[CRV_L])             head_why = "o";   // a head op in flight
          else if (g[12] & !dut.core.crd[CRV_LD])           head_why = "L";
          else if (g[13] & !dut.core.crd[CRV_ST])           head_why = "S";
-         else if (g[2] & !dut.core.crd[CRV_H + k])         head_why = "H";   // its lane's handoff
          else                                              head_why = "?";
       end
    endfunction
    // smolrv64_credits.vh's indices, at this width
    localparam integer CRV_IA = 0, CRV_L = PT_IW, CRV_F = PT_IW + 1, CRV_LD = PT_IW + 2, CRV_ST = PT_IW + 3,
                       CRV_ROB1 = PT_IW + 4, CRV_POP = 2*PT_IW + 4, CRV_SER = 2*PT_IW + 5, CRV_CSR = 2*PT_IW + 6,
-                      CRV_CBO = 2*PT_IW + 7, CRV_H = 2*PT_IW + 8;
+                      CRV_CBO = 2*PT_IW + 7, CRV_DIV = 2*PT_IW + 8;
 
    // Why fetch hands the bundle register nothing in a cycle it could take a bundle (FK_*), the
    // fetch rows' and FETCH-SIM's one classifier.
@@ -155,9 +155,9 @@
 
    // ---- each lane's state, flattened for the per-cycle loop (a generate index must be constant) ----
    localparam integer PT_NI = 10;                    // a lane scheduler's entries (smolrv64_core NI)
-   wire [PT_IW-1:0]        pl_stg_v, pl_iss_v, pl_x, pl_m1, pl_m2, pl_hv;
+   wire [PT_IW-1:0]        pl_stg_v, pl_iss_v, pl_x, pl_m1, pl_m2;
    wire [7:0]              pl_stg_rob [0:PT_IW-1], pl_iss_ent [0:PT_IW-1], pl_rob [0:PT_IW-1];
-   wire [7:0]              pl_mrob1 [0:PT_IW-1], pl_mrob2 [0:PT_IW-1], pl_hrob [0:PT_IW-1];
+   wire [7:0]              pl_mrob1 [0:PT_IW-1], pl_mrob2 [0:PT_IW-1];
    wire [PT_IW*PT_NI-1:0]  pl_iq_v, pl_iq_rdy;
    wire [7:0]              pl_iq_rob [0:PT_IW*PT_NI-1];
    genvar gpl, gpe;
@@ -170,7 +170,6 @@
       assign pl_rob[gpl]     = 8'(dut.core.ln[gpl].rob);
       assign pl_m1[gpl]      = dut.core.ln[gpl].m1;   assign pl_mrob1[gpl] = 8'(dut.core.ln[gpl].mrob1);
       assign pl_m2[gpl]      = dut.core.ln[gpl].m2;   assign pl_mrob2[gpl] = 8'(dut.core.ln[gpl].mrob2);
-      assign pl_hv[gpl]      = 1'b0;                  assign pl_hrob[gpl]  = 8'd0;   // the lanes have no handoff register
       for (gpe = 0; gpe < PT_NI; gpe = gpe + 1) begin: e
          assign pl_iq_v[gpl*PT_NI + gpe]   = dut.core.ln[gpl].u_iq.v[gpe];
          assign pl_iq_rdy[gpl*PT_NI + gpe] = &dut.core.ln[gpl].u_iq.srdy[gpe*2 +: 2];
@@ -229,9 +228,9 @@
                put(8'(dut.core.lb_rob[pj*dut.core.LBN + ((dut.core.lb_h[pj] + pk) % dut.core.LBN)]), "e");
       if (dut.core.sy_v)  put(8'(dut.core.sy_rob), "Y");
       if (dut.core.md_v)  put(8'(dut.core.md_rob), "v");
-      // a lane's handoff register, its multiply in flight, and what it executes this cycle
+      if (dut.core.mq_v)  put(8'(dut.core.mq_rob), "v");
+      // a lane's multiply in flight, and what it executes this cycle
       for (pj = 0; pj < PT_IW; pj = pj + 1) begin
-         if (pl_hv[pj]) put(pl_hrob[pj], "h");
          if (pl_m1[pj]) put(pl_mrob1[pj], "u");
          if (pl_m2[pj]) put(pl_mrob2[pj], "u");
          if (pl_x[pj])  put(pl_rob[pj], 8'("a" + pj));

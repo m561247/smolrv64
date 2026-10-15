@@ -2931,7 +2931,8 @@ module smolrv64_core
    // A dispatch stall is the queue head holding an instruction it has no credit for, outside a
    // freeze (the credits, smolrv64_frontend): nothing after the head waits.
    wire hd_wait   = fe_hd_v & ~fe_hd_take & ~redirect_q & ~fr_v & ~dec_red_q;
-   wire hd_sched  = (~fe_hd_gc[GC_I] | cr_i[0]) & (~fe_hd_gc[GC_L] | cr_l) & (~fe_hd_gc[GC_FC] | cr_f);
+   wire hd_sched  = (~fe_hd_gc[GC_I] | cr_i[0]) & (~fe_hd_gc[GC_L] | cr_l) & (~fe_hd_gc[GC_FC] | cr_f)
+                  & (~fe_hd_gc[GC_M] | cr_div);                      // the MD stage's room is a divide's
    wire hd_sq     = fe_hd_gc[GC_ST] & ~cr_st;
    wire hd_lq     = fe_hd_gc[GC_LD] & ~cr_ld;
    wire st_dsp    = m_advance & hd_wait & ~dep_ld & ~dep_fp & ~st_rob;

@@ -1730,7 +1730,7 @@ never a partition:
 | redirects | r0005 | |
 | `RED_BR` / `RED_JLR` / `RED_TRP` | r0006 / r0007 / r0008 | redirects by cause: conditional branch / jalr / trap or system op |
 | `ST_ROB` | r0305 | the queue head waits for ROB room (`hd_wait & ~cr_rob1`) |
-| `ST_IQ` / `ST_RN` / `ST_SQ` / `ST_LQ` / `ST_SRZ` | r0306 / r0307 / r0308 / r0309 / r030a | `ST_DSP` by cause, disjoint, in this order: the head's scheduler has no credit / a rename shard is below `LOWAT` / no store-queue credit / no load-queue credit / the rest, a serializing op draining or one in flight |
+| `ST_IQ` / `ST_RN` / `ST_SQ` / `ST_LQ` / `ST_SRZ` | r0306 / r0307 / r0308 / r0309 / r030a | `ST_DSP` by cause, disjoint, in this order: the head's scheduler, or a divide's MD stage, has no credit / a rename shard is below `LOWAT` / no store-queue credit / no load-queue credit / the rest, a serializing op draining or one in flight |
 | `RD_WAIT` | r0317 | a mispredict's restart in progress: from its resolve to its release (the walk and the kill, §6) or its squash at the ROB head |
 | `DT_WALK` / `DTLB_MISS` | r0318 / r0104 | cycles the data MMU is walking (a subset of `ST_MEM`) / walks begun. The dTLB is 2048 entries direct-mapped on VPN[10:0]; two hot pages 8 MiB apart share an index and cost a walk per load and no D$ miss |
 | `ST_MUL` / `ST_DIV` | r0302 / r0301 | occupancy, not stalls: cycles a multiply is in flight in any lane (`m*_1`, `m*_2`) / the MD stage holds a divide |
@@ -1847,12 +1847,12 @@ register; it is keyed by the fetch sequence number until dispatch binds a ROB in
 |---|---|---|
 | `f` / `Q` | the bundle register / held there, the queue full | mirrors of the bundle register and the queue (`q_push`, `q_pop`; a mismatch with `q_cnt` is printed) |
 | `q` | the decoupling queue, behind the head group or popping | |
-| `g r n z O I L S H o` | at the queue head, not popping: a group rule; a redirect freeze; rename low; a serialising, CSR or CBO gate; no ROB row; its scheduler full; LQ full; SQ full; its lane's handoff op in flight; a head op in flight | `take`, `rule`, `crd` in the order the frontend's `room()` checks them |
+| `g r n z O I L S o` | at the queue head, not popping: a group rule; a redirect freeze; rename low; a serialising, CSR or CBO gate; no ROB row; its scheduler full (a divide: the MD stage); LQ full; SQ full; a head op in flight | `take`, `rule`, `crd` in the order the frontend's `room()` checks them |
 | `i` | the IR, dispatching | `s_v`, `d_take` |
 | `t` | a scheduler's dispatch stage (for F, the head of its FIFO) | `stg_v` |
 | `w` / `s` / `p` | in a scheduler: an operand pending / ready, not picked / picked | the scheduler's `v`, `srdy`, `iss_ent` |
 | `a b c d` | executes in lane A..D | the lane's select register |
-| `u h v j F Y` | a multiply in flight; in its lane's handoff register; a divide in the MD stage; the FP port's select register; stage F or the FPU; a system op waiting in the SYSQ | `m1`/`m2`, `hv`, `md_v`, `j_v`, `f_valid`/`fq_v`, `sy_v` |
+| `u v j F Y` | a multiply in flight; a divide in the MD stage or its queue register; the FP port's select register; stage F or the FPU; a system op waiting in the SYSQ | `m1`/`m2`, `md_v`/`mq_v`, `j_v`, `f_valid`/`fq_v`, `sy_v` |
 | `m M k l y e` | an address waiting for M's fill; in M; a load filled, waiting to access; a load accessing; a store waiting for its data; a result in its landing buffer | `la_v`/`sa_v`, `m_valid`, the LQ's `av`/`sent`, the SQ's `dv`, `lb_*` |
 | `!` / `X` | a mispredicted CTI waiting for its restart / killed, waiting for the release | `lr_mis`, `fr_v`; `rob_kd` |
 | `=` | complete, waiting to retire | the ROB's `done` |
