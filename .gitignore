@@ -1,5 +1,7 @@
-# Verilator/verilated build directories (obj_dir_vl, obj_dir_core, obj_dir_cosim, ...)
+# Verilator/verilated build directories (obj_dir_vl, obj_dir_core, obj_dir_cosim, ...) and the
+# runners' locks beside them
 obj_*/
+obj_*.flock
 core/obj_dir_rs/
 
 # GENERATED device trees (tools/check-dts-timebase.py --gen, `make dtbs`).

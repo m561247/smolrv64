@@ -52,13 +52,16 @@ RUNOUT=$(mktemp -t core-cosim-run.XXXXXX); trap 'rm -f "$RUNOUT"' EXIT
 # lock and a rebuild takes the lock EXCLUSIVELY (waiting for the runs in flight; the linker cannot
 # rewrite a running executable), so two runs of one config proceed together when nothing changed
 # and never rebuild under each other when something did: the hand-made queue is the runner's now.
+# The check and the build hold a second lock, one runner at a time, so runs started together on a
+# stale binary build it once and then all run (a runner queued for the exclusive lock waits out
+# every run that holds the shared one).
 [ -n "${CKPT:-}" ] && VDEFS="${VDEFS:-} -DTB_RESET_PC=64'h7000_0000"
 OBJ=obj_dir_smolrv64_clinux
 if [ "$MEM_LG2" != 29 ] || [ -n "${VDEFS:-}" ]; then
    OBJ=obj_dir_smolrv64_clinux.$(printf '%s|%s' "$MEM_LG2" "${VDEFS:-}" | sha1sum | cut -c1-8)
 fi
 BIN=$(pwd)/$OBJ/tb_smolrv64_clinux
-mkdir -p "$OBJ"; exec 9>"$OBJ.flock"; flock -s 9
+mkdir -p "$OBJ"; exec 8>"$OBJ.build.flock" 9>"$OBJ.flock"; flock -x 8
 
 # ALWAYS ask cargo -- do NOT test for the file's existence.  A stale libsimmerv_cosim.a
 # silently relinks against old REF behaviour, and that has now cost two hunts: a stale
@@ -128,12 +131,10 @@ fi
 [ "$wipe" = 1 ] && need_build=1
 
 if [ "$need_build" = 1 ]; then
-   # upgrade to the exclusive lock (waits for every run of this config in flight), then re-check:
-   # the run we waited for may have been the rebuild we needed.
+   # the exclusive lock waits for every run of this config in flight
    flock -n -x 9 || { echo "cosim: waiting for the runs of this config in flight before rebuilding $OBJ ..."; flock -x 9; }
-   [ "${BUILD:-0}" != 1 ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ] && [ -x "$BIN" ] && ! [ "$SIMMERV_LIB" -nt "$BIN" ] && need_build=0
    # the wipe happens HERE, under the exclusive lock: never under a run of this config in flight
-   [ "$need_build" = 1 ] && rm -rf "$OBJ"
+   rm -rf "$OBJ"
 fi
 if [ "$need_build" = 1 ]; then
    echo "building $OBJ/tb_smolrv64_clinux (MEM_LG2=$MEM_LG2 VDEFS=${VDEFS:-<none>}) ..."
@@ -155,6 +156,7 @@ if [ "$need_build" = 1 ]; then
    printf '%s' "$want" > "$STAMP"
 fi
 flock -s 9      # back to shared for the run
+exec 8>&-       # the next runner's check
 
 if [ -n "${CKPT:-}" ]; then
    ../tools/ckpt-stub.py "$CKPT" || exit 1

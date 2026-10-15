@@ -40,12 +40,15 @@ CYC=${CYC:-200000000}
 # plain name, any other MEM_LG2/VDEFS (a checkpoint build is one) gets obj_dir_smolrv64_linux.<hash>,
 # so a sweep's configs run side by side. Runs of one config share its binary under a shared lock; a
 # rebuild takes it exclusively, waiting for the runs in flight (a relinked binary kills them on macOS).
+# The check and the build hold a second lock, one runner at a time, so runs started together on a
+# stale binary build it once and then all run (a runner queued for the exclusive lock waits out
+# every run that holds the shared one).
 OBJ=obj_dir_smolrv64_linux
 if [ "$MEM_LG2" != 29 ] || [ -n "${VDEFS:-}" ]; then
    OBJ=obj_dir_smolrv64_linux.$(printf '%s|%s' "$MEM_LG2" "${VDEFS:-}" | sha1sum | cut -c1-8)
 fi
 BIN=$(pwd)/$OBJ/tb_smolrv64_linux
-mkdir -p "$OBJ"; exec 9>"$OBJ.flock"; flock -s 9
+mkdir -p "$OBJ"; exec 8>"$OBJ.build.flock" 9>"$OBJ.flock"; flock -x 8
 ZSTD_LD=""; ZSTD_CF=""
 [ "$(uname -s)" = "Darwin" ] && { ZSTD_LD="-L$(brew --prefix)/lib"; ZSTD_CF="-I$(brew --prefix)/include"; }
 
@@ -65,9 +68,7 @@ srchash=$(cat *.v *.vh ../src/*.v ../src/*.sv ../src/*.vh ../src/ckpt_dpi.cpp $(
 want="MEM_LG2=$MEM_LG2 VDEFS=${VDEFS:-} SRC=$srchash"
 stale() { [ ! -x "$BIN" ] || [ "$(cat $STAMP 2>/dev/null)" != "$want" ]; }
 if stale || [ "${BUILD:-0}" = 1 ]; then
-   flock -x 9
-fi
-if stale || [ "${BUILD:-0}" = 1 ]; then
+   flock -x 9      # the runs in flight finish first
    echo "building $OBJ/tb_smolrv64_linux (MEM_LG2=$MEM_LG2 VDEFS=${VDEFS:-<none>}) ..."
    verilator --binary --timing -j 0 -sv -Wall \
       -Wno-fatal -Wno-TIMESCALEMOD -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
@@ -85,6 +86,7 @@ if stale || [ "${BUILD:-0}" = 1 ]; then
    echo "$want" > "$STAMP"
 fi
 flock -s 9      # shared for the run: the exec'd binary keeps fd 9
+exec 8>&-       # the next runner's check
 
 if [ -n "${CKPT:-}" ]; then
    ../tools/ckpt-stub.py "$CKPT" || exit 1
