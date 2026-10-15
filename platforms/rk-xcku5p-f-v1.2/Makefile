@@ -165,6 +165,13 @@ census:
 	  $(if $(DCP),$(DCP),rk_xcku5p.runs/impl_1/rk_xcku5p_postroute_physopt.dcp) \
 	  $(if $(OUT),$(OUT),census.txt) $(if $(SLACK),$(SLACK),0.35)
 
+# The worst setup paths of a checkpoint over every clock, and each clock's worst (the census
+# counts probe_clk alone; a build's WNS is any clock's). Read-only.
+#   make worst DCP=<checkpoint> [N=10]
+worst:
+	@test -n "$(DCP)" || { echo "usage: make worst DCP=<checkpoint> [N=10]"; exit 2; }
+	$(VIVADO) $(VFLAGS) -source report_worst.tcl -tclargs $(DCP) $(if $(N),$(N),10)
+
 # The worst routed path between two cell groups, pin by pin (the census names the family).
 #   make path FROM=<cell glob> TO=<cell glob> [N=1]
 path:
