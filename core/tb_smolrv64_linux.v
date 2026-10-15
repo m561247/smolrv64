@@ -632,6 +632,20 @@ module tb;
    integer tdi;
    initial for (tdi = 0; tdi < TD_N; tdi = tdi + 1) td_cnt[tdi] = 64'd0;
    always @(posedge clk) if (!reset && meas) td_cnt[td_k] <= td_cnt[td_k] + 64'd1;
+   // RENAME-SIM: of the be:rename cycles, those each shard's free list is low in (rename stalls
+   // while any is, so several can be at once): which shard's size a rename stall is about. A
+   // refill cycle takes the cause of the cycle before it (§11.2), and its lists' flags too.
+   reg [63:0] rn_low [0:7];
+   reg [7:0]  rn_lowp;
+   integer rli;
+   initial begin for (rli = 0; rli < 8; rli = rli + 1) rn_low[rli] = 64'd0; rn_lowp = 8'd0; end
+   wire [7:0] rn_lowc = (|dut.core.rn_shard_low) ? dut.core.rn_shard_low : rn_lowp;
+   always @(posedge clk) begin
+      rn_lowp <= dut.core.rn_shard_low;
+      if (!reset && meas && (td_k == 5'd16))
+         for (rli = 0; rli < 8; rli = rli + 1)
+            if (rn_lowc[rli]) rn_low[rli] <= rn_low[rli] + 64'd1;
+   end
 
    // ---- MEM-SIM: what the next memory-backend step could recover, printed with TOPDOWN-SIM ----
    // D$: cycles any fill is in flight and the MSHRs live over them, fills started, cycles a request
@@ -1119,6 +1133,8 @@ module tb;
       $display("SQ-SIM data landings=%0d left-out=%0d (fetched by the data read instead)", dut.core.u_sq.ln_n, dut.core.u_sq.ln_out);
       $display("FPORT-SIM retired: divides=%0d int-to-FP=%0d csr/sfence reading rs1=%0d | stores=%0d FP stores=%0d | the store queue's data reads=%0d",
                fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd);
+      $display("RENAME-SIM be:rename cycles with each shard low: lanes %0d %0d %0d %0d | FP shards 4-7 %0d %0d %0d %0d",
+               rn_low[0], rn_low[1], rn_low[2], rn_low[3], rn_low[4], rn_low[5], rn_low[6], rn_low[7]);
       $display("MEMDEP loads blocked only by unknown older store addresses: resolved clear=%0d (waited %0d cycles), resolved aliased=%0d (waited %0d cycles)",
                dut.core.u_sq.sp_clear, dut.core.u_sq.sp_clear_cyc, dut.core.u_sq.sp_alias, dut.core.u_sq.sp_alias_cyc);
       $display("SQ  loads=%0d reordered=%0d (%0d.%0d%%)  ld_block cycles=%0d (%0d.%0d%%)  mean occ=%0d.%02d  full=%0d",
