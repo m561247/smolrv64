@@ -181,18 +181,24 @@ module virtio_input #(
    wire driver_ok = dev_status[2];
 
    // ================================ byte FIFO, 512 deep ================================
+   // The head byte b is a register: the next head is read from the array at the next read pointer
+   // (or is the byte written into that slot this cycle), so the translator's decode does not sit
+   // behind the array's read. It is the head in the same cycles as the array would give it.
    reg  [7:0] bq [0:511];
    reg  [9:0] bq_w, bq_r;
    wire       bq_empty = bq_w == bq_r;
    wire       bq_full  = bq_w == {~bq_r[9], bq_r[8:0]};
-   wire [7:0] b = bq[bq_r[8:0]];
+   reg  [7:0] b;
    wire       b_take;
+   wire       bq_put   = key_valid && !bq_full;
+   wire [9:0] bq_r_n   = bq_r + {9'd0, b_take};
    always @(posedge clock) begin
       if (reset) begin bq_w <= 10'd0;  bq_r <= 10'd0;  bytes_lost <= 16'd0; end
       else begin
-         if (key_valid && !bq_full) begin bq[bq_w[8:0]] <= key_byte;  bq_w <= bq_w + 10'd1; end
+         if (bq_put) begin bq[bq_w[8:0]] <= key_byte;  bq_w <= bq_w + 10'd1; end
          if (key_valid && bq_full) bytes_lost <= bytes_lost + 16'd1;
-         if (b_take) bq_r <= bq_r + 10'd1;
+         if (b_take) bq_r <= bq_r_n;
+         b <= (bq_put && (bq_w == bq_r_n)) ? key_byte : bq[bq_r_n[8:0]];
       end
    end
 
