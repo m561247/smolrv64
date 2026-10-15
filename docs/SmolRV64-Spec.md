@@ -168,7 +168,7 @@ held a group until its room appeared and dispatched it in that cycle.
 | cause | meaning |
 |---|---|
 | *(operands)* | **no longer a dispatch stall.** Waiting for operands happens in the scheduler now (§2.1); dispatch is blocked by structural resources only. |
-| `~cr_rob1..3` | no free ROB row (32 rows) beyond the IR group's (`st_rob`) |
+| `~cr_rob1..3` | no free ROB row (64 rows) beyond the IR group's (`st_rob`) |
 | `~cr_ia/ib/ic/l/f` | the member's scheduler has no entry beyond its dispatch-stage register and the IR's op — integer 10 each, in-order 12; for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
 | `rn_stall` | any rename shard below `LOWAT`=4 free registers (`st_rn`) |
 | `cr_ser`, `cr_csr` | a serializing op -- a fence, `fence.i`, an AMO, an xret, `ecall`/`ebreak`/`wfi`/`sfence.vma`, a trap from dispatch -- is **alone in flight**: it pops only when the ROB AND the store queue have drained (`drained`, rule C5) and the IR is empty, and nothing pops behind it until it commits. A CSR op does not drain: it waits only for the CSR op before it (`csr_infl`, or one in the IR) (`st_srz`) |
@@ -483,16 +483,16 @@ A physical register's shard is encoded in its number and never changes, so a com
 
 ## 6. Reorder buffer
 
-- **32 rows of a group**, status only — no result values, no PC, no operands. A dispatch
+- **64 rows of a group** (192 entries at IW=3), status only — no result values, no PC, no operands. A dispatch
   group takes a row, slot k in column k, so an entry's index is `{row, column}` and that index
   is its age. A row has 2^⌈log2 `IW`⌉ columns (at IW=3 the fourth is never valid); the
   dispatch credit is a free row.
-- **Sized by one knob**, `SMOLRV64_ROB_ROWS` (a power of two; 32 in the shipping build). The
+- **Sized by one knob**, `SMOLRV64_ROB_ROWS` (a power of two; 64 in the shipping build). The
   fetch sequence number that orders the restarts (`older()`, the sign of a difference) is
   sized from the window it spans: `SEQW` = ⌈log2 `SEQ_LIVE`⌉ + 1, `SEQ_LIVE` = FW + QD + IW +
-  `ROB_ROWS` × IW, every op from the bundle register to the ROB head (121 at IW=3: 8 bits; 9 at
-  IW=4 or at 64 rows). An always-on check fatals when the seqno order of the mispredicts and
-  the pending restart disagrees with their order in the ROB.
+  `ROB_ROWS` × IW, every op from the bundle register to the ROB head (217 at IW=3: 9 bits). An
+  always-on check fatals when the seqno order of the mispredicts and the pending restart
+  disagrees with their order in the ROB. The size is measured below (*Answered: how big a ROB*).
 - Column k is one array, written only by slot k and read only by commit port k. Commit runs
   along the head's row from its first uncommitted column; a row may take several cycles, and
   the head moves to the next row when the row's last valid column commits.
@@ -505,8 +505,8 @@ bulk-clearable bit vectors.
 | `noret` | 1 | commits but must not be counted (see below) |
 | `rd` | 6 | architectural destination, unified numbering (0–31 int, 32–63 FP) |
 | `prd` | `PBITS`=9 | physical register allocated; **0 when none** |
-| | **16** | × 32 rows × `IW` columns = **1,536 bits** at IW=3 |
-| `v`, `done` | 2 × 32 × 2^⌈log2 `IW`⌉ | separate flops — both are bulk-cleared on flush |
+| | **16** | × 64 rows × `IW` columns = **3,072 bits** at IW=3 |
+| `v`, `done` | 2 × 64 × 2^⌈log2 `IW`⌉ | separate flops — both are bulk-cleared on flush |
 
 **Three fields are deliberately absent**, each recoverable from state the design already
 keeps. The ROB is sized by the *window*; the scheduler that needs execute detail is sized by
@@ -2093,36 +2093,29 @@ Two workloads, two different answers, both valid:
 The frontend is an integer/crypto-code problem, not a machine-wide one. Memory is
 machine-wide. Rank by the full suite unless the goal is a specific workload.
 
-### Answered: why is the ROB only 16 entries, and would more help?
+### Answered: how big a ROB?
 
-**No, and it is measured twice** -- once with FP in the in-order scheduler and again after
-FP got its own reordering scheduler, in case the first answer was an artifact of that:
+**64 rows of a group (192 entries at IW=3).** Measured on the GB5 checkpoint slices (20 M
+instructions warm, 50 M measured, `core/run-linux.sh` with `CKPT`), cycles against 32 rows on
+0f633992's RTL (2026-10-13/14):
 
-| ROB | blur cyc/px | AES cyc/byte |
+| slice | 16 rows | 64 rows |
 |---|---:|---:|
-| 16 | 29.44 | 122.7 |
-| 32 | 29.32 | 121.6 |
-| 64 | 29.32 | 121.6 |
+| Camera | +29.4% | -5.8% |
+| Gaussian Blur | +33.2% | -5.8% |
+| Structure from Motion | +37.3% | -2.9% |
+| HTML5 | +2.6% | -0.8% |
+| PDF Rendering | +1.8% | -0.6% |
+| SQLite | +0.8% | +0.1% |
+| Navigation | +4.4% | +1.5% |
 
-It saturates at 32 and the whole range spans 0.4% on blur, 0.9% on AES. Before the FP
-scheduler the blur column was 39.50 at **all three** depths, bit-identical.
-
-The reason is that the ROB has never been the binding constraint -- the UNITS are, which
-the scheduler sweeps say from the other side too (4 to 20 entries spans 0.8%). Blur now
-sits at 29.44 cycles/pixel with `ST_FPU` at 65%, i.e. 19.2 stall cycles for 8 FP ops =
-2.4 cycles per op, against the 2.25 cyc/op `fpbench` measures as FP throughput. It is at
-the FPU's throughput bound, and no amount of window changes that.
-
-What a deeper ROB WOULD cost is real: `N_IE` must grow with it (32 of its 64 physical
-registers are the architectural integer set, so only 32 are free, and the free list runs
-dry via `LOWAT` before a 32-entry ROB fills), and both are `$clog2`-wide in the FP tag,
-the payload index and every scheduler entry. Revisit only when a measurement shows the
-window binding.
-
-**The ROB is 32 entries (the plan of record)**, sized for the end state rather than
-today's measurements: on Dhrystone it is neutral against 16 (the frontend cannot fill it yet),
-and the wider machine the memory program builds needs the window. The free-list exposure
-above is a rename stall (`be:rename`), not a fault; the Linux lockstep measures it.
+The FP-heavy slices gain most (Camera is in GB5's integer section). Navigation's stalls move from `be:rob-full` (15.4% of
+its cycles at 32 rows) to `be:iq-full` (8.2% -> 19.0%), `be:dep-load` and `be:lq-full`, and it
+runs deeper wrong paths: its window is bound by the integer schedulers next. None of a replay
+that sets the memory-dependence counter to 3, a 16x longer forget period, or a 32-entry branch
+training queue (16 drops 4.8% of its trainings at 64 rows) moves it by more than 0.15%. The
+window costs about 10 ps on the ROB's done fan-in (the 64-row probe on wip/bid: WNS -0.064 ns
+against -0.057 at 32 rows, the same path families).
 
 ### Open question: mul/div were conflated with loads. How much does it matter?
 

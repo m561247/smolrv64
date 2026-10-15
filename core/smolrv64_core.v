@@ -61,7 +61,7 @@
  `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif
 `ifndef SMOLRV64_ROB_ROWS
- `define SMOLRV64_ROB_ROWS 32          // the ROB's rows of IW entries (a power of two)
+ `define SMOLRV64_ROB_ROWS 64          // the ROB's rows of IW entries (a power of two)
 `endif
 module smolrv64_core
   #(parameter PCW  = 64,
