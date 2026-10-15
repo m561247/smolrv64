@@ -37,9 +37,8 @@ fp[*].mem x2 : PRF FP file, a shard per writer (the load landing's, the F stage'
 fl[0].u.bank[*].mem x4 : free list, lane A's shard, 4 banks at IW=3 (circular FIFO, head read / tail write)
 fl[1].u.bank[*].mem x4 : free list, lane B's shard, 4 banks at IW=3
 fl[2].u.bank[*].mem x4 : free list, lane C's shard, 4 banks at IW=3
-fl[4].u.bank[*].mem x4 : free list, FP slice 0, 4 banks at IW=3
-fl[5].u.bank[*].mem x4 : free list, FP slice 1, 4 banks at IW=3
-fl[6].u.bank[*].mem x4 : free list, FP slice 2, 4 banks at IW=3
+fl[4].u.bank[*].mem x4 : free list, SH_FL (the FP loads' shard), 4 banks at IW=3
+fl[5].u.bank[*].mem x4 : free list, SH_FF (the F stage's shard), 4 banks at IW=3
 cp[*].rmap x3 : committed map, one copy per commit port; read at the sources + c_rd, written at one index (`rnewer` picks)
 cp[*].smap x3 : speculative map, one copy per rename port; flush clears `lv`, so no wholesale copy is needed (`newer` picks)
 
