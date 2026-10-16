@@ -1494,33 +1494,25 @@ acceptance, and they are answered in request order as the MIG answers; `+ddr_reo
 in any order. `tb_ddr_port` proves the board path under random load with a concurrent DMA
 master, in order and reordering.
 
-**LATENCY SENSITIVITY, and why the D$ split did not cash in.** Measured 2026-09-02 on the
-Ubuntu NFS boot, `SMOLRV64_HW=4`, 300 M cycles per point, lockstep clean at every point:
+**MEASURED ON THE BOARD** (2ed18026 at 166.67 MHz, the 2 GiB board; `tools/board/membench`, whose
+`chase2` counts its own user-mode cycles with the core's counters: a dependent chase over one
+random cycle of 64-byte lines, as one chain or as k independent ones):
 
-| `DDR_LAT` (cycles) | retires | retires/cycle | vs. a 4-cycle memory |
-|---|---|---|---|
-| 4  | 80,008,912 | 0.2667 | -- |
-| 20 | 68,713,515 | 0.2290 | -14.1% |
-| 80 | 42,307,472 | 0.1410 | **-47.1%** |
+| | cycles |
+|---|---|
+| a load to its dependent load, a D$ hit | 5.7 |
+| the same, a D$ miss whose page the dTLB's first level holds | 46.6 |
+| a first-level dTLB miss that the second level holds | 5 to 9 more |
+| a walk on every load (32 MiB: 0.99 first-level misses and 1.37 D$ misses a load) | 80.8, the walker busy 30 of them |
 
-**Nearly half the throughput is spent waiting for memory**, and the board sits at the slow
-end of this curve, not the 4-cycle end every cosim before 2026-09-02 ran at.
-
-The D$ split (`rv_cache` as a LOOKUP pipeline plus a FILL machine, section 8) was aimed at
-exactly this and recovers **+0.33%** of it -- 42,307,472 against 42,169,204 for the
-pre-split cache at `DDR_LAT=80`, statistically the same +0.32% it scores at `DDR_LAT=4`.
-Making the memory 20x slower did NOT widen its advantage, which is the measurement that
-matters: if the win came from hiding miss latency it would have grown, and it did not.
-
-The reason is that the split gives the CACHE the ability to overlap a hit with a fill while
-nothing on the data side produces the second request. The LSU and each PTW walk are
-single-outstanding (section 8); the I$ side used to run two requests in flight (the run-ahead
-fetch buffer, item 10e), but the Stage 2 alignment adapter that replaced it is
-**single-outstanding** too (one demand read + prefetch, §4.1) -- so the D$'s `S_CHECK` usually
-has nothing to run under the miss. The cache is now READY for memory-level parallelism and is
-not the thing limiting it. Any further work inside `rv_cache` aimed at hiding latency is optimising a resource that
-is not the constraint -- the constraint is the number of independent requests the core can
-have in flight, i.e. the multi-outstanding load queue in the work list below.
+`ddr_port_cdc`'s FIFOs cross through `CDC_SYNC_STAGES` of synchronizers each way (their clocks
+treated as unrelated): 4.5 of the miss's 46.6 cycles, against 42.1 with them treated as related
+(258ef1fd, the same set). The lockstep model's crossing always had those stages, so no simulation
+shows the difference. Independent chains keep 7 to 8 misses in flight -- the 8 MSHRs -- while
+the dTLB translates them (256 KiB and 4 MiB, 8 to 12 chains: 5.1 to 7.0 cycles a load); a
+footprint that walks on every load keeps 2.4 (32 MiB, 4 to 16 chains: 33.8 cycles a load), the
+dTLB's one walker. A sequential stream of 8-byte loads is held by the load queue (§14): scalar
+`MemoryBandwidth` reads 7.8 bytes a cycle from the D$ and 2.4 from DRAM (64 MiB), writes 4.0.
 
 ### 9.3 Physical memory map
 
@@ -2053,7 +2045,16 @@ closure above is real; the branch cannot ship until that defect is found (handof
   Dhrystone 1,660,876 -> 1,585,889 cycles (lockstep, IW=3). 16 -> 32, measured at the 64-row ROB
   on the GB5 slices: PDF Rendering's `be:lq-full` (38% of its cycles) goes, yet its cycles rise
   0.48% (Navigation +0.82%, SQLite -0.81%, HTML5 -0.26%), and the D$'s mean busy MSHRs stay at
-  1.05: PDF waits on misses that do not overlap, not on the queue, so it stays at 16.
+  1.05: PDF waits on misses that do not overlap, not on the queue, so it stays at 16. A
+  sequential stream of 8-byte loads holds a line in eight entries, so sixteen keep under two of
+  its lines in flight: scalar `MemoryBandwidth` over 64 MiB (`tools/board/membench`, 2ed18026)
+  reads 2.4 bytes a cycle from DRAM, 26.7 cycles a line, with under two of the 8 MSHRs busy;
+  counted over the whole run, its 64 MiB fill included, the queue holds 13.3 entries on average
+  and its head waits for a credit in 60% of the cycles.
+- **One page walker per MMU.** Walks run one at a time (hits keep the lookup port, §8): a
+  footprint that walks on every load (`chase2` over 32 MiB, `tools/board/membench`, 2ed18026) keeps 2.4 loads in flight
+  at any number of independent chains, the walker busy 30 of a load's 33.8 cycles, against 7 to
+  8 while the dTLB's two levels translate them.
 - **Up to `SQ_N`=32 stores between dispatch and their drain.** `SQ_N = 1 << SQ_IB`, `SQ_IB` =
   `SMOLRV64_SQB` = 5 (`smolrv64_tags.vh`). A store holds its entry from dispatch until the LSU
   drains it after commit, and a load whose bytes overlap an older queued store waits for that

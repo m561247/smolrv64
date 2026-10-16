@@ -16,7 +16,7 @@ login prompt on the board with zero faults before it lands.
 
 | | |
 |---|---|
-| Geekbench 5.4.1, board, 2026-10-15 | **15** single-core (Integer 17, Crypto 2, Floating Point 12), **15** multi-core ([result 24723411](https://browser.geekbench.com/v5/cpu/24723411), [every subtest](workloads/gb5/result-2026-10-15.md)); the whole suite in 1 h 53 min at IPC 1.14 |
+| Geekbench 5.4.1, board, 2026-10-15 | **15** single-core (Integer 18, Crypto 2, Floating Point 12), **15** multi-core ([result 24725076](https://browser.geekbench.com/v5/cpu/24725076), [every subtest](workloads/gb5/result-2026-10-15.md)); the whole suite in 1 h 53 min at IPC 1.13 |
 | Geekbench 6.7.1, board, 2026-09-21 to 23 | 4 single-core, 4 multi-core ([result 19246188](https://browser.geekbench.com/v6/cpu/19246188)) |
 | `sha256sum` of a 30 MB file, board, 2026-09-25 | IPC 1.56 to 1.63 over three runs, 43 cycles per byte |
 | Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed three-wide; DDR4 at 333 MHz |
@@ -216,7 +216,7 @@ words. Ubuntu's NFS root runs through it.
 ## Performance
 
 Geekbench 5 on the board is the target metric: the scores above, with every subtest's rate
-in [workloads/gb5/result-2026-10-04.md](workloads/gb5/result-2026-10-04.md). The whole-run
+in [workloads/gb5/result-2026-10-15.md](workloads/gb5/result-2026-10-15.md). The whole-run
 IPC from `perf stat` is the number comparable across builds, and the subtest rates are what
 the scores follow.
 

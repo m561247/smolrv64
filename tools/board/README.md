@@ -5,3 +5,6 @@ These run on a board from its `/var/tmp`, which is on its NFS root (coffee's
 (`IV=<ms>` adds per-interval counts), `gb5-probe.sh <tag>` the hang probe that runs beside
 `perflog.sh`, `quiet-board.sh` masks what a benchmark machine does not need, and `errlog.py`
 reads the SoC's integrity log. Both runners wait for an idle machine (`idle-wait.sh`).
+`membench/` is the memory set (`make` there, then `./run.sh <tag>`): `chase2`, a pointer chase that
+reads the core's own counters around its timed loop, with clamchowder's MemoryLatency and
+MemoryBandwidth and dsheffie's mem-lat, all built on the board with the full `-march`.
