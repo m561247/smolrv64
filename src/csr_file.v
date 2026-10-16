@@ -175,7 +175,6 @@ module csr_file
    reg [63:0] mcycle, minstret;      // Zicntr: free-running cycles + retired instructions
    (* dont_touch = "true" *) reg [31:0] mimpid_q = `SMOLRV64_GIT_COMMIT;
    always @(posedge clk) mimpid_q <= mimpid_q;
-   reg        minstret_wr_q;         // a minstret write last cycle: drop the writer's own (delayed) retirement
 
    // Zihpm: HPMN programmable counters mhpmcounter3 .. mhpmcounter(2+HPMN) (matches the DTB's
    // event->counter map, counters 3..15). Each counterN adds, per cycle, its mhpmeventN-selected
@@ -787,6 +786,21 @@ module csr_file
    wire hpm_csr_we = upd_valid & upd_is_csr & csr_writes & ~trap_v & ~csr_illegal;
    wire [HPMN-1:0] hpm_wev, hpm_wct, hpm_run, hpm_wrap;
    wire [63:0]     hpm_nxt [0:HPMN-1];
+   // A COUNTER WRITE LOADS A CYCLE LATE. A counter's next value is its adder's sum, and a CSR
+   // write's value comes through the read mux and the set/clear (newv): loading it the same cycle
+   // put that cone in front of every counter's carry chain. The write is registered here (cw_*)
+   // and loads the next cycle, over that cycle's sum; the sum of the write's own cycle is
+   // overwritten too. minstret's writer retires into the count a cycle after the write, so the
+   // load drops it, as a write must.
+   reg             cw_mcycle, cw_minstret;
+   reg  [HPMN-1:0] cw_hpm;
+   reg  [63:0]     cw_d;
+   always @(posedge clk) begin
+      cw_mcycle   <= ~reset & upd_valid & upd_is_csr & csr_writes & ~trap_v & (upd_addr == MCYCLE);
+      cw_minstret <= ~reset & upd_valid & upd_is_csr & csr_writes & ~trap_v & (upd_addr == MINSTRET);
+      cw_hpm      <= reset ? {HPMN{1'b0}} : hpm_wct;
+      cw_d        <= newv;
+   end
    // The select is decoded from the stored mhpmeventN, a cycle after it is written: the CSR's
    // write data (the read mux and the set/clear) never reaches hpm_esel. In that cycle the
    // select is the old event's, so the counter holds (hpm_wev_q).
@@ -805,7 +819,7 @@ module csr_file
       assign hpm_wev[g]  = hpm_csr_we & (upd_addr == EVA);
       assign hpm_wct[g]  = hpm_csr_we & (upd_addr == CTA);
       assign hpm_run[g]  = ~mcountinhibit[g+3] & ~inh & ~hpm_wev_q[g];
-      assign hpm_wrap[g] = hpm_run[g] & sum[64] & ~hpm_wct[g];
+      assign hpm_wrap[g] = hpm_run[g] & sum[64] & ~hpm_wct[g] & ~cw_hpm[g];
       assign hpm_nxt[g]  = sum[63:0];
       assign hpm_of[g]   = mhpmevent[g][OF_B];
    end endgenerate
@@ -919,25 +933,23 @@ module csr_file
          mstatus[14:13] <= 2'b11;
       // Zicntr counters (off the trap/csr chain so they tick every cycle). mcycle counts
       // clocks; minstret adds the committing checkpoint's instruction count. An M-mode
-      // write to mcycle/minstret loads the value (this cycle's increment is dropped).
+      // write to mcycle/minstret loads the value a cycle late (cw_*, with the Zihpm counters').
       // retire_cnt may be the caller's DELAYED count (smolrv64_core passes the same registered copy
       // it gives the Zihpm counters, and holds a CSR op at the ROB head for a second cycle so
       // the lag is invisible to a read). A minstret WRITE then sees the writing instruction's
-      // own retirement arrive one cycle after the write: minstret_wr_q drops it, so the value
-      // after `csrw minstret` is the written value exactly as with a live count.
+      // own retirement arrive one cycle after the write, the cycle the write loads over it, so the
+      // value after `csrw minstret` is the written value exactly as with a live count; a read
+      // (csrr) writes nothing and counts itself.
       if (reset) begin
-         mcycle <= 64'd0; minstret <= 64'd0; minstret_wr_q <= 1'b0;
+         mcycle <= 64'd0; minstret <= 64'd0;
       end else begin
-         mcycle   <= (upd_valid && upd_is_csr && !trap_v && upd_addr==MCYCLE)
-                       ? newv : mcycle   + (mcountinhibit[0] ? 64'd0 : 64'd1);
-         minstret_wr_q <= upd_valid && upd_is_csr && !trap_v && upd_addr==MINSTRET;
-         minstret <= (upd_valid && upd_is_csr && !trap_v && upd_addr==MINSTRET)
-                       ? newv : minstret + ((mcountinhibit[2] | minstret_wr_q) ? 64'd0 : {58'd0, retire_cnt});
+         mcycle   <= cw_mcycle   ? cw_d : mcycle   + (mcountinhibit[0] ? 64'd0 : 64'd1);
+         minstret <= cw_minstret ? cw_d : minstret + (mcountinhibit[2] ? 64'd0 : {58'd0, retire_cnt});
       end
       // Zihpm counters (off the trap/csr chain, like Zicntr). Each mhpmcounterN adds its
       // mhpmeventN-selected event's count this cycle while it runs (hpm_run: mcountinhibit[N]
-      // and the event's *INH bit for the current privilege); an M-mode write loads the value
-      // (that cycle's increment dropped). A wrap sets OF (Sscofpmf). mhpmeventN + mcountinhibit
+      // and the event's *INH bit for the current privilege); an M-mode write loads the value a
+      // cycle late (cw_hpm). A wrap sets OF (Sscofpmf). mhpmeventN + mcountinhibit
       // are plain WARL; an unimplemented event code contributes 0 (the counter holds).
       if (reset) begin
          mcountinhibit <= 64'd0;
@@ -950,8 +962,8 @@ module csr_file
                mhpmevent[i] <= newv;
             else if (hpm_wrap[i])
                mhpmevent[i][OF_B] <= 1'b1;
-            if (hpm_wct[i])
-               mhpmcounter[i] <= newv;
+            if (cw_hpm[i])
+               mhpmcounter[i] <= cw_d;
             else if (hpm_run[i])
                mhpmcounter[i] <= hpm_nxt[i];
          end

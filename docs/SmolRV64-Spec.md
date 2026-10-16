@@ -1716,7 +1716,9 @@ ranks last, after STI. `scountovf` (0xDA0) reads the OF bits; below M a bit read
 works (the kernel keeps frame pointers). The privilege filter compares the current privilege
 with the event bus, which runs two cycles late, so an event in the cycle of a privilege change
 may count on either side of it. A write of `mhpmeventN` selects its event from the stored
-register a cycle later, and the counter holds for that cycle. A read of `mhpmeventN` or
+register a cycle later, and the counter holds for that cycle; a write of a counter (`mcycle`,
+`minstret`, `mhpmcounterN`) loads a cycle late, over that cycle's increment, and a read (`csrr`)
+of one writes nothing. A read of `mhpmeventN` or
 `mhpmcounterN` (`csrr`) writes nothing, so it cannot swallow that cycle's increment or overflow. `core/directed/sscofpmf.S`
 checks overflow, OF's silence, the INH bits in M and S, LCOFI's priority and delegation, and
 `scountovf`'s masking and U-mode trap.
