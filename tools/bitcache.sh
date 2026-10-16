@@ -24,6 +24,9 @@ plat_default=$here/platforms/rk-xcku5p-f-v1.2
 
 diff_paths=(src core platforms/rk-xcku5p-f-v1.2 workloads/monitor)
 excl=(':(exclude)*.xpr' ':(exclude)third_party' ':(exclude)*.log' ':(exclude)src/mem.linehex')
+# Untracked files no build reads: logs, images, lock files, and the clockInfo.txt a Vivado run
+# (an out-of-context build, a report) writes into its working directory.
+junk='\.(log|linehex|elf|bin|flock)$|(^|/)clockInfo\.txt$'
 
 # A define the last build used: the project file's Verilog_Define block records them (build.tcl).
 define() {
@@ -36,8 +39,8 @@ tree_id() {
     local commit d
     commit=$(git -C "$here" rev-parse --short=12 HEAD)
     d=$( (cd "$here" && git diff HEAD -- "${diff_paths[@]}" "${excl[@]}" 2>/dev/null
-          git ls-files -o --exclude-standard -- "${diff_paths[@]}" 2>/dev/null | grep -v -E '\.(log|linehex|elf|bin)$' | LC_ALL=C sort | xargs -r cat) | sha1sum | cut -c1-8)
-    if [ -n "$(cd "$here" && git status --porcelain -- "${diff_paths[@]}" "${excl[@]}" 2>/dev/null | grep -v -E '\.(log|linehex|elf|bin)$')" ]
+          git ls-files -o --exclude-standard -- "${diff_paths[@]}" 2>/dev/null | grep -v -E "$junk" | LC_ALL=C sort | xargs -r cat) | sha1sum | cut -c1-8)
+    if [ -n "$(cd "$here" && git status --porcelain -- "${diff_paths[@]}" "${excl[@]}" 2>/dev/null | grep -v -E "$junk")" ]
     then echo "$commit-d$d"; else echo "$commit"; fi
 }
 
@@ -53,7 +56,7 @@ content_id() {
     local list
     local cexcl=(':(exclude)*.xpr' ':(exclude)*.log' ':(exclude)src/mem.linehex' ':(exclude)core/cosim-expected.txt')
     list=$(cd "$here" && { git ls-files -c -- "${diff_paths[@]}" third_party "${cexcl[@]}"
-                           git ls-files -o --exclude-standard -- "${diff_paths[@]}" | grep -v -E '\.(log|linehex|elf|bin|flock)$'
+                           git ls-files -o --exclude-standard -- "${diff_paths[@]}" | grep -v -E "$junk"
                          } | LC_ALL=C sort -u | while read -r f; do [ -f "$f" ] && echo "$f"; done)
     (cd "$here" && paste <(echo "$list") <(echo "$list" | git hash-object --stdin-paths)) | sha1sum | cut -c1-12
 }
