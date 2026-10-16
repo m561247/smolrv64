@@ -37,7 +37,8 @@ mkdir -p "$RES"
 git log -1 --format='%H%n%s%n%ci' > "$RES/commit.txt"
 
 # ---- 1. fast gates first: they cost seconds and can veto an hour ----------------------
-(cd "$REPO/src" && ./lint.sh 2>&1 | tail -1) || { echo "GATE: FAIL (lint)"; exit 1; }
+(cd "$REPO/src" && ./lint.sh) > "$RES/lint.log" 2>&1 || { tail -5 "$RES/lint.log"; echo "GATE: FAIL (lint)"; exit 1; }
+tail -1 "$RES/lint.log"
 # EVERY unit tb, found by GLOB rather than named one at a time. Only the cache tb was ever
 # run here; on 2026-09-03 three of the other four turned out not even to COMPILE -- tb_smolrv64_iq
 # lost `iss_ps` when the tags moved to a LUTRAM, and tb_smolrv64_lq/tb_smolrv64_sq still drive the
