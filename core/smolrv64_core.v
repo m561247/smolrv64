@@ -490,11 +490,16 @@ module smolrv64_core
    localparam integer ROB_CB = (IW > 1) ? $clog2(IW) : 1, ROB_IDXB = $clog2(ROB_ROWS) + ROB_CB;
    localparam integer ROB_DEPTH = ROB_ROWS << ROB_CB;   // the index space
    // THE KILL (5.4e): every entry younger than the walked-to branch, from the ROB's flops. Each
-   // structure holding an op clears it when dead(its rob); the kill holds until the flush.
+   // structure holding an op clears it when dead(its rob) -- the position test of
+   // smolrv64_kill.vh against the ROB's kh and kb; the vector rob_kd serves the per-entry clears.
+   // The kill holds until the flush.
    wire                   rob_kd_v;
    wire [ROB_DEPTH-1:0]   rob_kd;
+   wire [ROB_IDXB-1:0]    rob_kh, rob_kb;
+   localparam integer ROBB = ROB_IDXB;
+`include "smolrv64_kill.vh"
    function automatic dead(input [ROB_IDXB-1:0] x);
-      dead = rob_kd_v & rob_kd[x];
+      dead = kdead(rob_kd_v, rob_kh, rob_kb, x);
    endfunction
    // The kill's check: when the squash fires at the head with the kill in force for KCHK cycles,
    // everything older has committed and everything younger is dead, so the backend holds no
@@ -989,7 +994,7 @@ module smolrv64_core
       .iss_v(rf_iss_v),.iss_ent(rf_iss_ent),.iss_rob(rf_iss_rob),
      .iss_take(rf_take),
       .hold_v(j_v),.hold_ent(j_ent),
-      .blk_v(rf_blk_v),.blk_pr(rf_blk_pr),.flush(redirect),.kd_v(rob_kd_v),.kd(rob_kd),.occupancy(rf_occ),.free_n(rf_free));
+      .blk_v(rf_blk_v),.blk_pr(rf_blk_pr),.flush(redirect),.kd_v(rob_kd_v),.kh(rob_kh),.kb(rob_kb),.occupancy(rf_occ),.free_n(rf_free));
 
    // Dispatch back-pressure comes from whichever scheduler this instruction is routed to.
    // Stage-aware: a slot may dispatch iff its target pipe's dispatch stage is empty OR drains
@@ -1338,7 +1343,7 @@ module smolrv64_core
          .unit_busy(m1 | lb_any[gl] | ((gl == 0) & sy_at_head)),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
          .iss_take(iss_v),
          .hold_v(v),.hold_ent(ent),
-         .blk_v(blk_v),.blk_pr(blk_pr),.flush(redirect),.kd_v(rob_kd_v),.kd(rob_kd),.occupancy(occ),.free_n(free));
+         .blk_v(blk_v),.blk_pr(blk_pr),.flush(redirect),.kd_v(rob_kd_v),.kh(rob_kh),.kb(rob_kb),.occupancy(occ),.free_n(free));
       // the tags, and whether the op completes later than its issue (lane_late), read at the pick
       reg  [3*RN_PBITS:0]   psmem [0:NI-1];
       reg  [PLW-1:0]        plmem [0:NI-1];
@@ -1683,7 +1688,7 @@ module smolrv64_core
       .w_v(lsu_wk_done & wk_st), .w_idx(sq_k_idx), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
       .f_v(sq_f_v), .f_rob(sq_f_rob), .f_fc(sq_f_fc), .f_pc(sq_f_pc), .f_seq(sq_f_seq),
-      .occupancy(sq_occ), .flush(redirect), .kd_v(rob_kd_v), .kd(rob_kd), .kmask(sq_kmask));
+      .occupancy(sq_occ), .flush(redirect), .kd_v(rob_kd_v), .kh(rob_kh), .kb(rob_kb), .kmask(sq_kmask));
 
    // ------------------------------------------------------------------- LOAD QUEUE
    wire                lq_d_ready, lq_x_v, lq_x_signed, lq_x_fp, lq_x_unc, lq_x_head, lq_l_rd_v, lq_b_ok;
@@ -1773,7 +1778,7 @@ module smolrv64_core
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
       .f_v(lq_f_v), .f_idx(lq_f_idx), .f_rp(lq_f_rp), .f_rob(lq_f_rob), .f_fc(lq_f_fc), .f_pc(lq_f_pc), .f_seq(lq_f_seq),
       .x_devwait(lq_x_devwait), .occupancy(lq_occ), .av_any(lq_av_any), .e_dprd(lq_e_dprd), .uf_any(lq_uf_any), .ar(la_v), .pk_v(lq_pk_v), .pk_idx(lq_pk_idx), .pk_seq(lq_pk_seq), .rob_head(rob_head_idx), .flush(redirect),
-      .kd_v(rob_kd_v), .kd(rob_kd), .kmask(lq_kmask));
+      .kd_v(rob_kd_v), .kh(rob_kh), .kb(rob_kb), .kmask(lq_kmask));
 
    // ------------------------------------------------- COLLAPSING FILL AND ACCESS
    // The queue costs a load two cycles -- one to register the address, one to select the
@@ -1887,7 +1892,7 @@ module smolrv64_core
       // the walk starts the cycle after the resolve, from the registered branch
       .k_v(fr_set_q), .k_idx(fr_rob),
       .wl_v(rob_wl_v), .wl_rd(rob_wl_rd), .wl_prd(rob_wl_prd), .wl_pold(rob_wl_pold), .wl_done(rob_wl_done),
-      .kd_v(rob_kd_v), .kd(rob_kd), .rel(fr_rel));
+      .kd_v(rob_kd_v), .kd(rob_kd), .kh(rob_kh), .kb(rob_kb), .rel(fr_rel));
 
    // The M-equivalence assertion that guarded the previous two commits is GONE, deliberately
    // and by construction: it said the ROB's commit equals what M would have done in the same

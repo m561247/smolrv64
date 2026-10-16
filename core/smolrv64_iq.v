@@ -80,13 +80,16 @@ module smolrv64_iq
     output wire [PBITS-1:0]      blk_pr,
 
     input  wire                  flush,
-    // the kill (smolrv64_rob kd): an entry whose op is younger than a mispredicted branch dies
+    // the kill (smolrv64_rob kd_v, kh, kb): an entry whose op is younger than a mispredicted
+    // branch dies
     input  wire                  kd_v,
-    input  wire [(1 << ROBB)-1:0] kd,
+    input  wire [ROBB-1:0]       kh,
+    input  wire [ROBB-1:0]       kb,
     output wire [IDXB:0]         occupancy,
     output wire [IDXB:0]         free_n);    // entries free now (not valid, not held): the dispatch credit
 
    reg [NENT-1:0]        v;
+`include "smolrv64_kill.vh"
    reg [ROBB-1:0]        e_rob [0:NENT-1];
    reg [NSRC*PBITS-1:0]  e_ps  [0:NENT-1];
    reg [NSRC-1:0]        e_r   [0:NENT-1];
@@ -270,7 +273,7 @@ module smolrv64_iq
          if (do_iss) for (k = 0; k < NENT*NSRC; k = k + 1) dep[k][isel] <= 1'b0;
          // the kill: a dead entry's dependents are dead too (a source is an older op's), so
          // no live row keeps a bit for it
-         if (kd_v) for (k = 0; k < NENT; k = k + 1) if (kd[e_rob[k]]) v[k] <= 1'b0;
+         for (k = 0; k < NENT; k = k + 1) if (kdead(kd_v, kh, kb, e_rob[k])) v[k] <= 1'b0;
          if (flush) begin                                  // last: wins over the dispatch above
             v <= {NENT{1'b0}};
             qhead <= {IDXB{1'b0}}; qtail <= {IDXB{1'b0}};

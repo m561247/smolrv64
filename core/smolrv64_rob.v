@@ -104,6 +104,11 @@ module smolrv64_rob
     // the second cycle after k_v until the flush.
     output reg                    kd_v,
     output reg  [(1 << IDXB)-1:0] kd,
+    // ...and the same kill as a position, for a structure to test its own entry with
+    // smolrv64_kill.vh's kdead(): kh, the head's position when the walk began, and kb, the
+    // branch's distance from it. kd stays for the per-entry clears (this ROB's, the core's).
+    output reg  [IDXB-1:0]        kh,
+    output reg  [IDXB-1:0]        kb,
     // THE RELEASE: the walk has reached the branch and every dead op is gone, so the dead entries
     // leave and the tail returns to the row after the branch's; dispatch resumes behind it
     input  wire                   rel);
@@ -226,11 +231,20 @@ module smolrv64_rob
       for (kc = 0; kc < NCOL; kc = kc + 1)
          kd_n[kr*NCOL + kc] = ((kr[RB-1:0] - hrow) > kb_rel)
                             | ((kr[RB-1:0] == k_idx[IDXB-1:CB]) & (kc[CB-1:0] > k_idx[CB-1:0]));
-   initial begin kd_v = 1'b0; kd = {DEPTH{1'b0}}; end
+   initial begin kd_v = 1'b0; kd = {DEPTH{1'b0}}; kh = {IDXB{1'b0}}; kb = {IDXB{1'b0}}; end
    always @(posedge clk) begin
-      if (k_v) kd <= kd_n;
+      if (k_v) begin kd <= kd_n;  kh <= {hrow, {CB{1'b0}}};  kb <= {kb_rel, k_idx[CB-1:0]}; end
       kd_v <= ~reset & ~flush & ~rel & (kd_v | k_v);
    end
+   // the position form names exactly the vector's entries (kd_n's rows past the branch's from the
+   // head, and its own row's later columns, are the entries farther from kh than kb)
+   localparam integer ROBB = IDXB;
+`include "smolrv64_kill.vh"
+   integer kx;
+   always @(posedge clk) if (!reset && kd_v)
+      for (kx = 0; kx < DEPTH; kx = kx + 1)
+         if (kd[kx] != kdead(1'b1, kh, kb, kx[IDXB-1:0]))
+            $fatal(1, "smolrv64_rob: the kill's position (kh %0d, kb %0d) and its vector disagree at entry %0d", kh, kb, kx);
    // a later branch is older than the one walked to; nothing allocates while the walk runs
    wire [RB-1:0] k_rel  = k_idx[IDXB-1:CB] - hrow, kq_rel = k_row - hrow;
    always @(posedge clk) if (!reset) begin

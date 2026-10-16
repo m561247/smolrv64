@@ -92,7 +92,7 @@ module tb;
       .x_v(lq_x_v),.x_idx(lq_x_idx),.x_pa(lq_x_pa),.x_size(lq_x_size),.x_signed(lq_x_signed),
       .x_fp(lq_x_fp),.x_unc(lq_x_unc), .x_head(lq_x_head),.x_devwait(lq_x_devwait),.x_take(lq_x_take),
       .l_v(lq_l_v),.l_idx(lq_l_idx),.l_tg(lq_l_idx),.l_alt(lq_l_idx),.l_rsp(1'b1),.l_prd(lq_l_prd),.l_rd(lq_l_rd),.l_rd_v(lq_l_rd_v),.l_rob(lq_l_rob),
-      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_idx(lf_idx),.f_rp(lf_rp),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kd({(1 << ROBB){1'b0}}),.kmask(lq_kmask_nc),
+      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_idx(lf_idx),.f_rp(lf_rp),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.kmask(lq_kmask_nc),
       // every bench address is DRAM (speculates freely), so the device head-gate is never taken
       .a_mem(1'b1),.rob_head({ROBB{1'b0}}));
 
@@ -111,7 +111,7 @@ module tb;
       .l_fill(lq_a_v),.l_fill_ix(lq_a_idx),.l_fill_off(lq_a_pa[11:0]),.l_fill_size(lq_a_size), .l_fill_flt(1'b0),
       .l_vpn({(NENT*28){1'b0}}),.l_fill_vpn(28'd0),.a_bare(1'b0),.l_fwd(l_fwd_nc),.f_go(1'b0),.f_lix({IDXB{1'b0}}),.f_data(f_data_nc),
       .l_block(e_block),.l_block_unk_q(sq_l_block_unk_q),.l_block_q(l_block_q),.l_older(e_older),.ld_tag(lq_q_tag),.ld_older(ld_older),
-      .k_v(sk_v),.k_idx(sk_idx),.k_va(sk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(sf_v),.f_rob(sf_rob),.f_fc(sf_fc),.f_pc(sf_pc),.f_seq(sf_seq),.occupancy(sq_occ),.flush(flush),.kd_v(sq_kd_v),.kd(sq_kd),.kmask(sq_kmask_nc));
+      .k_v(sk_v),.k_idx(sk_idx),.k_va(sk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(sf_v),.f_rob(sf_rob),.f_fc(sf_fc),.f_pc(sf_pc),.f_seq(sf_seq),.occupancy(sq_occ),.flush(flush),.kd_v(sq_kd_v),.kh(sq_kh),.kb(sq_kb),.kmask(sq_kmask_nc));
 
    integer pass=0, fail=0;
    task chk(input [255:0] nm, input got, input exp);
@@ -122,7 +122,7 @@ module tb;
    // program-order dispatch helpers: a load captures the store-seqno the queue hands out NOW
    reg [IDXB-1:0] L0, L1, S0, S1, S2, S3;
    reg              sq_kd_v = 0;
-   reg [(1<<ROBB)-1:0] sq_kd = 0;
+   reg [ROBB-1:0]   sq_kh = 0, sq_kb = 0;      // the kill: entries farther than sq_kb from sq_kh
    task disp_store(input [PBITS-1:0] dp, input [ROBB-1:0] rob, output [IDXB-1:0] ix);
       begin sq_d_dpreg=dp; sq_d_rob=rob; sq_d_alloc=1; ix=sq_d_idx; dp_of[ix]=dp; step; sq_d_alloc=0; #1; end
    endtask
@@ -359,7 +359,7 @@ module tb;
       rfv[9'd11] = 64'hAA11; rfv[9'd12] = 64'hBB22;
       sq_a_v=1; sq_a_idx=S1; sq_a_addr=56'hC100; sq_a_size=2; step; sq_a_v=0;       // S1's address; S1 is picked next
       sq_a_v=1; sq_a_idx=S0; sq_a_addr=56'hC000; sq_a_size=2; step; sq_a_v=0;       // S0's address; S1 lands, S0 is picked at the next edge
-      sq_kd_v=1; sq_kd[4'd4]=1; step; sq_kd_v=0; sq_kd=0; #1;                       // ...in the cycle S1 dies
+      sq_kd_v=1; sq_kh=0; sq_kb=3; step; sq_kd_v=0; #1;                              // ...in the cycle S1 (rob 4) dies
       step; step;
       chk("14 the older store got its data", sq_kc_v && sq_c_data==64'hAA11, 1'b1);
       chk("14 the younger store died", sq_occ==1, 1'b1);

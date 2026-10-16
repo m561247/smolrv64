@@ -189,7 +189,8 @@ module smolrv64_sq
     // at the first uncommitted entry. kmask names every such slot while the kill holds, live or
     // not (nothing allocates meanwhile), so an address a dead store delivers late is dropped too.
     input  wire                  kd_v,
-    input  wire [(1 << ROBB)-1:0] kd,
+    input  wire [ROBB-1:0]       kh,
+    input  wire [ROBB-1:0]       kb,
     output wire [NENT-1:0]       kmask);
 
    reg [NENT-1:0]        v, av, dv;          // live / address known / data known
@@ -226,13 +227,14 @@ module smolrv64_sq
    reg [IDXB:0]          cnt;
    integer               k;
    // the kill's entries, and how many
+`include "smolrv64_kill.vh"
    reg  [NENT-1:0]       kmk, kds;
    reg  [IDXB:0]         k_n;
    integer               kq;
    always @* begin
       k_n = {(IDXB+1){1'b0}};
       for (kq = 0; kq < NENT; kq = kq + 1) begin
-         kds[kq] = kd_v & ~cmt[kq] & kd[rob[kq]];
+         kds[kq] = ~cmt[kq] & kdead(kd_v, kh, kb, rob[kq]);
          kmk[kq] = kds[kq] & v[kq];
          k_n = k_n + {{IDXB{1'b0}}, kmk[kq]};
       end

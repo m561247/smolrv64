@@ -198,7 +198,8 @@ module smolrv64_lq
     // slot whose op is dead while the kill holds, live or not (nothing allocates meanwhile): the
     // LSU drops their responses by tag, a load among them starting now included.
     input  wire                  kd_v,
-    input  wire [(1 << ROBB)-1:0] kd,
+    input  wire [ROBB-1:0]       kh,
+    input  wire [ROBB-1:0]       kb,
     output wire [NENT-1:0]       kmask);
 
    // A tail pointer and a per-entry `sent` bit. Entries wait to go to memory in any order they
@@ -246,6 +247,7 @@ module smolrv64_lq
    // the one before it the youngest. Every "oldest of these" below is ring_oldest(.., tail), with
    // no pointer to keep in step with entries that land and free out of order.
 `include "smolrv64_ring.vh"
+`include "smolrv64_kill.vh"
 
    // THE SLOT AT THE TAIL MUST BE FREE, not merely "the queue is not full". Loads land out of
    // order once they are pipelined (the tagged fast path; the random bench lands them in any
@@ -372,7 +374,7 @@ module smolrv64_lq
    integer         kq, kw;
    always @* begin
       for (kq = 0; kq < NENT; kq = kq + 1) begin
-         kds[kq] = kd_v & kd[rob[kq]];
+         kds[kq] = kdead(kd_v, kh, kb, rob[kq]);
          kmk[kq] = kds[kq] & v[kq];
       end
    end

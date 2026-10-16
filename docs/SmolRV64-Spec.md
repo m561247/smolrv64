@@ -599,8 +599,12 @@ without waiting for the branch to reach the head:
   its column's map copy (the oldest column winning in a row, `lv` set) and steps its shard's
   speculative free-list head back over its register. An older mispredict resolving meanwhile
   moves the target back and the cursor goes on.
-- **The kill.** The cycle after the resolve the ROB turns the branch into a dead-entry vector
-  (`kd`, from flops: the rows after the branch's and its row's later columns), and every
+- **The kill.** The cycle after the resolve the ROB turns the branch into a position, from
+  flops: `kh`, the head's when the walk began, and `kb`, the branch's distance from it. An op is
+  dead while the kill holds when its ROB entry is farther from `kh` than `kb` -- the rows after
+  the branch's and its row's later columns -- which each structure tests for its own entries
+  with one subtract and compare (`core/smolrv64_kill.vh`), not by indexing a 256-entry vector;
+  the vector (`kd`, asserted equal) serves only the per-entry clears at the release. Every
   structure that holds an op clears its dead ones each cycle the kill holds: the schedulers,
   dispatch stages, multiplies, landing buffers (a dead entry drains as a bubble), F, MD (the
   divider aborts), the SYSQ, M and the head-op register, the arrival flags, the walker lock,
