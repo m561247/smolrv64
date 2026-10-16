@@ -11,10 +11,12 @@ images/sec on the full two-wide stack, unchanged from June while everything else
     tools/gb5-trace-stack.py gb5-trace-perf.csv gb5-trace-raw.log          # the table
     tools/gb5-trace-stack.py ... --min-seconds 30                           # skip short windows
 
-Events (docs/smolrv64-perf-events.json): r0005 redirects, r0008 trap/system redirects,
-r0300 LSU stall, r0303 FPU stall, r0304 serializing stall, r0310 frontend bubble,
-r0100/r0102 D$ accesses/misses, r0110/r0112 I$ accesses/misses. System-wide counts include
-whatever else the board runs; it is otherwise idle.
+Events (docs/smolrv64-perf-events.json says what each counts): r0005 restarts, r0008
+exception/interrupt/fault/replay redirects, r0300 ST_MEM, r0303 ST_FPU, r0304 ST_DSP (the queue
+head without a credit other than the ROB's), r0310 FE_BUB, r0100/r0102 D$ requests/fills (page-
+table-walk reads and stores are requests too), r0110/r0112 I$ requests/virtual-tag misses.
+System-wide counts include whatever else the board runs; it is otherwise idle. The trace script
+is not in the tree; tools/gb5-subtests.py reads tools/board/gb5-run.sh's IV= output instead.
 """
 import sys, time, re, argparse, calendar
 from collections import defaultdict
@@ -56,8 +58,8 @@ for line in open(a.raw, errors="replace"):
 if windows and windows[-1][2] is None: windows[-1][2] = int(times[-1]) if times else windows[-1][1]   # still running: up to the last sample
 
 def col(x, w=9): return f"{x:>{w}}"
-print(f"{'subtest':<26}{col('secs',6)}{col('IPC',6)}{col('CPI',6)}{col('trap/K',8)}{col('redir/K',8)}"
-      f"{col('LSU%',6)}{col('FPU%',6)}{col('SER%',6)}{col('FE%',6)}{col('D$miss%',9)}{col('D$MPKI',8)}{col('I$miss%',9)}")
+print(f"{'subtest':<26}{col('secs',6)}{col('IPC',6)}{col('CPI',6)}{col('xcpt/K',8)}{col('redir/K',8)}"
+      f"{col('MEM%',6)}{col('FPU%',6)}{col('DSP%',6)}{col('FE%',6)}{col('D$fill%',9)}{col('D$MPKI',8)}{col('I$miss%',9)}")
 for name, t0, t1 in windows:
     if t1 - t0 < a.min_seconds: continue
     tot = defaultdict(int)

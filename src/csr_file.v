@@ -74,16 +74,14 @@ module csr_file
                                     // rests on. Splitting them keeps the retire cone out of
                                     // THIRTEEN event muxes and 64-bit carry chains. See
                                     // smolrv64_core's hpm_ret_q.
-    // Zihpm event pulses (each +1/cycle when high) selected per counter by mhpmeventN:
-    // [0]load [1]store [2]redirect(branch mispredict) [3]dc-access [4]dc-miss [5]ic-access [6]ic-miss
-    // [6:0] are the original per-op/cache taps. [30:7] are smolrv64_core's STALL-ATTRIBUTION
-    // taps (see smolrv64_core.v and docs/SmolRV64-Spec.md section 11): they turn a CPI number into
-    // a CPI stack. [21:20] and [43:39] are its TOP-DOWN taps: an exclusive charge of every cycle
-    // (SmolRV64-Spec 11.2).
+    // Zihpm event bits (each +1 in a cycle it is high), selected per counter by mhpmeventN;
+    // the event map below names every bit and says what it counts (docs/SmolRV64-Spec.md 11).
     input  wire [43:0] hpm_ev,
     input  wire [5:0]  hpm_lqocc,        // load-queue occupancy this cycle (MEM_LQOCC)
     input  wire [5:0]  hpm_sqocc,        // store-queue occupancy this cycle (MEM_SQOCC)
-    input  wire [1:0]  hpm_disp,         // instructions dispatched this cycle (DPATCH)
+    input  wire [5:0]  hpm_ldinfl,       // load reads in flight at the D$ this cycle (MEM_LDINFL)
+    input  wire [2:0]  hpm_disp,         // instructions dispatched this cycle (DPATCH)
+    input  wire [4:0]  hpm_tdk,          // this cycle's top-down cause td_k (the TDK_* events)
     // ---- pending interrupt (combinational): backend fires it via xtrap_* when it can ----
     output wire [63:0] dbg_timer,     // timer/interrupt-path debug bus (wrapper ILA_TIMER; pruned when unused)
     output wire        dbg_mtvec_we,  // 1-cycle: an executing CSR op writes mtvec (ILA probe4)
@@ -180,113 +178,147 @@ module csr_file
    reg        minstret_wr_q;         // a minstret write last cycle: drop the writer's own (delayed) retirement
 
    // Zihpm: HPMN programmable counters mhpmcounter3 .. mhpmcounter(2+HPMN) (matches the DTB's
-   // event->counter map, counters 3..15). Each counterN adds, per cycle, the retire-count or 1
-   // for its mhpmeventN-selected event (SmolRV64 encoding); events not yet tapped read as 0 so
-   // the counter simply stays put -- a clean extension point (Phase 2 wires branch/cache/TLB).
+   // event->counter map, counters 3..15). Each counterN adds, per cycle, its mhpmeventN-selected
+   // event's increment: 1 for a bit that is high, or a count (retirements, occupancies, dispatches);
+   // an unknown event code adds 0.
    localparam integer HPMN = 13;                                     // counters 3..15
    localparam [63:0]  HPM_INHIBIT_MASK = (((64'h1 << (HPMN+3)) - 1) & ~64'h2); // 0,2,3..15 (not TIME)
    // THE event map. docs/smolrv64-perf-events.json is GENERATED from this block by
    // tools/gen-perf-events.py -- do not edit the JSON by hand, and keep one event per line
    // with a trailing // description, because that is what the generator parses.
    //
-   // The 0x03xx block is the in-order stall attribution: every cycle the pipe fails to
-   // advance is charged to exactly one of these, so sum(stalls)/instret + 1 reconstructs
-   // CPI. 0x02xx is avoided -- the DTB already maps perf BUS_CYCLES onto 0x0202.
+   // 0x01xx are the caches and the dMMU; 0x03xx the stall events, which OVERLAP (each says when
+   // it fires; ST_DIV and ST_MUL are occupancies) and the memory events; 0x04xx the top-down
+   // events, which partition every cycle (SmolRV64-Spec 11.2); 0x05nn is the top-down cause
+   // td_k == nn itself, one event per TOPDOWN-SIM bucket. 0x02xx is avoided -- the DTB maps perf
+   // BUS_CYCLES onto 0x0202.
    localparam [15:0]  HPMEV_CYCLES = 16'h0001,   // Clock cycles while this event is selected
                       HPMEV_INSTRET= 16'h0002,   // Instructions retired
-                      HPMEV_LOAD   = 16'h0003,   // Load completions (LSU)
-                      HPMEV_STORE  = 16'h0004,   // Store completions (LSU)
-                      HPMEV_REDIR  = 16'h0005,   // Pipeline restart: a squash at the ROB head, or a mispredict's release
-                      HPMEV_DCACC  = 16'h0100,   // D$ line lookups resolved (hit or miss)
-                      HPMEV_DCMISS = 16'h0102,   // D$ line lookups that missed
-                      HPMEV_ICACC  = 16'h0110,   // I$ line lookups resolved (hit or miss)
-                      HPMEV_ICMISS = 16'h0112,   // I$ line lookups that missed
-                      HPMEV_ST_MEM = 16'h0300,   // M stalled on the LSU, + X held for a pending load
-                      HPMEV_ST_DIV = 16'h0301,   // the MD stage holds a divide (occupancy)
-                      HPMEV_ST_MUL = 16'h0302,   // a multiply in flight in a lane (occupancy)
-                      HPMEV_ST_FPU = 16'h0303,   // M stalled on the CVFPU, + X held for a pending FP result
-                      HPMEV_ST_DSP = 16'h0304,   // the queue head without a credit, not the ROB: the sum of ST_IQ..ST_SRZ
-                      HPMEV_ST_ROB = 16'h0305,   // the queue head waits for ROB room
-                      HPMEV_ST_IQ  = 16'h0306,   // the queue head: its scheduler, or a divide's MD stage, has no credit
-                      HPMEV_ST_RN  = 16'h0307,   // the queue head: a rename shard is below LOWAT
-                      HPMEV_ST_SQ  = 16'h0308,   // the queue head: no store-queue credit
-                      HPMEV_ST_LQ  = 16'h0309,   // the queue head: no load-queue credit
-                      HPMEV_ST_SRZ = 16'h030a,   // the queue head: a serializing op drains or is in flight (the rest of ST_DSP)
-                      HPMEV_FE_BUB = 16'h0310,   // X idle: frontend supplied no instruction
-                      HPMEV_FE_MMU = 16'h0311,   // X idle: because the iMMU was walking
-                      HPMEV_FE_IC  = 16'h0312,   // X idle: because the fetch window was empty
-                      HPMEV_FE_ALN = 16'h0313,   // X idle: had bytes but no complete instruction
-                      HPMEV_FE_QUE = 16'h0314,   // X idle: had an instruction; decoupling queue empty
+                      HPMEV_LOAD   = 16'h0003,   // Load landings: a plain or FP load's data written back, fast or slow path or forwarded (a wrong-path or replayed landing included; AMO and LR not)
+                      HPMEV_STORE  = 16'h0004,   // Stores the store queue hands to the LSU after commit (AMO, SC and CBO writes not)
+                      HPMEV_REDIR  = 16'h0005,   // Pipeline restarts: a squash at the ROB head, or a mispredict's release (decode resteers not)
+                      HPMEV_DCACC  = 16'h0100,   // D$ requests taken: a read at its door (loads and page-table-walk reads) or a write into its store queue
+                      HPMEV_DCMISS = 16'h0102,   // D$ line fills started (an MSHR allocated) by a load, store, cbo.zero or page-table-walk read; a join of a fill in flight not
+                      HPMEV_ICACC  = 16'h0110,   // I$ requests taken, one 16-byte pair each (run-ahead and wrong-path ones included)
+                      HPMEV_ICMISS = 16'h0112,   // I$ requests whose lookup misses the virtual tag (a physical-tag reconcile, a prefetch-buffer hit or an L2 fill follows)
+                      HPMEV_ST_MEM = 16'h0300,   // M holds an unfinished AMO, LR, SC or CBO, + no lane issued while a scheduler's lowest-slot waiting entry needs an integer load's, AMO's or CSR read's result
+                      HPMEV_ST_DIV = 16'h0301,   // The MD stage holds a divide (occupancy)
+                      HPMEV_ST_MUL = 16'h0302,   // A multiply in flight in a lane (occupancy)
+                      HPMEV_ST_FPU = 16'h0303,   // Stage F holds an op it cannot advance, + no lane issued while a scheduler's lowest-slot waiting entry needs an FP op's, FP load's, FP-port or divide result
+                      HPMEV_ST_DSP = 16'h0304,   // The queue head waits for a credit other than the ROB's while M can advance and no load or FP dependency holds issue: ST_IQ + ST_RN + ST_SQ + ST_LQ + ST_SRZ
+                      HPMEV_ST_ROB = 16'h0305,   // The queue head waits for ROB room
+                      HPMEV_ST_IQ  = 16'h0306,   // The queue head: lane A's scheduler, the FP FIFO and scheduler, the head-op register or the divide credit is full
+                      HPMEV_ST_RN  = 16'h0307,   // The queue head: a rename shard is below LOWAT
+                      HPMEV_ST_SQ  = 16'h0308,   // The queue head holds a store and has no store-queue credit (none while a head op is in flight or in the IR)
+                      HPMEV_ST_LQ  = 16'h0309,   // The queue head holds a load and has no load-queue credit (none while a head op is in flight or in the IR)
+                      HPMEV_ST_SRZ = 16'h030a,   // The queue head: a serializing op drains or is in flight, a CSR op waits for the one before it, or a CBO waits for older addresses (the rest of ST_DSP)
+                      HPMEV_FE_BUB = 16'h0310,   // The IR is empty, the queue head waits for no credit, M is free, no redirect is live and no back-end refill is due: FE_MMU + FE_IC + FE_ALN + FE_QUE
+                      HPMEV_FE_MMU = 16'h0311,   // FE_BUB while the iMMU cannot translate the fetch address (a second-level lookup, a walk, or a walk held behind a weak branch)
+                      HPMEV_FE_IC  = 16'h0312,   // FE_BUB while the fetch window is empty
+                      HPMEV_FE_ALN = 16'h0313,   // FE_BUB while fetch has bytes but no complete instruction
+                      HPMEV_FE_QUE = 16'h0314,   // FE_BUB while fetch has an instruction that has not reached the IR (queue latency or a dispatch freeze)
                       HPMEV_RED_BR = 16'h0006,   // Redirect: conditional branch mispredict
                       HPMEV_RED_JLR= 16'h0007,   // Redirect: indirect jump (jalr) target
-                      HPMEV_RED_TRP= 16'h0008,   // Redirect: trap / exception / system op
+                      HPMEV_RED_TRP= 16'h0008,   // Redirect: an exception, an interrupt, a dispatch-time or queue-entry fault, or a memory-ordering replay (xRET, sfence.vma, CSR-write redirects and fence.i not)
                       HPMEV_RD_WAIT= 16'h0317,   // A mispredict's restart: from its resolve to its release or its squash at the ROB head
-                     HPMEV_DT_WALK= 16'h0318,   // Data MMU busy: its second-level lookup or a walk (cycles; inside ST_MEM)
-                     HPMEV_DTLB_MISS=16'h0104,  // dTLB first-level miss: a second-level lookup began, and a page-table walk when that misses
+                     HPMEV_DT_WALK= 16'h0318,   // dMMU walker busy (cycles): a second-level lookup or a walk, for a queued load or store or for M's head op
+                     HPMEV_DTLB_MISS=16'h0104,  // dMMU walker starts: a request the 64-entry first level does not hold (a second-level lookup, and a walk when that misses)
                      // The memory buckets (2026-09-17): what ST_MEM is made of. Cycles unless noted.
-                     HPMEV_MEM_HITSER   = 16'h0319,   // a ready load candidate the LSU door did not take
-                     HPMEV_MEM_LDINFL   = 16'h031a,   // a load access in flight (hit ~3 cycles each; the rest is miss wait)
-                     HPMEV_MEM_STDOOR   = 16'h031b,   // a store at the D$ door, unaccepted
-                     HPMEV_MEM_ALIAS_UNK= 16'h031c,   // load candidate blocked: an older store's address is unknown
-                     HPMEV_MEM_ALIAS_OVL= 16'h031d,   // load candidate blocked: a known older store overlaps
-                     HPMEV_MEM_REORD    = 16'h031e,   // loads issued past an uncommitted older store (count)
-                     HPMEV_MEM_WPKILL   = 16'h031f,   // wrong-path loads killed after their access ran (count)
-                     HPMEV_MEM_DEVWAIT  = 16'h0320,   // a device load waiting to be the ROB head
+                     HPMEV_MEM_HITSER   = 16'h0319,   // The LQ has a ready candidate the LSU port does not take (a store has the port, the FSM is busy, the D$ read door is full, or its tag's response is due)
+                     HPMEV_MEM_LDINFL   = 16'h031a,   // Load reads in flight at the D$, summed per cycle (fast-path tags awaiting their response, and the FSM's load): / MEM_LDSENT is the mean load-read latency
+                     HPMEV_MEM_STDOOR   = 16'h031b,   // The LSU presents a write (a store, an AMO's write, a CBO) that the D$ store queue has no room for and no device acknowledges
+                     HPMEV_MEM_ALIAS_UNK= 16'h031c,   // An LQ candidate is alias-blocked while a blocked load with its wait bit set waits on an older store whose address is unknown
+                     HPMEV_MEM_ALIAS_OVL= 16'h031d,   // An LQ candidate is alias-blocked and no blocked load waits on an unknown older address (a known older store overlaps)
+                     HPMEV_MEM_REORD    = 16'h031e,   // Loads the port takes while an older store, committed or not, is live in the store queue (count)
+                     HPMEV_MEM_WPKILL   = 16'h031f,   // Loads whose landing is dropped because a kill arrived while their access ran, fast or slow path (count)
+                     HPMEV_MEM_DEVWAIT  = 16'h0320,   // No LQ candidate is ready and an unblocked device load waits to be the ROB head
                      HPMEV_MEM_LQOCC    = 16'h0321,   // load-queue occupancy, summed per cycle
                      HPMEV_MEM_SQOCC    = 16'h0322,   // store-queue occupancy, summed per cycle
                      // TOP-DOWN (SmolRV64-Spec 11.2): TD_BS + TD_FE + TD_BE + the dispatching cycles = cycles, exactly
                      HPMEV_TD_BS        = 16'h0401,   // top-down: bad speculation (a redirect, or a resolved restart waiting)
-                     HPMEV_TD_BE        = 16'h0402,   // top-down: back-end (M held, or the queue head without a credit)
-                     HPMEV_TD_BE_MEM    = 16'h0403,   // top-down: back-end waiting on memory (M on a memory op, or a load result)
-                     HPMEV_TD_BE_ROB    = 16'h0404,   // top-down: back-end, no ROB room
-                     HPMEV_TD_BE_IQ     = 16'h0405,   // top-down: back-end, no scheduler or load/store queue room
-                     HPMEV_TD_FE_LAT    = 16'h0406,   // top-down: front-end latency (iMMU walking, or no fetch bytes)
-                     HPMEV_TD_FE        = 16'h0407,   // top-down: front-end (the queue head has nothing, not bad speculation)
-                     HPMEV_DPATCH       = 16'h0408;   // instructions dispatched (0..3 per cycle)
+                     HPMEV_TD_BE        = 16'h0402,   // top-down: back-end (M held, the queue head without a credit, a frozen IR, or the refill cycle after one)
+                     HPMEV_TD_BE_MEM    = 16'h0403,   // top-down: back-end waiting on memory (td_k 10 or 13: M on a head op, or a dependency on an integer load, AMO or CSR read)
+                     HPMEV_TD_BE_ROB    = 16'h0404,   // top-down: back-end, no ROB room (td_k 12)
+                     HPMEV_TD_BE_IQ     = 16'h0405,   // top-down: back-end, no scheduler, store-queue or load-queue credit (td_k 15, 17, 18)
+                     HPMEV_TD_FE_LAT    = 16'h0406,   // top-down: front-end latency (td_k 5, 6: iMMU, or no fetch bytes)
+                     HPMEV_TD_FE        = 16'h0407,   // top-down: front-end (FE_BUB outside bad speculation)
+                     HPMEV_DPATCH       = 16'h0408,   // Instructions dispatched (0..IW per cycle)
+                     HPMEV_MEM_LDSENT   = 16'h0323,   // Load reads sent to the D$ (count: a fast-path tag issued, or the FSM starting a load)
+                     // td_k itself (smolrv64_core's TOP-DOWN block): exactly one per cycle, the TOPDOWN-SIM buckets
+                     HPMEV_TDK_OK1      = 16'h0500,   // top-down cause td_k = 0: dispatched 1 (ok:1)
+                     HPMEV_TDK_OK2      = 16'h0501,   // top-down cause td_k = 1: dispatched 2 (ok:2)
+                     HPMEV_TDK_OK3      = 16'h0502,   // top-down cause td_k = 2: dispatched 3 (ok:3)
+                     HPMEV_TDK_REDIRECT = 16'h0503,   // top-down cause td_k = 3: bad speculation: a redirect (bs:redirect)
+                     HPMEV_TDK_DRAIN    = 16'h0504,   // top-down cause td_k = 4: bad speculation: a resolved restart waiting (bs:drain)
+                     HPMEV_TDK_FE_IMMU  = 16'h0505,   // top-down cause td_k = 5: front-end: the iMMU (fe:immu)
+                     HPMEV_TDK_FE_ICACHE= 16'h0506,   // top-down cause td_k = 6: front-end: no fetch bytes (fe:icache)
+                     HPMEV_TDK_FE_ALIGN = 16'h0507,   // top-down cause td_k = 7: front-end: bytes but no whole instruction (fe:align)
+                     HPMEV_TDK_FE_QUEUE = 16'h0508,   // top-down cause td_k = 8: front-end: an instruction not yet in the IR (fe:queue)
+                     HPMEV_TDK_FE_OTHER = 16'h0509,   // top-down cause td_k = 9: front-end: any other (fe:other)
+                     HPMEV_TDK_BE_MMEM  = 16'h050a,   // top-down cause td_k = 10: back-end: M holds a head op (be:M-mem)
+                     HPMEV_TDK_BE_MOTHER= 16'h050b,   // top-down cause td_k = 11: back-end: M holds a non-memory op (be:M-other)
+                     HPMEV_TDK_BE_ROB   = 16'h050c,   // top-down cause td_k = 12: back-end: no ROB room (be:rob-full)
+                     HPMEV_TDK_BE_DEPLD = 16'h050d,   // top-down cause td_k = 13: back-end: issue waits on an integer load, AMO or CSR read (be:dep-load)
+                     HPMEV_TDK_BE_DEPFP = 16'h050e,   // top-down cause td_k = 14: back-end: issue waits on an FP, FP-load, FP-port or divide result (be:dep-fp)
+                     HPMEV_TDK_BE_IQ    = 16'h050f,   // top-down cause td_k = 15: back-end: no scheduler credit at the queue head (be:iq-full)
+                     HPMEV_TDK_BE_RN    = 16'h0510,   // top-down cause td_k = 16: back-end: a rename shard below LOWAT (be:rename)
+                     HPMEV_TDK_BE_SQ    = 16'h0511,   // top-down cause td_k = 17: back-end: no store-queue credit (be:sq-full)
+                     HPMEV_TDK_BE_LQ    = 16'h0512,   // top-down cause td_k = 18: back-end: no load-queue credit (be:lq-full)
+                     HPMEV_TDK_BE_SER   = 16'h0513,   // top-down cause td_k = 19: back-end: serialisation, a CSR op or a CBO waiting (be:serialize)
+                     HPMEV_TDK_BE_HELD  = 16'h0514,   // top-down cause td_k = 20: back-end: the IR held otherwise (be:held)
+                     HPMEV_TDK_OK0      = 16'h0515,   // top-down cause td_k = 21: dispatched 0: the take squashed (ok:0)
+                     HPMEV_TDK_OK4      = 16'h0516;   // top-down cause td_k = 22: dispatched 4 (ok:4)
    // per-counter increment this cycle for the mhpmeventN-selected event (0..retire_cnt).
    // EVERY input here is a register as far as this module is concerned: `hpm_ev` and
    // `hpm_retire_cnt` are both the caller's delayed copies. That is what keeps the mux and
    // the 64-bit adder below a path that starts at the top of the cycle.
-   // THE EVENT SELECT IS DECODED WHEN mhpmeventN IS WRITTEN, into a registered index (hpm_esel).
-   // The per-cycle increment is then a mux on a 6-bit register, not a 16-bit event-code case per
+   // THE EVENT SELECT IS DECODED FROM mhpmeventN, into a registered index (hpm_esel).
+   // The per-cycle increment is then a mux on a 7-bit register, not a 16-bit event-code case per
    // counter per cycle: with the bus at 41 sources that case was a 644-endpoint family at +0.006 ns
    // (`m_imm_reg -> mhpmcounter_reg`, the C0 IW=3 census) and took the build to WNS 0.000.
    // hpm_inc (the code form) stays as the oracle the assertion below holds hpm_val to.
-   localparam [5:0] HSEL_NONE = 6'd63, HSEL_CYC = 6'd0, HSEL_RET = 6'd1, HSEL_LQ = 6'd46, HSEL_SQ = 6'd47, HSEL_DSP = 6'd48;
-   function [5:0] hpm_sel_of;   // event code -> index: 0 cycles, 1 instret, 2+b = hpm_ev[b], 46-48 the counts
+   // index: 0 cycles, 1 instret, 2+b = hpm_ev[b], 46-49 the counts, 64+n = td_k == n, 127 none
+   localparam [6:0] HSEL_NONE = 7'd127, HSEL_CYC = 7'd0, HSEL_RET = 7'd1, HSEL_LQ = 7'd46, HSEL_SQ = 7'd47,
+                    HSEL_DSP = 7'd48, HSEL_LDI = 7'd49, HSEL_TDK = 7'd64;
+   localparam [7:0] TDK_N = 8'd23;   // td_k's values, 0..22
+   function [6:0] hpm_sel_of;   // event code -> index
       input [15:0] ev;
       case (ev)
         HPMEV_CYCLES: hpm_sel_of = HSEL_CYC;    HPMEV_INSTRET: hpm_sel_of = HSEL_RET;
-        HPMEV_LOAD: hpm_sel_of = 6'd2+0;   HPMEV_STORE: hpm_sel_of = 6'd2+1;   HPMEV_REDIR: hpm_sel_of = 6'd2+2;
-        HPMEV_DCACC: hpm_sel_of = 6'd2+3;  HPMEV_DCMISS: hpm_sel_of = 6'd2+4;  HPMEV_ICACC: hpm_sel_of = 6'd2+5;
-        HPMEV_ICMISS: hpm_sel_of = 6'd2+6; HPMEV_ST_MEM: hpm_sel_of = 6'd2+7;  HPMEV_ST_DIV: hpm_sel_of = 6'd2+8;
-        HPMEV_ST_MUL: hpm_sel_of = 6'd2+9; HPMEV_ST_FPU: hpm_sel_of = 6'd2+10; HPMEV_ST_DSP: hpm_sel_of = 6'd2+11;
-        HPMEV_FE_BUB: hpm_sel_of = 6'd2+12; HPMEV_FE_MMU: hpm_sel_of = 6'd2+13; HPMEV_FE_IC: hpm_sel_of = 6'd2+14;
-        HPMEV_RED_BR: hpm_sel_of = 6'd2+15; HPMEV_RED_JLR: hpm_sel_of = 6'd2+16; HPMEV_RED_TRP: hpm_sel_of = 6'd2+17;
-        HPMEV_FE_ALN: hpm_sel_of = 6'd2+18; HPMEV_FE_QUE: hpm_sel_of = 6'd2+19; HPMEV_TD_BS: hpm_sel_of = 6'd2+20;
-        HPMEV_TD_FE: hpm_sel_of = 6'd2+21;  HPMEV_ST_ROB: hpm_sel_of = 6'd2+22; HPMEV_RD_WAIT: hpm_sel_of = 6'd2+23;
-        HPMEV_DT_WALK: hpm_sel_of = 6'd2+24; HPMEV_DTLB_MISS: hpm_sel_of = 6'd2+25; HPMEV_ST_IQ: hpm_sel_of = 6'd2+26;
-        HPMEV_ST_RN: hpm_sel_of = 6'd2+27; HPMEV_ST_SQ: hpm_sel_of = 6'd2+28; HPMEV_ST_LQ: hpm_sel_of = 6'd2+29;
-        HPMEV_ST_SRZ: hpm_sel_of = 6'd2+30; HPMEV_MEM_HITSER: hpm_sel_of = 6'd2+31; HPMEV_MEM_LDINFL: hpm_sel_of = 6'd2+32;
-        HPMEV_MEM_STDOOR: hpm_sel_of = 6'd2+33; HPMEV_MEM_ALIAS_UNK: hpm_sel_of = 6'd2+34; HPMEV_MEM_ALIAS_OVL: hpm_sel_of = 6'd2+35;
-        HPMEV_MEM_REORD: hpm_sel_of = 6'd2+36; HPMEV_MEM_WPKILL: hpm_sel_of = 6'd2+37; HPMEV_MEM_DEVWAIT: hpm_sel_of = 6'd2+38;
-        HPMEV_TD_BE: hpm_sel_of = 6'd2+39;  HPMEV_TD_BE_MEM: hpm_sel_of = 6'd2+40; HPMEV_TD_BE_ROB: hpm_sel_of = 6'd2+41;
-        HPMEV_TD_BE_IQ: hpm_sel_of = 6'd2+42; HPMEV_TD_FE_LAT: hpm_sel_of = 6'd2+43;
+        HPMEV_LOAD: hpm_sel_of = 7'd2+0;   HPMEV_STORE: hpm_sel_of = 7'd2+1;   HPMEV_REDIR: hpm_sel_of = 7'd2+2;
+        HPMEV_DCACC: hpm_sel_of = 7'd2+3;  HPMEV_DCMISS: hpm_sel_of = 7'd2+4;  HPMEV_ICACC: hpm_sel_of = 7'd2+5;
+        HPMEV_ICMISS: hpm_sel_of = 7'd2+6; HPMEV_ST_MEM: hpm_sel_of = 7'd2+7;  HPMEV_ST_DIV: hpm_sel_of = 7'd2+8;
+        HPMEV_ST_MUL: hpm_sel_of = 7'd2+9; HPMEV_ST_FPU: hpm_sel_of = 7'd2+10; HPMEV_ST_DSP: hpm_sel_of = 7'd2+11;
+        HPMEV_FE_BUB: hpm_sel_of = 7'd2+12; HPMEV_FE_MMU: hpm_sel_of = 7'd2+13; HPMEV_FE_IC: hpm_sel_of = 7'd2+14;
+        HPMEV_RED_BR: hpm_sel_of = 7'd2+15; HPMEV_RED_JLR: hpm_sel_of = 7'd2+16; HPMEV_RED_TRP: hpm_sel_of = 7'd2+17;
+        HPMEV_FE_ALN: hpm_sel_of = 7'd2+18; HPMEV_FE_QUE: hpm_sel_of = 7'd2+19; HPMEV_TD_BS: hpm_sel_of = 7'd2+20;
+        HPMEV_TD_FE: hpm_sel_of = 7'd2+21;  HPMEV_ST_ROB: hpm_sel_of = 7'd2+22; HPMEV_RD_WAIT: hpm_sel_of = 7'd2+23;
+        HPMEV_DT_WALK: hpm_sel_of = 7'd2+24; HPMEV_DTLB_MISS: hpm_sel_of = 7'd2+25; HPMEV_ST_IQ: hpm_sel_of = 7'd2+26;
+        HPMEV_ST_RN: hpm_sel_of = 7'd2+27; HPMEV_ST_SQ: hpm_sel_of = 7'd2+28; HPMEV_ST_LQ: hpm_sel_of = 7'd2+29;
+        HPMEV_ST_SRZ: hpm_sel_of = 7'd2+30; HPMEV_MEM_HITSER: hpm_sel_of = 7'd2+31; HPMEV_MEM_LDINFL: hpm_sel_of = HSEL_LDI;
+        HPMEV_MEM_STDOOR: hpm_sel_of = 7'd2+33; HPMEV_MEM_ALIAS_UNK: hpm_sel_of = 7'd2+34; HPMEV_MEM_ALIAS_OVL: hpm_sel_of = 7'd2+35;
+        HPMEV_MEM_REORD: hpm_sel_of = 7'd2+36; HPMEV_MEM_WPKILL: hpm_sel_of = 7'd2+37; HPMEV_MEM_DEVWAIT: hpm_sel_of = 7'd2+38;
+        HPMEV_TD_BE: hpm_sel_of = 7'd2+39;  HPMEV_TD_BE_MEM: hpm_sel_of = 7'd2+40; HPMEV_TD_BE_ROB: hpm_sel_of = 7'd2+41;
+        HPMEV_TD_BE_IQ: hpm_sel_of = 7'd2+42; HPMEV_TD_FE_LAT: hpm_sel_of = 7'd2+43;
         HPMEV_MEM_LQOCC: hpm_sel_of = HSEL_LQ; HPMEV_MEM_SQOCC: hpm_sel_of = HSEL_SQ; HPMEV_DPATCH: hpm_sel_of = HSEL_DSP;
-        default: hpm_sel_of = HSEL_NONE;
+        HPMEV_MEM_LDSENT: hpm_sel_of = 7'd2+32;
+        default: hpm_sel_of = ((ev[15:8] == 8'h05) && (ev[7:0] < TDK_N)) ? (HSEL_TDK | {2'b00, ev[4:0]}) : HSEL_NONE;
       endcase
    endfunction
    function [5:0] hpm_val;      // index -> this cycle's increment
-      input [5:0] sel;
-      if (sel == HSEL_CYC)       hpm_val = 6'd1;
+      input [6:0] sel;
+      if (sel == HSEL_NONE)      hpm_val = 6'd0;
+      else if (sel[6])           hpm_val = {5'd0, hpm_tdk == sel[4:0]};
+      else if (sel == HSEL_CYC)  hpm_val = 6'd1;
       else if (sel == HSEL_RET)  hpm_val = hpm_retire_cnt;
       else if (sel == HSEL_LQ)   hpm_val = hpm_lqocc;
       else if (sel == HSEL_SQ)   hpm_val = hpm_sqocc;
-      else if (sel == HSEL_DSP)  hpm_val = {4'd0, hpm_disp};
-      else if (sel <= 6'd45)     hpm_val = {5'd0, hpm_ev[sel - 6'd2]};
+      else if (sel == HSEL_DSP)  hpm_val = {3'd0, hpm_disp};
+      else if (sel == HSEL_LDI)  hpm_val = hpm_ldinfl;
+      else if (sel <= 7'd45)     hpm_val = {5'd0, hpm_ev[sel[5:0] - 6'd2]};
       else                       hpm_val = 6'd0;
    endfunction
-   reg [5:0] hpm_esel [0:HPMN-1];
+   reg [6:0] hpm_esel [0:HPMN-1];
    function [5:0] hpm_inc;
       input [15:0] ev;
       case (ev)
@@ -324,7 +356,8 @@ module csr_file
         HPMEV_DT_WALK: hpm_inc = {5'd0, hpm_ev[24]};
         HPMEV_DTLB_MISS: hpm_inc = {5'd0, hpm_ev[25]};
         HPMEV_MEM_HITSER:    hpm_inc = {5'd0, hpm_ev[31]};
-        HPMEV_MEM_LDINFL:    hpm_inc = {5'd0, hpm_ev[32]};
+        HPMEV_MEM_LDINFL:    hpm_inc = hpm_ldinfl;
+        HPMEV_MEM_LDSENT:    hpm_inc = {5'd0, hpm_ev[32]};
         HPMEV_MEM_STDOOR:    hpm_inc = {5'd0, hpm_ev[33]};
         HPMEV_MEM_ALIAS_UNK: hpm_inc = {5'd0, hpm_ev[34]};
         HPMEV_MEM_ALIAS_OVL: hpm_inc = {5'd0, hpm_ev[35]};
@@ -338,14 +371,15 @@ module csr_file
         HPMEV_TD_BE_ROB:     hpm_inc = {5'd0, hpm_ev[41]};
         HPMEV_TD_BE_IQ:      hpm_inc = {5'd0, hpm_ev[42]};
         HPMEV_TD_FE_LAT:     hpm_inc = {5'd0, hpm_ev[43]};
-        HPMEV_DPATCH:        hpm_inc = {4'd0, hpm_disp};
-        default:       hpm_inc = 6'd0;   // unimplemented event -> counter holds
+        HPMEV_DPATCH:        hpm_inc = {3'd0, hpm_disp};
+        default:       hpm_inc = ((ev[15:8] == 8'h05) && (ev[7:0] < TDK_N)) ? {5'd0, hpm_tdk == ev[4:0]}
+                                                                          : 6'd0;   // unknown -> holds
       endcase
    endfunction
    // The registered select is asserted equal to the code form every cycle (rule I3: a shadow
    // proves the cut before the oracle is deleted).
    always @(posedge clk) if (!reset) for (i=0; i<HPMN; i=i+1)
-      if (hpm_val(hpm_esel[i]) != hpm_inc(mhpmevent[i][15:0]))
+      if (!hpm_wev_q[i] && (hpm_val(hpm_esel[i]) != hpm_inc(mhpmevent[i][15:0])))
          $fatal(1, "csr_file: hpm counter %0d: registered select %0d gives %0d, the code form %0d", i, hpm_esel[i], hpm_val(hpm_esel[i]), hpm_inc(mhpmevent[i][15:0]));
    reg [63:0] mcountinhibit;
    reg [63:0] mhpmevent  [0:HPMN-1];
@@ -753,6 +787,15 @@ module csr_file
    wire hpm_csr_we = upd_valid & upd_is_csr & csr_writes & ~trap_v & ~csr_illegal;
    wire [HPMN-1:0] hpm_wev, hpm_wct, hpm_run, hpm_wrap;
    wire [63:0]     hpm_nxt [0:HPMN-1];
+   // The select is decoded from the stored mhpmeventN, a cycle after it is written: the CSR's
+   // write data (the read mux and the set/clear) never reaches hpm_esel. In that cycle the
+   // select is the old event's, so the counter holds (hpm_wev_q).
+   reg  [HPMN-1:0] hpm_wev_q;
+   integer         hi;
+   always @(posedge clk) begin
+      hpm_wev_q <= reset ? {HPMN{1'b0}} : hpm_wev;
+      for (hi = 0; hi < HPMN; hi = hi + 1) hpm_esel[hi] <= reset ? HSEL_NONE : hpm_sel_of(mhpmevent[hi][15:0]);
+   end
    genvar g;
    generate for (g = 0; g < HPMN; g = g + 1) begin : g_hpm
       localparam [11:0] EVA = MHPMEVENT3 + g, CTA = MHPMCOUNTER3 + g;
@@ -761,7 +804,7 @@ module csr_file
                       : (priv == S) ? mhpmevent[g][SINH_B] : mhpmevent[g][UINH_B];
       assign hpm_wev[g]  = hpm_csr_we & (upd_addr == EVA);
       assign hpm_wct[g]  = hpm_csr_we & (upd_addr == CTA);
-      assign hpm_run[g]  = ~mcountinhibit[g+3] & ~inh;
+      assign hpm_run[g]  = ~mcountinhibit[g+3] & ~inh & ~hpm_wev_q[g];
       assign hpm_wrap[g] = hpm_run[g] & sum[64] & ~hpm_wct[g];
       assign hpm_nxt[g]  = sum[63:0];
       assign hpm_of[g]   = mhpmevent[g][OF_B];
@@ -898,13 +941,13 @@ module csr_file
       // are plain WARL; an unimplemented event code contributes 0 (the counter holds).
       if (reset) begin
          mcountinhibit <= 64'd0;
-         for (i=0; i<HPMN; i=i+1) begin mhpmevent[i] <= 64'd0; mhpmcounter[i] <= 64'd0; hpm_esel[i] <= HSEL_NONE; end
+         for (i=0; i<HPMN; i=i+1) begin mhpmevent[i] <= 64'd0; mhpmcounter[i] <= 64'd0; end
       end else begin
          if (upd_valid && upd_is_csr && !trap_v && !csr_illegal && upd_addr==MCOUNTINHIBIT)
             mcountinhibit <= newv & HPM_INHIBIT_MASK;
          for (i=0; i<HPMN; i=i+1) begin
             if (hpm_wev[i])
-               begin mhpmevent[i] <= newv;  hpm_esel[i] <= hpm_sel_of(newv[15:0]); end
+               mhpmevent[i] <= newv;
             else if (hpm_wrap[i])
                mhpmevent[i][OF_B] <= 1'b1;
             if (hpm_wct[i])

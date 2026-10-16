@@ -14,7 +14,7 @@
 // (B6, 2026-09-17). The default tiny128 DTB carries no virtio node, so without +disk the
 // region is never touched and the run is the plain initrd boot.
 `include "tb_rand.vh"
-`include "smolrv64_tags.vh"           // the queue sizes FWD-SIM walks (SMOLRV64_LQB, SMOLRV64_SQB)
+`include "smolrv64_tags.vh"           // the queue sizes FWD-SIM and DEPLD-SIM walk (SMOLRV64_LQB, SMOLRV64_SQB)
 `ifndef SMOLRV64_IW
  `define SMOLRV64_IW 3
 `endif
@@ -25,6 +25,9 @@
  `define SMOLRV64_QD 16
 `endif
 module tb;
+   localparam integer IW = `SMOLRV64_IW;     // the core's width (the same define sets its IW)
+`include "smolrv64_credits.vh"               // the dispatch credits' indices (CR_*), at this width
+`include "smolrv64_shards.vh"                // the register file's shards (SH_*)
    localparam [63:0] BASE = 64'h8000_0000;
 `ifdef SMOLRV64_MEM_SIZE_LG2
    localparam [63:0] DDR_BYTES = 64'd1 << `SMOLRV64_MEM_SIZE_LG2;
@@ -126,6 +129,7 @@ module tb;
       .virtio_addr(virtio_addr), .virtio_read(virtio_read), .virtio_write(virtio_write),
       .virtio_wdata(virtio_wdata), .virtio_be(virtio_be),
       .virtio_rdata(virtio_rd_q), .virtio_rvalid(virtio_rvalid), .virtio_irq(virtio_irq | dma_irq), .virtio_net_irq(1'b0), .virtio_kbd_irq(1'b0), .dma_wr(tb_dma_wr), .irq_dbg());
+   initial if (dut.core.IW != IW) $fatal(1, "tb: the bench is built for IW=%0d, the core has %0d", IW, dut.core.IW);
 
    // THE DDR MODEL IS THE MEASURED ONE BY DEFAULT. Until 2026-09-04 the default was a flat
    // 4-cycle line latency, which is not this machine: the D$ admitted two requests under a
@@ -470,77 +474,42 @@ module tb;
    // looks healthy while userspace wedges in its first console write() -- a silent
    // failure that looks exactly like "slow". These counters make it visible.
    reg [63:0] n_inject, n_uirq, n_seip;
-   initial begin n_ldstart=0; n_ldreord=0; n_ldblk=0; n_sqocc=0; n_sqfull=0; end
    always @(posedge clk) if (!reset) begin
       if (dut.core.irq_inject & dut.core.accept) n_inject <= n_inject + 1;
       if (dut.uart_irq)                          n_uirq   <= n_uirq   + 1;
       if (dut.plic_seip)                         n_seip   <= n_seip   + 1;
    end
 
-   // ---- SIZING THE SCOREBOARD (measurement only; no RTL is changed for this) ----------
-   // M blocks until the LSU has the DATA (smolrv64_core.v: `m_done = ... m_mem_op ? lsu_done`),
-   // and the LSU is 38.8% of GB5 cycles with 94-98% of that being hit latency rather than
-   // misses.  A 1-deep, loads-only scoreboard would let X proceed on exactly the cycles
-   // counted here: M stalled on the LSU, X holding an instruction that does not need the
-   // (single-outstanding) LSU, is not serializing, and does not read the load's result.
-   //
-   // Reuses the core's own byp1/2/3 for the dependence test rather than re-deriving it --
-   // they already are `m_valid & m_rd_v & (m_rd == d_rs*)`.  Qualified by d_rs*_v here so
-   // an absent operand cannot look like a dependence.
-   //
-   // This is a LOWER BOUND: it only credits the immediately-next instruction, not the
-   // second and third that would also flow once the first moved.
-   // Was byp1/2/3 -- "the next instruction wants the value M is producing". With dispatch
-   // decoupled that test moved into the scheduler, which reports whether its OLDEST entry
-   // is blocked on a source. Same question, asked where the waiting now happens.
-   // The event bus counted per cycle (B3). pcode(bit) mirrors src/csr_file.v's hpm_inc map;
-   // tools/gen-perf-events.py --check keeps the JSON honest, and perf-cpi-stack.py's identity
-   // check exposes a bit that drifted from its code.
-   integer pe;  reg [63:0] pev [0:46];
-   function [15:0] pcode; input integer b; begin
-      case (b)
-        0: pcode=16'h0003; 1: pcode=16'h0004; 2: pcode=16'h0005; 3: pcode=16'h0100; 4: pcode=16'h0102;
-        5: pcode=16'h0110; 6: pcode=16'h0112; 7: pcode=16'h0300; 8: pcode=16'h0301; 9: pcode=16'h0302;
-        10: pcode=16'h0303; 11: pcode=16'h0304; 12: pcode=16'h0310; 13: pcode=16'h0311; 14: pcode=16'h0312;
-        15: pcode=16'h0006; 16: pcode=16'h0007; 17: pcode=16'h0008; 18: pcode=16'h0313; 19: pcode=16'h0314;
-        20: pcode=16'h0401; 21: pcode=16'h0407; 22: pcode=16'h0305; 23: pcode=16'h0317; 24: pcode=16'h0318;
-        25: pcode=16'h0104; 26: pcode=16'h0306; 27: pcode=16'h0307; 28: pcode=16'h0308; 29: pcode=16'h0309;
-        30: pcode=16'h030a; 31: pcode=16'h0319; 32: pcode=16'h031a; 33: pcode=16'h031b; 34: pcode=16'h031c;
-        35: pcode=16'h031d; 36: pcode=16'h031e; 37: pcode=16'h031f; 38: pcode=16'h0320;
-        39: pcode=16'h0402; 40: pcode=16'h0403; 41: pcode=16'h0404; 42: pcode=16'h0405; 43: pcode=16'h0406;
-        44: pcode=16'h0321; 45: pcode=16'h0322; 46: pcode=16'h0408; default: pcode=16'hffff;
-      endcase end endfunction
-   initial for (pe = 0; pe < 47; pe = pe + 1) pev[pe] = 64'd0;
+   // The event bus counted per cycle through csr_file's own event map: each code the map names
+   // (hpm_sel_of) -- but cycles and instret, which the report prints as cycles and instructions --
+   // adds what a counter selecting it adds (hpm_val), so these totals are the board counters'.
+   // tools/perf-cpi-stack.py reads them, and tools/gen-perf-events.py keeps the JSON to the map.
+   localparam integer PE_N = 128;
+   integer    pe, pe_n;
+   reg [15:0] pe_code [0:PE_N-1];
+   integer    pe_sel  [0:PE_N-1];          // its index in csr_file (hpm_sel_of's value)
+   reg [63:0] pev     [0:PE_N-1];
+   initial begin
+      pe_n = 0;
+      for (pe = 3; pe < 32'h10000; pe = pe + 1)
+         if (dut.core.u_csr.hpm_sel_of(16'(pe)) != dut.core.u_csr.HSEL_NONE) begin
+            if (pe_n == PE_N) $fatal(1, "tb: csr_file's event map names more than %0d events", PE_N);
+            pe_code[pe_n] = 16'(pe);  pe_sel[pe_n] = dut.core.u_csr.hpm_sel_of(16'(pe));  pev[pe_n] = 64'd0;
+            pe_n = pe_n + 1;
+         end
+   end
    reg [63:0] trace_from, trace_to;             // +trace_from/+trace_to, see the plusargs
    // +measure_from=<retires>: the statistics count only from the cycle the retire count reaches
    // it (`meas`), so a run restored from a checkpoint reports its warm window, not the cold
    // start; the report at the end divides by the window's cycles and retires (mc, mr).
    reg [63:0] meas_from, meas_c, meas_ret, mc, mr;
    reg        meas;
-   wire sb_dep    = dut.core.iq_blk_v;
-   wire sb_recov  = dut.core.st_mem & dut.core.d_valid
-                  & ~dut.core.d_is_mem & ~dut.core.d_is_amo & ~dut.core.d_is_serialize
-                  & ~sb_dep;
-   // ...and the two reasons a stalled cycle is NOT recoverable, so the total is attributed
-   // rather than leaving a silent remainder.
-   wire sb_blk_dep = dut.core.st_mem & dut.core.d_valid & sb_dep;
-   wire sb_blk_mem = dut.core.st_mem & dut.core.d_valid & ~sb_dep
-                   & (dut.core.d_is_mem | dut.core.d_is_amo);
-   wire sb_blk_ser = dut.core.st_mem & dut.core.d_valid & ~sb_dep
-                   & ~(dut.core.d_is_mem | dut.core.d_is_amo) & dut.core.d_is_serialize;
-   // ...and the bucket that turned out to dominate: M is stalled on a load and X is EMPTY,
-   // so there is nothing for a scoreboard to run even if it existed. Sub-attributed with
-   // the core's own frontend-bubble taps so it is clear whether the frontend is walking the
-   // iMMU, out of fetch window, or something else.
-   wire sb_novalid = dut.core.st_mem & ~dut.core.d_valid;
-   reg [63:0] n_stmem, n_recov, n_bdep, n_bmem, n_bser, n_nov, n_nov_mmu, n_nov_ic, n_nov_qrdy;
-   // Per-unit stall, to size the OTHER units against the LSU. mul3 and cvfpu are both
-   // internally pipelined and only held to one outstanding by a busy flag / a discarded
-   // tag, so their tier is cheap -- but cheap is not the same as worth doing.
-   reg [63:0] n_stmul, n_stdiv, n_stfpu;
-   // FPORT-SIM: retired ops whose integer operands the FP/MD/SYS port reads -- divides, FP ops
-   // with an integer source, CSR ops reading rs1 and sfence.vma -- and the stores, integer and FP,
-   // whose data the store queue reads when it is in a register file at allocation
+   // FPORT-SIM: retired instructions by the register-file reader their integer operands take --
+   // a divide's, the lane it issues in (it hands them to the MD stage); an FP op with an integer
+   // source (fcvt/fmv from x), the FP port's first read, the one that reads an integer shard; a
+   // CSR op reading rs1 and sfence.vma, lane A (it hands rs1 to the SYSQ) -- and the stores,
+   // integer and FP, whose data the store queue takes from its own read port when it is in a
+   // register file at allocation (else from a writeback), and the reads that port makes
    reg [63:0] fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd;
    initial begin fx_div = 0; fx_i2f = 0; fx_sys = 0; fx_st = 0; fx_fst = 0; fx_rd = 0; end
    function automatic [2:0] fx_cls(input [31:0] i);   // 1 div, 2 int->FP, 3 sys, 4 store, 5 FP store
@@ -554,53 +523,26 @@ module tb;
          else if (i[6:0] == 7'b0100111)                                                                    fx_cls = 3'd5;
       end
    endfunction
-   // STORE BUFFER: is it actually reordering anything?
-   //   n_ldstart  loads that began an access
-   //   n_ldreord  ...of those, ones that passed an older UNCOMMITTED store
-   //   n_ldblk    cycles a load was held by disambiguation instead
-   //   n_sqocc    summed occupancy, for sizing NENT
+   // SQ: the port's load starts, those it takes with an older store live in the store queue (the
+   // MEM_REORD event's condition), the cycles a candidate load is alias-held, the queue's occupancy
+   // summed per cycle, and the cycles it has no room for a store.
    reg [63:0] n_ldstart, n_ldreord, n_ldblk, n_sqocc, n_sqfull;
-   // Where did the cycles the scoreboard freed actually go?
-   reg [63:0] n_stm, n_hold, n_headblk, n_mempty, n_ldland, n_robfull, n_srcpend;
-   // THE STORE PATH, cycle by cycle (plan item 4): where a store waits between the queue
-   // and the cache. n_stdoor: the LSU holds a store at the D$ door, not accepted this cycle;
-   // n_sqidle: the queue has a drainable head, the LSU is idle and does not start it;
-   // n_sqwait: the queue has entries and none is drainable (unreleased, or no data yet).
+   // SQ-DRAIN, the cycles a store waits between the queue and the D$: the LSU holds one at the D$
+   // door, not accepted (n_stdoor); the queue's head can drain and the LSU is idle and does not
+   // start it (n_sqidle); the queue holds stores and its head cannot drain (n_sqwait: uncommitted,
+   // or its address or data not in).
    reg [63:0] n_stdoor, n_sqidle, n_sqwait;
+   initial begin n_ldstart = 0; n_ldreord = 0; n_ldblk = 0; n_sqocc = 0; n_sqfull = 0;
+                 n_stdoor = 0; n_sqidle = 0; n_sqwait = 0; end
    always @(posedge clk) if (!reset && meas) begin
-      if (dut.core.st_mem) n_stmem <= n_stmem + 1;
-      if (sb_recov)        n_recov <= n_recov + 1;
-      if (sb_blk_dep)      n_bdep  <= n_bdep  + 1;
-      if (sb_blk_mem)      n_bmem  <= n_bmem  + 1;
-      if (sb_blk_ser)      n_bser  <= n_bser  + 1;
-      if (sb_novalid)      n_nov   <= n_nov   + 1;
-      if (sb_novalid & ~dut.core.immu_ready) n_nov_mmu <= n_nov_mmu + 1;
-      if (sb_novalid &  dut.core.immu_ready
-          & (dut.core.imem_avail_g == 0))    n_nov_ic  <= n_nov_ic  + 1;
-      // THE distinction that decides whether the empty-X bucket is recoverable. The IR can
-      // only be loaded on `accept` (= m_advance), so a stalled M freezes it even when the
-      // decoupling queue behind it is holding instructions. Those cycles ARE recoverable by the
-      // scoreboard -- one cycle later, as the IR refills. Only ~q_empty is genuinely dry.
-      if (sb_novalid & ~dut.core.fe.q_empty) n_nov_qrdy <= n_nov_qrdy + 1;
-      if (dut.core.st_mul) n_stmul <= n_stmul + 1;
-      if (dut.core.st_div) n_stdiv <= n_stdiv + 1;
-      if (dut.core.st_fpu) n_stfpu <= n_stfpu + 1;
-      // Loads no longer start via lsu_started -- they access from the queue's port.
       if (dut.core.lq_x_take)      n_ldstart <= n_ldstart + 1;
-      if (dut.core.sq_ld_reorder)  n_ldreord <= n_ldreord + 1;
+      if (dut.core.mem_reord)      n_ldreord <= n_ldreord + 1;
       if (dut.core.sq_ld_block)    n_ldblk   <= n_ldblk   + 1;
-      n_sqocc <= n_sqocc + {61'd0, dut.core.sq_occ};
+      n_sqocc <= n_sqocc + 64'(dut.core.sq_occ);
       if (~dut.core.sq_d_ready)    n_sqfull  <= n_sqfull  + 1;
-      if (dut.core.m_valid & ~dut.core.m_done)      n_stm     <= n_stm + 1;
-      if (dut.core.hd_wait)                         n_hold    <= n_hold + 1;
-      if (dut.core.u_lsu.st_go & ~dut.core.u_lsu.st_fin) n_stdoor  <= n_stdoor + 1;
+      if (dut.core.u_lsu.st_go & ~dut.core.u_lsu.st_fin) n_stdoor <= n_stdoor + 1;
       if (dut.core.u_lsu.idle & dut.core.sq_c_v & ~dut.core.u_lsu.pt_start) n_sqidle <= n_sqidle + 1;
       if ((dut.core.sq_occ != 0) & ~dut.core.sq_c_v)  n_sqwait  <= n_sqwait + 1;
-      if (dut.core.iq_blk_v & dut.core.d_valid)     n_srcpend <= n_srcpend + 1;
-      if (dut.core.st_rob)                          n_robfull <= n_robfull + 1;
-      if (dut.core.head_block)                      n_headblk <= n_headblk + 1;
-      if (~dut.core.m_valid)                        n_mempty  <= n_mempty + 1;
-      if (dut.core.ld_land)                         n_ldland  <= n_ldland + 1;
    end
 
    reg [8*256-1:0] fw, dtb, initrd, disk, ckpt, lramf;
@@ -609,10 +551,11 @@ module tb;
    wire       trace_on = (c >= trace_from) && (c < trace_to);   // the tb-side trace window
 
    // ---- per-cycle accounting: every cycle is exactly one of BADSPEC / FRONTEND / BACKEND /
-   // PRODUCED (Top-Down Variant A, docs/SmolRV64-Spec.md §11.2), with a depth cause -- smolrv64_core's
-   // td_k, the classifier its TD_* counters count, so these totals and the board's agree.
-   // The same code drives the pipe views' stall rows and the TOPDOWN-SIM totals at the end.
-   localparam integer TD_N = 22;
+   // DISPATCHING (Top-Down Variant A, docs/SmolRV64-Spec.md §11.2), with a depth cause -- smolrv64_core's
+   // td_k, the classifier its TD_* and TDK_* counters count, so these totals and the board's agree.
+   // The same code drives the pipe views' stall rows and the TOPDOWN-SIM totals at the end. The
+   // table names every value td_k has; the core asserts that fe:other, be:M-other and ok:0 never occur.
+   localparam integer TD_N = 23;
    function [8*14-1:0] td_name;   // the cause's printable name
       input integer k;
       case (k)
@@ -624,36 +567,149 @@ module tb;
         13: td_name = "be:dep-load";  14: td_name = "be:dep-fp";   15: td_name = "be:iq-full";
         16: td_name = "be:rename";    17: td_name = "be:sq-full";  18: td_name = "be:lq-full";
         19: td_name = "be:serialize"; 20: td_name = "be:held";     21: td_name = "ok:0";
+        22: td_name = "ok:4";
         default: td_name = "?";
       endcase
    endfunction
+   function integer td_ndisp(input integer k);   // the instructions a cause dispatches: ok:N's N, else 0
+      td_ndisp = (k <= 2) ? k + 1 : (k == 22) ? 4 : 0;
+   endfunction
    wire [4:0] td_k = dut.core.td_k;   // the core's classifier: the one the hardware counters count
    reg [63:0] td_cnt [0:TD_N-1];
+   // The instructions the IR's groups dispatch in the window, counted apart from td_k: outside a
+   // redirect's cycle (td_dn), where every dispatching cycle is an ok:N, and in it (td_drd), where
+   // the group is the wrong path the redirect squashes and the cycle is bs:redirect.
+   reg [63:0] td_dn, td_drd;
+   reg [63:0] td_sum, td_disp;        // the report's: cycles in a cause, the ok:N cycles' dispatches
    integer tdi;
-   initial for (tdi = 0; tdi < TD_N; tdi = tdi + 1) td_cnt[tdi] = 64'd0;
-   always @(posedge clk) if (!reset && meas) td_cnt[td_k] <= td_cnt[td_k] + 64'd1;
-   // RENAME-SIM: of the be:rename cycles, those each shard's free list is low in (rename stalls
-   // while any is, so several can be at once): which shard's size a rename stall is about. A
-   // refill cycle takes the cause of the cycle before it (§11.2), and its lists' flags too.
-   reg [63:0] rn_low [0:7];
-   reg [7:0]  rn_lowp;
-   integer rli;
-   initial begin for (rli = 0; rli < 8; rli = rli + 1) rn_low[rli] = 64'd0; rn_lowp = 8'd0; end
-   wire [7:0] rn_lowc = (|dut.core.rn_shard_low) ? dut.core.rn_shard_low : rn_lowp;
-   always @(posedge clk) begin
-      rn_lowp <= dut.core.rn_shard_low;
-      if (!reset && meas && (td_k == 5'd16))
-         for (rli = 0; rli < 8; rli = rli + 1)
-            if (rn_lowc[rli]) rn_low[rli] <= rn_low[rli] + 64'd1;
+   initial begin for (tdi = 0; tdi < TD_N; tdi = tdi + 1) td_cnt[tdi] = 64'd0; td_dn = 64'd0; td_drd = 64'd0; end
+   always @(posedge clk) if (!reset && meas) begin
+      if (td_k >= TD_N) $fatal(1, "tb: top-down cause td_k=%0d is outside the table (c=%0d)", td_k, c);
+      td_cnt[td_k] <= td_cnt[td_k] + 64'd1;
+      if (dut.core.redirect) td_drd <= td_drd + 64'($countones(dut.core.s_takev));
+      else                   td_dn  <= td_dn  + 64'($countones(dut.core.s_takev));
    end
 
-   // ---- MEM-SIM: what the next memory-backend step could recover, printed with TOPDOWN-SIM ----
-   // D$: cycles any fill is in flight and the MSHRs live over them, fills started, cycles a request
-   // is parked in the waiter table, cycles the write-back buffer is full, and how many of the
-   // core's ST_MEM cycles overlap the fills and the waits.
-   reg [63:0] ms_fill, ms_fills, ms_park, ms_stmem, ms_stmem_fill, ms_stmem_park, ms_live, ms_wbfull, ms_cln, ms_clnc;
+`include "tb_pipetrace.vh"
+
+   // A REFILL CYCLE TAKES THE CAUSE OF THE CYCLE BEFORE IT (smolrv64_core td_rf, §11.2). Each split
+   // of a cause below keeps the flags of the last cycle that is not a refill and charges a refill
+   // cycle with them, so a cause's split covers exactly its cycles.
+   wire td_rf = dut.core.td_rf;
+
+   // ---- RENAME-SIM: be:rename's cycles by the shards whose free list is low --------------
+   // Rename stalls while any list is low, so a cycle can count in several: which shard's size a
+   // rename stall is about. Shards 0..IW-1 are lanes A.., SH_FL takes the FP loads' landings and
+   // SH_FF the F stage's results; the report lists the shards this width uses.
+   reg [63:0] rn_low [0:7];
+   reg [7:0]  rn_fp;
+   integer rli;
+   initial begin for (rli = 0; rli < 8; rli = rli + 1) rn_low[rli] = 64'd0; rn_fp = 8'd0; end
+   wire [7:0] rn_f = td_rf ? rn_fp : dut.core.rn_shard_low;
+   always @(posedge clk) begin
+      if (!td_rf) rn_fp <= dut.core.rn_shard_low;
+      if (!reset && meas && (td_k == 5'd16)) begin
+         if (rn_f == 8'd0) $fatal(1, "tb: a be:rename cycle with no shard low (c=%0d)", c);
+         for (rli = 0; rli < 8; rli = rli + 1)
+            if (rn_f[rli]) rn_low[rli] <= rn_low[rli] + 64'd1;
+      end
+   end
+
+   // ---- IQFULL-SIM: be:iq-full's cycles by the credit the queue head misses -------------
+   // The head is slot A, so the scheduler credit it needs is lane A's: lane A's scheduler (cr_i[0]),
+   // the head-op register (cr_l), the FP queue (cr_f) or the divide credit (cr_div). An op can miss
+   // two (a divide needs lane A's scheduler and the MD stage, a head op lane A's and the register).
+   // Of the cycles lane A's scheduler is the only credit missing, those another lane's scheduler
+   // has room in (cr_i[1..]): the cycles a head placed by queue position, not always in A, finds room.
+   reg [63:0] iq_c [0:5];   // lane A, head op, FP queue, divide; lane A alone; ...with another lane's room
+   reg [4:0]  iq_fp;
+   integer    iqi;
+   initial begin for (iqi = 0; iqi < 6; iqi = iqi + 1) iq_c[iqi] = 64'd0; iq_fp = 5'd0; end
+   wire [15:0] iq_gc  = dut.core.fe_hd_gc;
+   wire [4:0]  iq_now = {|(dut.core.cr_i >> 1),
+                         iq_gc[dut.core.GC_M] & ~dut.core.cr_div, iq_gc[dut.core.GC_FC] & ~dut.core.cr_f,
+                         iq_gc[dut.core.GC_L] & ~dut.core.cr_l,   iq_gc[dut.core.GC_I]  & ~dut.core.cr_i[0]};
+   wire [4:0]  iq_f   = td_rf ? iq_fp : iq_now;
+   always @(posedge clk) begin
+      if (!td_rf) iq_fp <= iq_now;
+      if (!reset && meas && (td_k == 5'd15)) begin
+         if (iq_f[3:0] == 4'd0) $fatal(1, "tb: a be:iq-full cycle whose queue head has every scheduler credit (c=%0d)", c);
+         for (iqi = 0; iqi < 4; iqi = iqi + 1) if (iq_f[iqi]) iq_c[iqi] <= iq_c[iqi] + 64'd1;
+         if (iq_f[3:0] == 4'b0001) begin
+            iq_c[4] <= iq_c[4] + 64'd1;
+            if (iq_f[4]) iq_c[5] <= iq_c[5] + 64'd1;
+         end
+      end
+   end
+
+   // ---- DEPLD-SIM: be:dep-load's cycles by where the load being waited on is --------------
+   // The register is the first blocked operand the core's dep_ld names (lanes A.., then the FP
+   // scheduler: its registered reports l_blk_pq, rf_blk_pq), and its producer is the one the core's
+   // ld_dst finds: a load-queue entry, a lane's landing buffer, a CSR read in the SYSQ or an AMO in
+   // M. A load-queue entry is, in this order:
+   //    0 not issued (no address)            1 its address waiting for M's fill
+   //    2 untranslated (the dTLB missed: walking, or waiting for the walker)
+   //    3 faulting (it traps at the ROB head)
+   //    4 ready, waiting for the port         5 held: an older store's address is unknown (wait bit set)
+   //    6 held: an older store overlaps it    7 a device load waiting to be the ROB head
+   //    8 forwarding (its bytes in the LSU's forward queue)
+   //    9 parked in the D$'s waiter table (a miss, or waiting for a resource or a queued store)
+   //   10 in flight at the D$ otherwise (the read door, the lookup, a replay)
+   //   11 on the LSU's slow path (a device, uncached or chunk-crossing load)
+   // and the rest are 12 landed, in its lane's landing buffer (waiting for the write port),
+   // 13 a CSR read in the SYSQ, 14 an AMO in M.
+   localparam integer DL_N = 15, DL_PB = 10, DL_LQ = 1 << `SMOLRV64_LQB;   // DL_PB: smolrv64_core's RN_PBITS
+   initial if (dut.core.RN_PBITS != DL_PB || dut.core.LQ_N != DL_LQ)
+      $fatal(1, "tb: DEPLD-SIM reads %0d-bit registers and %0d load-queue entries, the core has %0d and %0d",
+             DL_PB, DL_LQ, dut.core.RN_PBITS, dut.core.LQ_N);
+   reg [63:0] dl_c [0:DL_N-1];
+   reg [3:0]  dl_kp;
+   integer    dli;
+   initial begin for (dli = 0; dli < DL_N; dli = dli + 1) dl_c[dli] = 64'd0; dl_kp = 4'd15; end
+   function automatic [3:0] dl_lq(input integer k);   // live load-queue entry k's state
+      begin
+         if (!dut.core.u_lq.av[k])              dl_lq = dut.core.la_v[k] ? 4'd1 : 4'd0;
+         else if (!dut.core.u_lq.tv[k])         dl_lq = 4'd2;
+         else if (dut.core.u_lq.flt[k])         dl_lq = 4'd3;
+         else if (!dut.core.u_lq.sent[k])
+            dl_lq = dut.core.u_lq.rdy_m[k] ? 4'd4
+                  : !dut.core.u_lq.e_block[k] ? 4'd7
+                  : (dut.core.u_lq.wt[k] & dut.core.sq_l_block_unk_q[k]) ? 4'd5 : 4'd6;
+         else if (dut.core.u_lq.fwd[k])         dl_lq = 4'd8;
+         else if (dut.core.u_lsu.o_v[k])        dl_lq = dut.u_dcache.wt_v[k] ? 4'd9 : 4'd10;
+         else                                   dl_lq = 4'd11;
+      end
+   endfunction
+   always @(posedge clk) if (!reset && (td_k == 5'd13)) begin : depld
+      reg [DL_PB-1:0] p;  reg pv;  reg [3:0] dc;  integer j;
+      pv = 1'b0;  p = {DL_PB{1'b0}};  dc = dl_kp;
+      if (!td_rf) begin
+         dc = 4'd15;
+         for (j = 0; j < IW; j = j + 1)
+            if (!pv && dut.core.l_blk_vq[j] && dut.core.ld_dst(dut.core.l_blk_pq[j])) begin pv = 1'b1;  p = dut.core.l_blk_pq[j]; end
+         if (!pv && dut.core.rf_blk_vq && dut.core.ld_dst(dut.core.rf_blk_pq)) begin pv = 1'b1;  p = dut.core.rf_blk_pq; end
+         for (j = 0; j < DL_LQ; j = j + 1)
+            if (pv && (dc == 4'd15) && !p[DL_PB-1] && dut.core.u_lq.v[j] && (dut.core.lq_e_dprd[j*DL_PB +: DL_PB] == p)) dc = dl_lq(j);
+         for (j = 0; j < IW*dut.core.LBN; j = j + 1)
+            if (pv && (dc == 4'd15) && (p != {DL_PB{1'b0}}) && (dut.core.lb_live[j*DL_PB +: DL_PB] == p)) dc = 4'd12;
+         if (pv && (dc == 4'd15) && dut.core.sy_v && dut.core.sy_rd_v && (dut.core.sy_prd == p)) dc = 4'd13;
+         if (pv && (dc == 4'd15) && dut.core.m_valid && dut.core.m_is_amo && dut.core.m_rd_v && (dut.core.m_prd == p)) dc = 4'd14;
+         dl_kp <= dc;
+      end
+      if (meas) begin
+         if (dc == 4'd15) $fatal(1, "tb: DEPLD-SIM finds no producer for a be:dep-load cycle's register p%0d (c=%0d)", p, c);
+         dl_c[dc] <= dl_c[dc] + 64'd1;
+      end
+   end
+
+   // ---- MEM-SIM: the D$'s misses, printed with TOPDOWN-SIM --------------------------------
+   // Cycles any fill is in flight and the MSHRs live over them, fills started, cycles a request is
+   // parked in the waiter table, cycles the write-back buffer is full, and of the ST_MEM event's
+   // cycles (M holds a head op, or issue waits on an integer load's, AMO's or CSR read's result),
+   // those with a fill in flight and those with a request parked.
+   reg [63:0] ms_fill, ms_fills, ms_park, ms_stmem, ms_stmem_fill, ms_stmem_park, ms_live, ms_wbfull;
    initial begin ms_fill = 0; ms_fills = 0; ms_park = 0; ms_stmem = 0; ms_stmem_fill = 0; ms_stmem_park = 0;
-                 ms_live = 0; ms_wbfull = 0; ms_cln = 0; ms_clnc = 0; end
+                 ms_live = 0; ms_wbfull = 0; end
    always @(posedge clk) if (!reset && meas) begin : memsim
       reg fv, park;
       fv   = (dut.u_dcache.ob_live != 0);
@@ -662,8 +718,6 @@ module tb;
       if (dut.u_dcache.m_alloc)  ms_fills  <= ms_fills + 1;
       if (park)                  ms_park   <= ms_park + 1;
       if (dut.u_dcache.ob_wbfull) ms_wbfull <= ms_wbfull + 1;
-      if (dut.u_dcache.inv_req)   ms_cln    <= ms_cln + 1;                          // fence.i's cleans
-      if (dut.u_dcache.cl_pend | dut.u_dcache.cl_on | dut.u_dcache.cl_wait) ms_clnc <= ms_clnc + 1;
       if (dut.core.st_mem) begin
          ms_stmem <= ms_stmem + 1;
          if (fv)   ms_stmem_fill <= ms_stmem_fill + 1;
@@ -671,191 +725,174 @@ module tb;
       end
    end
 
-   // ---- DISP-SIM: the dispatch rules and ALU waiting (docs/PLAN-2026-10-01-uniform-lanes.md, step 2) ----
-   // Slot B (C) valid behind a dispatching older slot but held: by an op that dispatches alone
-   // (not plain), by the class rule (two memory ops, two F/control-flow/mul-div ops, slot C's
-   // three-ALU rule), squashed behind a decode resteer, or by room (scheduler, ROB, rename, queues).
-   // ALU: ready entries an ALU scheduler leaves behind each cycle beyond the one it issues, those
-   // left while the other ALU issues nothing, and issues that pass over an older ready entry.
-   // Memory: LSU access starts and starts in back-to-back cycles.
-   localparam integer NI_SIM = 10;           // an ALU scheduler's entries (smolrv64_core NI)
-   reg [63:0] ds_b_alone, ds_b_rule, ds_b_sq, ds_b_room, ds_c_alone, ds_c_rule, ds_c_sq, ds_c_room;
-   reg [63:0] al_wait, al_wait_idle, al_young;
-   reg [63:0] ls_st, ls_b2b;
-   // A read held only by the request register: the port's load or M's early load could start but
-   // for last cycle's request pulse (mem_ren) -- what a two-deep request buffer would start.
-   reg [63:0] ls_rd, ls_rd_b2b, ls_pulse_held;
-   reg        ls_rd_q;
-   initial begin ls_rd = 0; ls_rd_b2b = 0; ls_pulse_held = 0; ls_rd_q = 0; end
+   // ---- DISP-SIM: the dispatch group rules and the lanes' schedulers, printed with TOPDOWN-SIM ----
+   // Per slot k > 0, the cycles slot k holds an op while slot k-1 dispatches and slot k does not:
+   // cut by a group rule (smolrv64_frontend) -- beside a non-plain op (alone); a second op for the
+   // F stage, MD stage or SYSQ, a second load or a second store (rule: a load and a store go
+   // together); after a CTI that redirects fetch at decode (resteer) -- or by the credit it misses:
+   // its lane's scheduler, the LQ, the SQ, the FP queue, the divide credit. Then the cycles the
+   // queue head holds an op it may pop (no freeze, no low rename shard, no serialising op in flight
+   // or in the IR) and does not: a serialise, CSR or CBO gate, the ROB, or a room credit holds it.
+   // Over the lanes' schedulers: the entries ready and not picked (entry-cycles: every integer-class
+   // op, whatever its unit, and a scheduler whose unit is busy picks nothing), those in a lane while
+   // another lane picks nothing, and the picks that pass over an older ready entry (the pick is by
+   // slot, not age); and the accesses M starts itself, and those in back-to-back cycles.
+   reg [63:0] ds_cut [1:IW-1][0:7];   // [slot][alone, rule, resteer, lane, load, store, fp, divide]
+   reg [63:0] ds_hd, al_wait, al_wait_idle, al_young, ls_st, ls_b2b;
    reg        ls_st_q;
-   initial begin ds_b_alone = 0; ds_b_rule = 0; ds_b_sq = 0; ds_b_room = 0; ds_c_alone = 0; ds_c_rule = 0;
-                 ds_c_sq = 0; ds_c_room = 0; al_wait = 0; al_wait_idle = 0; al_young = 0;
-                 ls_st = 0; ls_b2b = 0; ls_st_q = 0; end
-   function automatic integer older_ready(input [31:0] rdy_v, input integer sel, input integer n, input integer which);
-      integer k, ak, as;
-      begin
-         older_ready = 0;
-         as = (which == 0 ? 32'(dut.core.ln[0].u_iq.e_rob[sel]) : which == 1 ? 32'(dut.core.ln[1].u_iq.e_rob[sel]) : 32'(dut.core.ln[2].u_iq.e_rob[sel])) - 32'(dut.core.rob_head_idx);
-         as = as & 31;
-         for (k = 0; k < n; k = k + 1) if (rdy_v[k]) begin
-            ak = ((which == 0 ? 32'(dut.core.ln[0].u_iq.e_rob[k]) : which == 1 ? 32'(dut.core.ln[1].u_iq.e_rob[k]) : 32'(dut.core.ln[2].u_iq.e_rob[k])) - 32'(dut.core.rob_head_idx)) & 31;
-            if (ak < as) older_ready = 1;
+   integer    dsi, dsj;
+   initial begin
+      for (dsi = 1; dsi < IW; dsi = dsi + 1) for (dsj = 0; dsj < 8; dsj = dsj + 1) ds_cut[dsi][dsj] = 64'd0;
+      ds_hd = 0; al_wait = 0; al_wait_idle = 0; al_young = 0; ls_st = 0; ls_b2b = 0; ls_st_q = 0;
+   end
+   always @(negedge clk) if (!reset && meas) begin : dispsim
+      reg [15:0] g;  reg [CRW-1:0] cr;  reg old;  integer k, j, e, nr, np, as, ae;
+      cr = dut.core.fe.crd;
+      for (k = 1; k < IW; k = k + 1)
+         if (dut.core.fe.take[k-1] && !dut.core.fe.take[k] && (32'(dut.core.fe.q_cnt) > k)) begin
+            g = dut.core.fe.g[k];
+            if (!dut.core.fe.rule[k])
+               dsj = (!dut.core.fe.g[0][dut.core.GC_PLAIN] || !g[dut.core.GC_PLAIN]) ? 0
+                   : dut.core.fe.g[k-1][dut.core.GC_DCR] ? 2 : 1;
+            else if (g[dut.core.GC_I] && !cr[CR_IA + k]) dsj = 3;
+            else if (g[dut.core.GC_LD] && !cr[CR_LD])    dsj = 4;
+            else if (g[dut.core.GC_ST] && !cr[CR_ST])    dsj = 5;
+            else if (g[dut.core.GC_FC] && !cr[CR_F])     dsj = 6;
+            else if (g[dut.core.GC_M] && !cr[CR_DIV])    dsj = 7;
+            else $fatal(1, "tb: slot %0d is cut with its group rule and every credit it needs (crd %b, class %h)", k, cr, g);
+            ds_cut[k][dsj] = ds_cut[k][dsj] + 1;
+         end
+      if (dut.core.fe.rule[0] && !dut.core.fe.take[0] && cr[CR_POP]) ds_hd = ds_hd + 1;
+      np = 0;
+      for (j = 0; j < IW; j = j + 1) np = np + (pl_iss_v[j] ? 1 : 0);
+      for (j = 0; j < IW; j = j + 1) begin
+         nr = $countones(pl_iq_v[j*PT_NI +: PT_NI] & pl_iq_rdy[j*PT_NI +: PT_NI]) - (pl_iss_v[j] ? 1 : 0);
+         al_wait = al_wait + 64'(nr);
+         if (np - (pl_iss_v[j] ? 1 : 0) < IW - 1) al_wait_idle = al_wait_idle + 64'(nr);
+         if (pl_iss_v[j]) begin
+            as = (32'(pl_iq_rob[j*PT_NI + 32'(pl_iss_ent[j])]) - 32'(dut.core.rob_head_idx)) & (dut.core.ROB_DEPTH - 1);
+            old = 1'b0;
+            for (e = 0; e < PT_NI; e = e + 1) begin
+               ae = (32'(pl_iq_rob[j*PT_NI + e]) - 32'(dut.core.rob_head_idx)) & (dut.core.ROB_DEPTH - 1);
+               if (pl_iq_v[j*PT_NI + e] && pl_iq_rdy[j*PT_NI + e] && (ae < as)) old = 1'b1;
+            end
+            if (old) al_young = al_young + 1;
          end
       end
-   endfunction
-   always @(negedge clk) if (!reset && meas) begin : dispsim
-      integer na, nb, nc, ia, ib, ic;
-      // where the rules cut a group short of the available heads, and why; and the cycles the head
-      // had an instruction but no credit for it (outside a freeze, a low shard or a serialisation)
-      if (dut.core.fe.rule[0] & ~dut.core.fe.rule[1] & (dut.core.fe.q_cnt >= 2)) begin
-         if (~dut.core.fe.g[0][7] | ~dut.core.fe.g[1][7])                    ds_b_alone = ds_b_alone + 1;
-         else if (dut.core.fe.g[0][11])                                       ds_b_sq    = ds_b_sq + 1;
-         else                                                                 ds_b_rule  = ds_b_rule + 1;
-      end
-      if (dut.core.fe.rule[1] & ~dut.core.fe.rule[2] & (dut.core.fe.q_cnt >= 3)) begin
-         if (~dut.core.fe.g[2][7])                                            ds_c_alone = ds_c_alone + 1;
-         else if (dut.core.fe.g[1][11])                                       ds_c_sq    = ds_c_sq + 1;
-         else                                                                 ds_c_rule  = ds_c_rule + 1;
-      end
-      if (dut.core.fe.rule[0] & ~dut.core.fe.take[0] & dut.core.fe.crd[10]) ds_b_room = ds_b_room + 1;   // the head waits for a credit
-      na = $countones(dut.core.ln[0].u_iq.rdy);   ia = dut.core.ln[0].iss_v  ? 1 : 0;
-      nb = $countones(dut.core.ln[1].u_iq.rdy);  ib = dut.core.ln[1].iss_v ? 1 : 0;
-      nc = $countones(dut.core.ln[2].u_iq.rdy);  ic = dut.core.ln[2].iss_v ? 1 : 0;
-      al_wait = al_wait + 64'(na - ia) + 64'(nb - ib) + 64'(nc - ic);
-      // ready ALU work waiting in one lane while another lane issued nothing
-      if ((ib == 0) | (ic == 0)) al_wait_idle = al_wait_idle + 64'(na - ia);
-      if ((ia == 0) | (ic == 0)) al_wait_idle = al_wait_idle + 64'(nb - ib);
-      if ((ia == 0) | (ib == 0)) al_wait_idle = al_wait_idle + 64'(nc - ic);
-      if (ia != 0) al_young = al_young + 64'(older_ready(32'(dut.core.ln[0].u_iq.rdy),  32'(dut.core.ln[0].iss_ent),  NI_SIM, 0));
-      if (ib != 0) al_young = al_young + 64'(older_ready(32'(dut.core.ln[1].u_iq.rdy), 32'(dut.core.ln[1].iss_ent), NI_SIM, 1));
-      if (ic != 0) al_young = al_young + 64'(older_ready(32'(dut.core.ln[2].u_iq.rdy), 32'(dut.core.ln[2].iss_ent), NI_SIM, 2));
       if (dut.core.lsu_started) begin ls_st = ls_st + 1; if (ls_st_q) ls_b2b = ls_b2b + 1; end
       ls_st_q = dut.core.lsu_started;
-      if (dut.core.u_lsu.mem_ren) begin ls_rd = ls_rd + 1; if (ls_rd_q) ls_rd_b2b = ls_rd_b2b + 1; end
-      ls_rd_q = dut.core.u_lsu.mem_ren;
-      if (dut.core.u_lsu.mem_ren & ~dut.core.u_lsu.mem_rbusy & (dut.core.u_lsu.st == 0)
-          & ~(dut.core.u_lsu.mmu_walking & dut.core.u_lsu.pm_q)
-          & ((dut.core.u_lsu.pt_v & ~dut.core.u_lsu.pt_store & ~dut.core.u_lsu.o_v[dut.core.u_lsu.pt_tag])
-           | (dut.core.u_lsu.xo_ok & dut.core.u_lsu.req_early & dut.core.u_lsu.t_mem & ~dut.core.u_lsu.o_v[dut.core.u_lsu.req_tag])))
-         ls_pulse_held = ls_pulse_held + 1;
    end
 
-   // ---- FWD-SIM: what store-to-load forwarding would release, printed with TOPDOWN-SIM -------
-   // Every cycle, every load the store queue holds back (l_block_q), by why: no older store with
-   // a known address overlaps it, so an unknown address holds it (unknown); the youngest older
-   // store that overlaps it covers all its bytes and has its data (forwardable: forwarding from
-   // that store would release it now), covers them but its data has not arrived (no-data), or
-   // covers them only in part (partial). Load-cycles, so a cycle with two held loads counts two.
-   // Of the forwardable, `known` counts those with no older store whose address is still unknown:
-   // forwarding there needs no replay check, since no older address can still arrive; `one`, those
-   // that exactly one older live store overlaps; `same-va`, those whose store has the load's VA
-   // doubleword (the overlap matrix compares page offsets only, so the rest are other pages).
-   // Of `one` and `same-va` with an unknown older address, `unk-before` counts those whose unknown
-   // stores are all older than the forwarding store (it covers the load, so they cannot matter),
-   // `unk-between` those with one between the store and the load (forwarding there needs replay).
-   // Of `all three`, by what the load waits for in the cycle: its registered flag (l_fwd) not yet
-   // set (lag), the forward queue full (busy), the port (the drain has it, the LSU takes nothing,
-   // or another load has it), or nothing: it starts (take).
-   localparam integer FW_LQ = 1 << `SMOLRV64_LQB, FW_SQ = 1 << `SMOLRV64_SQB, FW_IB = `SMOLRV64_SQB;
-   reg [63:0] fw_unk, fw_fwd, fw_nod, fw_part, fw_known, fw_one, fw_samev, fw_all3, fw_go_n, fw_ubef, fw_ubtw;
-   initial begin fw_unk = 0; fw_fwd = 0; fw_nod = 0; fw_part = 0; fw_known = 0; fw_one = 0; fw_samev = 0; fw_all3 = 0; fw_go_n = 0;
-                 fw_ubef = 0; fw_ubtw = 0; fw_lag = 0; fw_bsy = 0; fw_port = 0; fw_tk = 0;
-                 fw_pdr = 0; fw_pls = 0; end
-   reg [63:0] fw_lag, fw_bsy, fw_port, fw_tk, fw_pdr, fw_pls;
-   always @(posedge clk) if (!reset && meas && dut.core.lq_x_take && dut.core.lq_x_fwd) fw_go_n <= fw_go_n + 1;   // forwards taken
+   // ---- FWD-SIM: the loads the store queue holds, by forwarding, printed with TOPDOWN-SIM ----
+   // Every cycle, every load-queue candidate an alias holds (cand_m & e_block), by the store queue's
+   // own forwarding flag (l_fwd, fwn registered) and the load being cached memory: forwardable, by
+   // what it waits for in the cycle -- the forward queue full (busy), the port (the store drain has
+   // it, the LSU takes nothing, or an older candidate has it), or nothing: it starts -- or not, by
+   // why: forwardable from the next cycle (fwn set, l_fwd not yet), an older store's unknown address
+   // it waits for, more than one older store overlapping it, the one not holding all its bytes
+   // (partial, or the page offsets alias another page), the one's data not in, or the rest (that
+   // store untranslated, faulting or uncached or draining now, the load uncached, or a block that
+   // clears a cycle late). Load-cycles, so a cycle with two held loads counts two.
+   localparam integer FW_LQ = 1 << `SMOLRV64_LQB, FW_SQ = 1 << `SMOLRV64_SQB, FW_IB = `SMOLRV64_SQB, FW_N = 11;
+   wire [FW_LQ-1:0] fw_nx;                    // each load's fwn: it forwards from the next cycle
+   genvar gfw;
+   generate for (gfw = 0; gfw < FW_LQ; gfw = gfw + 1) begin : fwn_g
+      assign fw_nx[gfw] = dut.core.u_sq.g_lblk[gfw].fwn;
+   end endgenerate
+   reg [63:0] fw_go_n, fw_c [0:FW_N-1];      // busy, drain, LSU, older, start; next, unknown, several, partial, no-data, other
+   integer    fwi;
+   initial begin fw_go_n = 0; for (fwi = 0; fwi < FW_N; fwi = fwi + 1) fw_c[fwi] = 0; end
+   always @(posedge clk) if (!reset && meas && dut.core.lq_x_take && dut.core.lq_x_fwd) fw_go_n <= fw_go_n + 1;   // forwards started
    always @(negedge clk) if (!reset && meas) begin : fwdsim
-      integer l, s, ys, nov;  reg unk, ubtw;
+      integer l, s, ys, nov, k;  reg unk;
       reg [FW_IB:0]   ld;
-      reg [FW_IB-1:0] sd, yd;
-      reg [12:0]      llo, lhi, slo, shi;
-      for (l = 0; l < FW_LQ; l = l + 1) if (dut.core.u_sq.l_block_q[l]) begin
-         ld = dut.core.u_sq.l_tag[l*(FW_IB+1) +: FW_IB+1] - dut.core.u_sq.headc;
-         ys = -1;  yd = {FW_IB{1'b0}};  unk = 1'b0;  nov = 0;
-         for (s = 0; s < FW_SQ; s = s + 1) begin
-            sd = s[FW_IB-1:0] - dut.core.u_sq.head;
-            if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && !dut.core.u_sq.av[s]) unk = 1'b1;
-            if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && dut.core.u_sq.conf[l][s]) nov = nov + 1;
-            if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && dut.core.u_sq.conf[l][s] && (ys < 0 || sd > yd)) begin
-               ys = s;  yd = sd;
-            end
-         end
-         if (ys < 0) fw_unk = fw_unk + 1;
+      reg [FW_IB-1:0] sd;
+      for (l = 0; l < FW_LQ; l = l + 1) if (dut.core.u_lq.cand_m[l] && dut.core.u_lq.e_block[l]) begin
+         if (dut.core.u_sq.l_fwd[l] && dut.core.u_lq.mem[l] && !dut.core.u_lq.unc[l])
+            k = dut.core.lsu_fw_busy ? 0
+              : (32'(dut.core.lq_x_idx) != l) ? 3
+              : dut.core.lq_x_take ? 4 : dut.core.sq_go ? 1 : 2;
+         else if (fw_nx[l]) k = 5;
          else begin
-            llo = {1'b0, dut.core.u_sq.l_off[l*12 +: 12]};  lhi = llo + (13'd1 << dut.core.u_sq.l_size[l*2 +: 2]);
-            slo = {1'b0, dut.core.u_sq.va[ys][11:0]};      shi = slo + (13'd1 << dut.core.u_sq.sz[ys]);
-            if (slo > llo || lhi > shi)        fw_part = fw_part + 1;
-            else if (!dut.core.u_sq.dv[ys])    fw_nod  = fw_nod + 1;
-            else begin                         fw_fwd  = fw_fwd + 1;  if (!unk) fw_known = fw_known + 1;
-                                                                    if (nov == 1) fw_one = fw_one + 1;
-               if (dut.core.u_sq.va[ys][38:3] == dut.core.u_lq.va[l][38:3]) begin
-                  fw_samev = fw_samev + 1;
-                  if (!unk && nov == 1) begin
-                     fw_all3 = fw_all3 + 1;
-                     if (!dut.core.u_sq.l_fwd[l])                                      fw_lag  = fw_lag + 1;
-                     else if (dut.core.lsu_fw_busy)                                     fw_bsy  = fw_bsy + 1;
-                     else if (dut.core.lq_x_take && dut.core.lq_x_fwd && dut.core.lq_x_idx == l) fw_tk = fw_tk + 1;
-                     else begin                                                         fw_port = fw_port + 1;
-                        if (dut.core.sq_go)              fw_pdr = fw_pdr + 1;
-                        else if (!dut.core.lsu_pt_ack)   fw_pls = fw_pls + 1;
-                     end
-                  end
-                  if (unk && nov == 1) begin
-                     ubtw = 1'b0;
-                     for (s = 0; s < FW_SQ; s = s + 1) begin
-                        sd = s[FW_IB-1:0] - dut.core.u_sq.head;
-                        if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld) && !dut.core.u_sq.av[s] && sd > yd) ubtw = 1'b1;
-                     end
-                     if (ubtw) fw_ubtw = fw_ubtw + 1;  else fw_ubef = fw_ubef + 1;
-                  end
+            ld = dut.core.u_sq.l_tag[l*(FW_IB+1) +: FW_IB+1] - dut.core.u_sq.headc;
+            ys = 0;  unk = 1'b0;  nov = 0;
+            for (s = 0; s < FW_SQ; s = s + 1) begin
+               sd = s[FW_IB-1:0] - dut.core.u_sq.head;
+               if (dut.core.u_sq.v[s] && ({1'b0, sd} < ld)) begin
+                  if (!dut.core.u_sq.av[s]) unk = 1'b1;
+                  if (dut.core.u_sq.conf[l][s]) begin nov = nov + 1;  ys = s; end
                end
             end
+            k = (unk && dut.core.u_lq.wt[l]) ? 6 : (nov > 1) ? 7
+              : (nov == 1 && !dut.core.u_sq.cov[l][ys]) ? 8 : (nov == 1 && !dut.core.u_sq.dv[ys]) ? 9 : 10;
          end
+         fw_c[k] = fw_c[k] + 1;
       end
    end
 
-   // ---- SER-SIM: be:serialize's cycles by the serialising op's class -------------------------
-   // The op in flight (captured at its dispatch) or the one waiting at dispatch for the drain:
-   // 0 csr read, 1 csr write, 2 amo/lr/sc, 3 fence, 4 fence.i, 5 sfence.vma, 6 xret/ecall/ebreak/wfi,
-   // 7 a trapping op (illegal or fetch fault).
-   reg [63:0] ser_c [0:7];
-   reg [2:0]  ser_k_q;
+   // ---- SER-SIM: be:serialize's cycles by the class of the op that holds them --------------
+   // The serialising op in flight (its class captured as it dispatches), else the op at the queue
+   // head. The IR's record loads the head's every cycle, so the head's record of a cycle is the
+   // IR's the next: a cycle is classified one cycle late, when its head's record is in the IR.
+   //   0 csr read, 1 csr write: a CSR op waiting for the CSR op before it
+   //   2 amo/lr/sc   3 fence   4 fence.i   5 cbo: waiting for older loads' and stores' addresses
+   //   6 sfence.vma  7 another system op (xret, ecall, ebreak, wfi, the interrupt pseudo-op)
+   //   8 an op that traps at dispatch (illegal, or a fetch fault)
+   localparam integer SER_N = 9;
+   reg [63:0] ser_c [0:SER_N-1];
+   reg [3:0]  ser_k_q, ser_kp, sp_k;          // the op in flight; the last classified cycle's; last cycle's in flight
+   reg        sp_v, sp_rf, sp_inf, sp_m;      // last cycle: be:serialize, a refill, an op in flight, measured
    integer    seri;
-   initial begin for (seri = 0; seri < 8; seri = seri + 1) ser_c[seri] = 0; ser_k_q = 0; end
-   function automatic [2:0] ser_cls(input [31:0] i, input amo, input csr, input fi, input ill);
+   initial begin for (seri = 0; seri < SER_N; seri = seri + 1) ser_c[seri] = 0;
+                 ser_k_q = 0; ser_kp = 0; sp_k = 0; sp_v = 0; sp_rf = 0; sp_inf = 0; sp_m = 0; end
+   function automatic [3:0] ser_cls(input [31:0] i, input amo, input csr, input fi, input ill);
       begin
-         if (ill)                                    ser_cls = 3'd7;
-         else if (amo)                               ser_cls = 3'd2;
-         else if (csr)                               ser_cls = ((i[13:12] == 2'b01) || (i[19:15] != 5'd0)) ? 3'd1 : 3'd0;
-         else if (i[6:2] == 5'b00011)                ser_cls = fi ? 3'd4 : 3'd3;
-         else if (i[31:25] == 7'h09)                 ser_cls = 3'd5;
-         else                                        ser_cls = 3'd6;
+         if (ill)                       ser_cls = 4'd8;
+         else if (amo)                  ser_cls = 4'd2;
+         else if (csr)                  ser_cls = ((i[13:12] == 2'b01) || (i[19:15] != 5'd0)) ? 4'd1 : 4'd0;
+         else if (i[6:2] == 5'b00011)   ser_cls = fi ? 4'd4 : (i[14:12] == 3'b010) ? 4'd5 : 4'd3;
+         else if (i[6:2] == 5'b11100)   ser_cls = ((i[14:12] == 3'b000) && (i[31:25] == 7'h09)) ? 4'd6 : 4'd7;
+         else                           ser_cls = 4'd15;   // not a serialising, CSR or CBO op
       end
    endfunction
-   always @(negedge clk) if (!reset && meas) begin : sersim
-      reg [2:0] dk;
-      dk = ser_cls(dut.core.d_insn, dut.core.d_is_amo, dut.core.d_is_csr, dut.core.d_is_fencei,
+   always @(negedge clk) if (!reset) begin : sersim
+      reg [3:0] hk;
+      hk = ser_cls(dut.core.d_insn, dut.core.d_is_amo, dut.core.d_is_csr, dut.core.d_is_fencei,
                    dut.core.d_illegal | dut.core.d_fault);
-      if (td_k == 5'd19) ser_c[dut.core.ser_inflight ? ser_k_q : dk] = ser_c[dut.core.ser_inflight ? ser_k_q : dk] + 1;
-      if (dut.core.rn_valid & dut.core.d_ser) ser_k_q = dk;
+      if (sp_v) begin                          // last cycle's class: a refill takes the one before it
+         ser_kp = sp_rf ? ser_kp : sp_inf ? sp_k : hk;
+         if (sp_m) begin
+            if (ser_kp >= SER_N) $fatal(1, "tb: be:serialize charged to %h, not a serialising, CSR or CBO op (c=%0d)", dut.core.d_insn, c);
+            ser_c[ser_kp] = ser_c[ser_kp] + 1;
+         end
+      end
+      sp_v = (td_k == 5'd19);  sp_rf = td_rf;  sp_inf = dut.core.ser_inflight;  sp_k = ser_k_q;  sp_m = meas;
+      if (dut.core.rn_valid & dut.core.d_ser) ser_k_q = hk;   // the IR's op dispatches now
    end
 
    // ---- FRING-SIM: the fetch stream and its predictions, printed with TOPDOWN-SIM ----------
-   // pairs requested and the halfwords they append; marks taken and honoured, not taken, dropped;
-   // restarts by the rejected mark's kind; cycles the stream could have asked for a pair but the
-   // prediction queue or the ring was full.
+   // The I$ pairs the stream requests and the halfwords they append; the marks fetch consumes, by
+   // prediction: taken (fetch takes it, f_take), not taken (consumed and passed), dropped (a
+   // not-taken mark inside a 32-bit op); the marks it rejects, by kind (each restarts the stream: at
+   // a non-CTI's fall-through, or inside a 32-bit op predicting nothing); and the cycles the stream
+   // could ask for a pair but the prediction queue, or the ring (held and in flight), is full.
    reg [63:0] fr_req, fr_hw, fr_tk, fr_nt, fr_drop, fr_rft, fr_rmid, fr_pqfull, fr_rgfull;
    // Cycles the ring is empty and not frozen, by why the stream is not delivering: the iMMU has no
-   // translation of the PC, the stream waits for the PC to reach its page, the I$ holds its door
-   // (a miss being filled), a pair is in flight, or none of these (the restart's own cycle).
+   // translation of the PC (or it faults), the stream waits for the PC to reach its page, the I$
+   // holds its door (a miss being filled), a pair is in flight, or none of these (the restart's own
+   // cycle).
    reg [63:0] fe_mmu, fe_page, fe_door, fe_infl, fe_oth;
    initial begin fe_mmu = 0; fe_page = 0; fe_door = 0; fe_infl = 0; fe_oth = 0; end
-   // XLATE-SIM: M's lookups, the misses it hands the walker, the walker's answers and faults, and
-   // the queue entries whose fault traps from the ROB head (D$ plan increment 5b).
-   reg [63:0] xs_hit, xs_nopa, xs_wk, xs_wkf, xs_trap;
-   initial begin xs_hit = 0; xs_nopa = 0; xs_wk = 0; xs_wkf = 0; xs_trap = 0; end
+   // XLATE-SIM: M's translate passes by outcome -- the dTLB holds the address, its address alone
+   // faults (a page crossing, non-canonical, beyond the top under Bare), or the walker gets it --,
+   // the walker's answers and the faults among them, and the queue entries whose fault traps from
+   // the ROB head (D$ plan increment 5b).
+   reg [63:0] xs_hit, xs_aflt, xs_nopa, xs_wk, xs_wkf, xs_trap;
+   initial begin xs_hit = 0; xs_aflt = 0; xs_nopa = 0; xs_wk = 0; xs_wkf = 0; xs_trap = 0; end
    always @(negedge clk) if (!reset && meas) begin
       if (dut.core.u_lsu.xo_tv)  xs_hit  = xs_hit + 1;
-      if (dut.core.u_lsu.xo_v & ~dut.core.u_lsu.xo_tv) xs_nopa = xs_nopa + 1;
+      if (dut.core.u_lsu.xo_v &  dut.core.u_lsu.xo_flt) xs_aflt = xs_aflt + 1;
+      if (dut.core.u_lsu.xo_v & ~dut.core.u_lsu.xo_tv & ~dut.core.u_lsu.xo_flt) xs_nopa = xs_nopa + 1;
       if (dut.core.lsu_wk_done)  begin xs_wk = xs_wk + 1; if (dut.core.lsu_wk_flt) xs_wkf = xs_wkf + 1; end
       if (dut.core.qf_in)        xs_trap = xs_trap + 1;
    end
@@ -905,8 +942,9 @@ module tb;
    end
    initial begin fr_req = 0; fr_hw = 0; fr_tk = 0; fr_nt = 0; fr_drop = 0; fr_rft = 0; fr_rmid = 0;
                  fr_pqfull = 0; fr_rgfull = 0; end
-   // Trainings (every one from a retired CTI, smolrv64_core's training queue) and the CTIs dropped
-   // at a full queue.
+   // TRAIN-SIM: the trainings (smolrv64_core's training queue: its head trains once its CTI is
+   // non-speculative, at or behind the ROB's irrevocable point, or retired) and the resolving CTIs
+   // a full queue drops.
    reg [63:0] tr_n, tr_drops;
    initial begin tr_n = 0; tr_drops = 0; end
    always @(posedge clk) if (!reset && meas) begin
@@ -919,16 +957,17 @@ module tb;
       if (dut.core.fe.u_ring.rq_acc) begin
          fr_req <= fr_req + 1;  fr_hw <= fr_hw + dut.core.fe.u_ring.rq_n;
       end
-      if (dut.core.fe.f_pop & dut.core.fe.bp_tk & ~fr_rej)  fr_tk <= fr_tk + 1;
-      if (dut.core.fe.f_pop & ~dut.core.fe.bp_tk & ~dut.core.fe.f_drop) fr_nt <= fr_nt + 1;
-      if (dut.core.fe.f_drop)                                fr_drop <= fr_drop + 1;
+      // f_pop counts the marks consumed (a dropped one included); a bundle ends at its taken one
+      if (32'(dut.core.fe.f_pop) < 32'(dut.core.fe.f_take) + 32'(dut.core.fe.f_drop))
+         $fatal(1, "tb: fetch pops %0d marks, fewer than it takes (%b) and drops (%b)", dut.core.fe.f_pop, dut.core.fe.f_take, dut.core.fe.f_drop);
+      fr_tk   <= fr_tk + 64'(dut.core.fe.f_take);
+      fr_nt   <= fr_nt + 64'(dut.core.fe.f_pop) - 64'(dut.core.fe.f_take) - 64'(dut.core.fe.f_drop);
+      fr_drop <= fr_drop + 64'(dut.core.fe.f_drop);
       if (fr_rej & ~dut.core.fe.f_rej_np)                    fr_rft  <= fr_rft + 1;
       if (fr_rej &  dut.core.fe.f_rej_np)                    fr_rmid <= fr_rmid + 1;
       if (fr_open & ~dut.core.fe.pq_room)                    fr_pqfull <= fr_pqfull + 1;
       if (fr_open & dut.core.fe.pq_room & ~dut.core.fe.u_ring.ic_req) fr_rgfull <= fr_rgfull + 1;
    end
-
-`include "tb_pipetrace.vh"
 
    // +tohost=<hex addr>: a bare-metal program's EXIT, the riscv-tests convention (tohost =
    // code<<1 | 1, an 8-byte store). The run ends there instead of spinning to +cycles, and the
@@ -952,7 +991,7 @@ module tb;
    always @(posedge clk) if (!reset && fe_tr_on && trace_on)
       $display("FE c=%0d pc=%h avail=%0d ok=%b mk=%b adv=%0d taken=%b rej=%b pq=%0d fire=%b pb=%b q=%0d room=%b ir=%b disp=%b red=%b",
                c, dut.core.fe.u_fetch.pc_q, dut.core.fe.imem_avail, dut.core.fe.imem_ok,
-               dut.core.fe.imem_mk, dut.core.fe.f_adv_hw, dut.core.fe.f_pop & dut.core.fe.bp_tk,
+               dut.core.fe.imem_mk, dut.core.fe.f_adv_hw, dut.core.fe.f_take,
                dut.core.fe.f_rej, dut.core.fe.pq_cnt, dut.core.fe.fire, dut.core.fe.pb_v,
                dut.core.fe.q_cnt, dut.core.fe.q_room,
                dut.core.s_v, dut.core.s_takev, dut.core.fe.redirect);
@@ -1007,12 +1046,7 @@ module tb;
    end
    initial begin
       ncyc = 200000000; nret = 0; last_ret = 0;
-      n_inject = 0; n_uirq = 0; n_seip = 0;
-      n_stmem = 0; n_recov = 0; n_bdep = 0; n_bmem = 0; n_bser = 0;
-      n_nov = 0; n_nov_mmu = 0; n_nov_ic = 0; n_nov_qrdy = 0;
-      n_stmul = 0; n_stdiv = 0; n_stfpu = 0;
-      n_stm = 0; n_hold = 0; n_headblk = 0; n_mempty = 0; n_ldland = 0;
-      n_robfull = 0; n_srcpend = 0; n_stdoor = 0; n_sqidle = 0; n_sqwait = 0;
+      n_inject = 0; n_uirq = 0; n_seip = 0;  td_sum = 0;  td_disp = 0;
       // +trace_from=<cycle> +trace_to=<cycle>: the window every tb-side trace honours, so a
       // trace is aimed by plusarg and never by a compile-time literal (three 17 M-cycle
       // rebuilds on 2026-09-04 went to a `$time` threshold in the wrong unit). RTL-side
@@ -1076,11 +1110,8 @@ module tb;
                   end
                   // B3 (2026-09-17): the CPI stack from the RTL's own event bus, so the same tool
                   // (tools/perf-cpi-stack.py) grades a simulation and a board run.
-                  if (meas) begin
-                     for (pe = 0; pe < 44; pe = pe + 1) if (dut.core.hpm_ev_q[pe]) pev[pe] = pev[pe] + 1;
-                     pev[44] = pev[44] + dut.core.hpm_lqocc_q;  pev[45] = pev[45] + dut.core.hpm_sqocc_q;
-                     pev[46] = pev[46] + dut.core.hpm_disp_q;
-                  end
+                  if (meas)
+                     for (pe = 0; pe < pe_n; pe = pe + 1) pev[pe] = pev[pe] + 64'(dut.core.u_csr.hpm_val(pe_sel[pe]));
          if ((c % 1000000) == 0)
             $display("[c=%0d retires=%0d va=%h pa=%h prv=%0d satp=%h inj=%0d uirq=%0d seip=%0d ier=%h]",
                      c, nret, dut.core.fe.u_fetch.pc_q, dut.imem_addr, dut.core.mmu_priv,
@@ -1100,88 +1131,83 @@ module tb;
       if (meas_from != 0)
          $display("MEASURE window: %0d retires in %0d cycles, IPC %0.3f (the statistics below count the window; WALK-SIM and MEMDEP the whole run)",
                   mr, mc, $itor(mr) / $itor(mc));
-      $display("TOPDOWN-SIM: every cycle in exactly one cause (docs/SmolRV64-Spec.md 11.2)");
-      begin : td_totals
-         reg [63:0] tsum;  tsum = 64'd0;
-         for (tdi = 0; tdi < TD_N; tdi = tdi + 1) tsum = tsum + td_cnt[tdi];
-         for (tdi = 0; tdi < TD_N; tdi = tdi + 1)
-            if (td_cnt[tdi] != 0)
-               $display("TOPDOWN-SIM  %14s %12d  %6.2f%%", td_name(tdi), td_cnt[tdi],
-                        100.0 * $itor(td_cnt[tdi]) / $itor(mc));
-         if (tsum != mc) $display("TOPDOWN-SIM  NOT CLOSED: %0d counted vs %0d cycles", tsum, mc);
-         else           $display("TOPDOWN-SIM  closed: %0d cycles", tsum);
+      $display("TOPDOWN-SIM: every cycle in exactly one cause (docs/SmolRV64-Spec.md 11.2), cycles");
+      for (tdi = 0; tdi < TD_N; tdi = tdi + 1) begin
+         td_sum  = td_sum + td_cnt[tdi];
+         td_disp = td_disp + td_cnt[tdi] * 64'(td_ndisp(tdi));
+         if (td_cnt[tdi] != 0)
+            $display("TOPDOWN-SIM  %14s %12d  %6.2f%%", td_name(tdi), td_cnt[tdi],
+                     100.0 * $itor(td_cnt[tdi]) / $itor(mc));
       end
-      $display("FETCH-SIM bundles=%0d held=%0d | none: redirect=%0d freeze=%0d itlb=%0d page=%0d pq-full=%0d ring-full=%0d icache-busy=%0d icache-wait=%0d straddle=%0d reject=%0d bytes-late=%0d align=%0d",
-               fs_take, fs_held, fs_cnt[0], fs_cnt[1], fs_cnt[2], fs_cnt[3], fs_cnt[4], fs_cnt[5], fs_cnt[6],
-               fs_cnt[7], fs_cnt[8], fs_cnt[9], fs_cnt[10], fs_cnt[11]);
-      $display("FRING-SIM pairs=%0d halfwords=%0d taken=%0d not-taken=%0d dropped=%0d restart-fallthrough=%0d restart-inside=%0d pq-full=%0d ring-full=%0d",
+      $display("TOPDOWN-SIM  %0s: %0d cycles counted of %0d; the ok:N cycles dispatch %0d instructions, the IR took %0d outside redirect cycles (and %0d wrong-path in them)",
+               (td_sum == mc && td_disp == td_dn) ? "closed" : "NOT CLOSED", td_sum, mc, td_disp, td_dn, td_drd);
+      $write("FETCH-SIM cycles the bundle register takes a bundle=%0d is held=%0d | gets none:", fs_take, fs_held);
+      for (tdi = 0; tdi < FK_N; tdi = tdi + 1) $write(" %0s=%0d", fetch_name(4'(tdi)), fs_cnt[tdi]);
+      $display("");
+      $display("FRING-SIM pairs=%0d halfwords=%0d | marks: taken=%0d not-taken=%0d dropped=%0d | rejected marks, each a restart: fallthrough=%0d inside=%0d | cycles: pq-full=%0d ring-full=%0d",
                fr_req, fr_hw, fr_tk, fr_nt, fr_drop, fr_rft, fr_rmid, fr_pqfull, fr_rgfull);
-      $display("FRING-EMPTY immu=%0d page=%0d icache-door=%0d in-flight=%0d other=%0d",
+      $display("FRING-EMPTY cycles: immu=%0d page=%0d icache-door=%0d in-flight=%0d other=%0d",
                fe_mmu, fe_page, fe_door, fe_infl, fe_oth);
-      $display("XLATE-SIM M-hits=%0d handed-to-walker=%0d walker-answers=%0d (faults %0d) queue-traps=%0d",
-               xs_hit, xs_nopa, xs_wk, xs_wkf, xs_trap);
+      $display("XLATE-SIM M's translate passes: dtlb-hits=%0d address-faults=%0d to-the-walker=%0d | walker answers=%0d (faults %0d) | queue-entry traps=%0d",
+               xs_hit, xs_aflt, xs_nopa, xs_wk, xs_wkf, xs_trap);
       $display("ITLB-SIM walks=%0d unused=%0d (a walked page nothing retired from before 32 more walks)", iw_n, iw_waste);
-      $display("FWD-SIM forwards=%0d | held load-cycles: unknown=%0d forwardable=%0d (every older address known %0d, one overlapping store %0d, same VA %0d, all three %0d; one and same VA with an unknown address: unk-before %0d, unk-between %0d) no-data=%0d partial=%0d",
-               fw_go_n, fw_unk, fw_fwd, fw_known, fw_one, fw_samev, fw_all3, fw_ubef, fw_ubtw, fw_nod, fw_part);
-      $display("FWD-SIM all three, waiting for: lag=%0d busy=%0d port=%0d (the drain %0d, the LSU %0d, another load %0d) take=%0d",
-               fw_lag, fw_bsy, fw_port, fw_pdr, fw_pls, fw_port - fw_pdr - fw_pls, fw_tk);
-      $display("DISP-SIM group cut before slot B: alone=%0d rule=%0d resteer=%0d | head waits for a credit=%0d | before slot C: alone=%0d rule=%0d resteer=%0d (%0d)",
-               ds_b_alone, ds_b_rule, ds_b_sq, ds_b_room, ds_c_alone, ds_c_rule, ds_c_sq, ds_c_room);
-      $display("DISP-SIM alu ready-waiting=%0d (with the other ALU idle %0d) issued-past-an-older-ready=%0d | lsu starts=%0d back-to-back=%0d",
+      $display("FWD-SIM forwards=%0d | held load-cycles, forwardable: busy=%0d drain=%0d lsu=%0d older-load=%0d start=%0d | not forwardable: next-cycle=%0d unknown-address=%0d several-stores=%0d partial=%0d no-data=%0d other=%0d",
+               fw_go_n, fw_c[0], fw_c[1], fw_c[2], fw_c[3], fw_c[4], fw_c[5], fw_c[6], fw_c[7], fw_c[8], fw_c[9], fw_c[10]);
+      for (dsi = 1; dsi < IW; dsi = dsi + 1)
+         $display("DISP-SIM slot %c cut behind a dispatching slot %c, cycles: alone=%0d rule=%0d resteer=%0d | credit: lane=%0d load=%0d store=%0d fp=%0d divide=%0d",
+                  8'("A" + dsi), 8'("A" + dsi - 1), ds_cut[dsi][0], ds_cut[dsi][1], ds_cut[dsi][2],
+                  ds_cut[dsi][3], ds_cut[dsi][4], ds_cut[dsi][5], ds_cut[dsi][6], ds_cut[dsi][7]);
+      $display("DISP-SIM queue head held with pops allowed (a serialise, CSR or CBO gate, the ROB or a room credit), cycles=%0d", ds_hd);
+      $display("DISP-SIM lane schedulers: ready-not-picked entry-cycles=%0d (another lane picking nothing %0d) picks-past-an-older-ready=%0d | M-started accesses=%0d back-to-back=%0d",
                al_wait, al_wait_idle, al_young, ls_st, ls_b2b);
-      $display("SER-SIM be:serialize by class: csr-read=%0d csr-write=%0d amo=%0d fence=%0d fence.i=%0d sfence=%0d xret/ecall=%0d trap=%0d",
-               ser_c[0], ser_c[1], ser_c[2], ser_c[3], ser_c[4], ser_c[5], ser_c[6], ser_c[7]);
-      $display("DISP-SIM d$ reads=%0d back-to-back=%0d held-only-by-the-request-pulse=%0d", ls_rd, ls_rd_b2b, ls_pulse_held);
+      $display("SER-SIM be:serialize cycles by class: csr-read=%0d csr-write=%0d amo=%0d fence=%0d fence.i=%0d cbo=%0d sfence=%0d xret/ecall/ebreak/wfi/irq=%0d trap=%0d",
+               ser_c[0], ser_c[1], ser_c[2], ser_c[3], ser_c[4], ser_c[5], ser_c[6], ser_c[7], ser_c[8]);
+      $display("IQFULL-SIM be:iq-full cycles by the head's missing credit (a cycle can miss two): lane-A=%0d head-op=%0d fp-queue=%0d divide=%0d | lane A's alone=%0d, of them another lane with room=%0d",
+               iq_c[0], iq_c[1], iq_c[2], iq_c[3], iq_c[4], iq_c[5]);
+      $display("DEPLD-SIM be:dep-load cycles by the load waited on: not-issued=%0d at-M=%0d dtlb-miss=%0d faulting=%0d ready=%0d held-unknown=%0d held-overlap=%0d device-head=%0d forwarding=%0d dcache-waiter=%0d dcache=%0d slow-path=%0d | landing-buffer=%0d sysq-csr=%0d amo-in-M=%0d",
+               dl_c[0], dl_c[1], dl_c[2], dl_c[3], dl_c[4], dl_c[5], dl_c[6], dl_c[7], dl_c[8], dl_c[9], dl_c[10],
+               dl_c[11], dl_c[12], dl_c[13], dl_c[14]);
       $display("ICMISS-SIM misses=%0d unused=%0d (a missing line nothing retired from before 64 more misses)", im_n, im_waste);
-      $display("TRAIN-SIM trainings=%0d dropped=%0d", tr_n, tr_drops);
+      $display("TRAIN-SIM trainings=%0d dropped-CTIs=%0d", tr_n, tr_drops);
       $display("WALK-SIM squashes-at-the-head=%0d checked-after-the-walk=%0d rows-walked=%0d checked-after-the-kill=%0d releases=%0d", dut.core.wk_sq, dut.core.wk_chk, dut.core.wk_rows, dut.core.wk_kchk, dut.core.wk_rel);
-      $display("MEM-SIM dcache fill-cycles=%0d fills=%0d mean-mshrs=%0.2f waiting=%0d wb-full=%0d cleans=%0d clean-cycles=%0d | st_mem=%0d with-fill=%0d with-waiting=%0d",
-               ms_fill, ms_fills, (ms_fill != 0) ? $itor(ms_live) / $itor(ms_fill) : 0.0, ms_park, ms_wbfull, ms_cln, ms_clnc,
+      $display("MEM-SIM dcache fill-cycles=%0d fills=%0d mean-mshrs=%0.2f waiting-cycles=%0d wb-full-cycles=%0d | ST_MEM cycles=%0d with-fill=%0d with-waiting=%0d",
+               ms_fill, ms_fills, (ms_fill != 0) ? $itor(ms_live) / $itor(ms_fill) : 0.0, ms_park, ms_wbfull,
                ms_stmem, ms_stmem_fill, ms_stmem_park);
-      if (kan_on) $fclose(kf);
+      if (kan_on) begin kan_finish; $fclose(kf); end
       $display("perf-stat-sim: begin");
       $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run
       $display("%0d instructions", mr);
-      for (pe = 0; pe < 47; pe = pe + 1) $display("%0d r%04h", pev[pe], pcode(pe));
+      for (pe = 0; pe < pe_n; pe = pe + 1) $display("%0d r%04h", pev[pe], pe_code[pe]);
       $display("perf-stat-sim: end");
 
       $display("MEMDEP replays=%0d", dut.core.rp_cnt);
       $display("SQ-SIM data landings=%0d left-out=%0d (fetched by the data read instead)", dut.core.u_sq.ln_n, dut.core.u_sq.ln_out);
-      $display("FPORT-SIM retired: divides=%0d int-to-FP=%0d csr/sfence reading rs1=%0d | stores=%0d FP stores=%0d | the store queue's data reads=%0d",
+      $display("FPORT-SIM retired instructions: divides=%0d int-to-FP=%0d csr/sfence reading rs1=%0d | stores=%0d FP stores=%0d | the store queue's data reads=%0d",
                fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd);
-      $display("RENAME-SIM be:rename cycles with each shard low: lanes %0d %0d %0d %0d | FP shards 4-7 %0d %0d %0d %0d",
-               rn_low[0], rn_low[1], rn_low[2], rn_low[3], rn_low[4], rn_low[5], rn_low[6], rn_low[7]);
+      $write("RENAME-SIM be:rename cycles each shard is low (a cycle can count in several):");
+      for (rli = 0; rli < 8; rli = rli + 1)
+         if (dut.core.sh_used(3'(rli))) begin
+            if (rli < IW)                   $write(" lane-%c=%0d", 8'("A" + rli), rn_low[rli]);
+            else if (rli == 32'(SH_FL))     $write(" fp-loads=%0d", rn_low[rli]);
+            else                            $write(" f-stage=%0d", rn_low[rli]);
+         end
+      $display("");
       $display("MEMDEP loads blocked only by unknown older store addresses: resolved clear=%0d (waited %0d cycles), resolved aliased=%0d (waited %0d cycles)",
                dut.core.u_sq.sp_clear, dut.core.u_sq.sp_clear_cyc, dut.core.u_sq.sp_alias, dut.core.u_sq.sp_alias_cyc);
-      $display("SQ  loads=%0d reordered=%0d (%0d.%0d%%)  ld_block cycles=%0d (%0d.%0d%%)  mean occ=%0d.%02d  full=%0d",
+      $display("SQ  queued-load starts=%0d, past an older store=%0d (%0d.%0d%%) | alias-held cycles=%0d (%0d.%0d%%) | mean occupancy=%0d.%02d entries | full cycles=%0d",
                n_ldstart, n_ldreord,
                n_ldstart ? (100*n_ldreord)/n_ldstart : 0,
                n_ldstart ? ((1000*n_ldreord)/n_ldstart)%10 : 0,
                n_ldblk, (100*n_ldblk)/mc, ((1000*n_ldblk)/mc)%10,
                n_sqocc/mc, ((100*n_sqocc)/mc)%100, n_sqfull);
-      $display("SB-SIZING cycles=%0d retires=%0d st_mem=%0d (%0d.%02d%% of cycles)",
-               mc, mr, n_stmem, (n_stmem*100)/mc, ((n_stmem*10000)/mc)%100);
-      $display("SB-SIZING   recoverable   %10d  %0d.%02d%% of cycles, %0d%% of st_mem",
-               n_recov, (n_recov*100)/mc, ((n_recov*10000)/mc)%100, (n_recov*100)/n_stmem);
-      $display("SB-SIZING   blk next-is-mem%9d  %0d%% of st_mem   (needs a load queue, not a scoreboard)",
-               n_bmem, (n_bmem*100)/n_stmem);
-      $display("SB-SIZING   blk dependence %9d  %0d%% of st_mem   (irreducible: it wants the value)",
-               n_bdep, (n_bdep*100)/n_stmem);
-      $display("SB-SIZING   blk serialize  %9d  %0d%% of st_mem",
-               n_bser, (n_bser*100)/n_stmem);
-      $display("SB-SIZING   X EMPTY        %9d  %0d%% of st_mem   (iMMU %0d, I$ empty %0d, other %0d)",
-               n_nov, (n_nov*100)/n_stmem, n_nov_mmu, n_nov_ic, n_nov-n_nov_mmu-n_nov_ic);
-      $display("SB-SIZING     ...of which DECOUPLING QUEUE HAS WORK %0d  (%0d%% of X-empty) -- recoverable, IR just cannot reload while M stalls",
-               n_nov_qrdy, (n_nov_qrdy*100)/n_nov);
-      $display("SB-SIZING   per-unit stall: mul=%0d div=%0d fpu=%0d  (vs LSU %0d)",
-               n_stmul, n_stdiv, n_stfpu, n_stmem);
-      $display("SB-WHERE  M-stall=%0d  M-empty=%0d | d_hold=%0d (src_pend=%0d rob_full=%0d) head_block=%0d ld_land=%0d",
-               n_stm, n_mempty, n_hold, n_srcpend, n_robfull, n_headblk, n_ldland);
-      $display("SB-STORE  at the D$ door unaccepted=%0d  drainable but LSU idle=%0d  queued, none drainable=%0d  (sq full at dispatch=%0d)",
-               n_stdoor, n_sqidle, n_sqwait, n_sqfull);
-      $display("SB-SIZING   FLOOR %0d.%02d%% of cycles / CEILING %0d.%02d%% (floor + queue-ready X-empty)",
-               (n_recov*100)/mc, ((n_recov*10000)/mc)%100,
-               ((n_recov+n_nov_qrdy)*100)/mc, (((n_recov+n_nov_qrdy)*10000)/mc)%100);
+      $display("SQ-DRAIN cycles: door-unaccepted=%0d drainable-LSU-idle=%0d head-not-drainable=%0d", n_stdoor, n_sqidle, n_sqwait);
+      // every cycle in one top-down cause, and the dispatching causes account for every dispatch
+      // outside a redirect's cycle: a cycle the IR's group dispatches is a dispatching cycle
+      // (smolrv64_core td_disp) unless it is bad speculation
+      if (td_sum != mc)
+         $fatal(1, "TOPDOWN-SIM NOT CLOSED: %0d cycles counted in a cause, %0d run", td_sum, mc);
+      if (td_disp != td_dn)
+         $fatal(1, "TOPDOWN-SIM: the ok:N cycles dispatch %0d instructions, the IR took %0d outside redirect cycles", td_disp, td_dn);
       $finish;
    end
 endmodule

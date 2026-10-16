@@ -187,7 +187,9 @@ module smolrv64_lsu
     output reg  [1:0]      cos_kind,      // 0 = none, 1 = load, 2 = store
     output reg  [63:0]     cos_data,      // a plain store's value (raw rs2) and log2 size; size 4'hF = not a
     output reg  [3:0]      cos_size,      //   plain store's write (load, AMO's RMW, SC, cbo): not data-checked
-    output wire            ld_busy,        // a LOAD access is in flight, hit or miss (MEM_LDINFL; counters only)
+    output wire [5:0]      ld_infl,        // fast-path loads in flight: tags whose D$ response or store-queue forward is due (MEM_LDINFL; counters only)
+    output wire            ld_sent,        // a fast-path load starts (MEM_LDSENT; counters only)
+    output wire            ld_fkill,       // a fast-path load's landing is dropped: its kill came while it ran (MEM_WPKILL; counters only)
     // This LSU's invariants, made visible to hardware (rv_errlog); registered here, see
     // the INTEGRITY LOG block at the bottom of the file for the bit assignment.
     output wire [15:0]     err,
@@ -794,7 +796,14 @@ module smolrv64_lsu
    assign rd_val = pt_fast_done ? ld_fast_val
                  : (st == S_ARD) ? a_rdval : amo_go ? amo_old_q : ld_val;
    assign idle   = (st == S_IDLE);
-   assign ld_busy = ld_inflight;
+   function automatic [5:0] ones_ld(input [NLD-1:0] v);
+      integer i;
+      begin ones_ld = 6'd0; for (i = 0; i < NLD; i = i + 1) ones_ld = ones_ld + {5'd0, v[i]}; end
+   endfunction
+   initial if (NLD > 63) $fatal(1, "smolrv64_lsu: NLD=%0d loads outstanding; ld_infl counts to 63", NLD);
+   assign ld_infl  = ones_ld(o_v);
+   assign ld_sent  = ld_fast_ok;
+   assign ld_fkill = ld_fast_ret & r_kill;
 
    // The FSM below asserts these two inline; they are qualified by the state that
    // evaluates them, so the integrity-log bit means the same thing the $fatal does and

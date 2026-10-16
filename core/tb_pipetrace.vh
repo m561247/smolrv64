@@ -5,11 +5,11 @@
    // dispatch binds a ROB index. Two more kinds of row cover the cycles no instruction explains: a
    // FETCH row per run of cycles the bundle register could take a bundle and fetch has none, named by
    // the frontend's reason, and a STALL row per run of non-producing cycles, named by the core's
-   // top-down cause (td_k). Honors +trace_from/+trace_to. tools/kanata-disasm.py swaps the raw
-   // instruction words for disassembly from the ELF.
+   // top-down cause (td_k). Honors +trace_from/+trace_to: the window's end and the run's close the
+   // open fetch and stall rows. tools/kanata-disasm.py swaps the raw instruction words for
+   // disassembly from the ELF.
    integer    kf;  reg kan_on;  reg [63:0] kan_last, kan_next, kan_rid;
    reg [8*256-1:0] kan_path;
-   localparam integer PT_IW = `SMOLRV64_IW;          // slots and lanes
    localparam integer PT_FW = `SMOLRV64_FW;          // the bundle register's slots
    localparam integer PT_QD = `SMOLRV64_QD;          // the decoupling queue's depth (QDEPTH)
    // rows by ROB index (after dispatch: 256 entries, the core's ROB_DEPTH at most) and by sequence
@@ -29,7 +29,7 @@
    initial begin
       kan_on = $value$plusargs("kanata=%s", kan_path);
       kan_last = 64'd0; kan_next = 64'd0; kan_rid = 64'd0;
-      kan_sopen = 1'b0; kan_gopen = 1'b0; kan_sk = 5'd0; kan_gk = "";
+      kan_sopen = 1'b0; kan_gopen = 1'b0; kan_sk = 5'd31; kan_gk = "";
       pbm_v = {PT_FW{1'b0}};  qm_n = 0;
       for (kti = 0; kti < 256; kti = kti + 1) pt_v[kti] = 1'b0;
       for (kti = 0; kti < PT_SN; kti = kti + 1) ps_v[kti] = 1'b0;
@@ -89,38 +89,41 @@
    endtask
 
    // ---- the frontend's codes: the bundle register, the queue, its head group, the IR ----
-   // Why queue-head slot k does not pop this cycle (it is in the head group's window).
+   // Why queue-head slot k does not pop this cycle (it is in the head group's window). The head
+   // (slot A) waiting on a credit is the back-end's cause, so its code takes td_k's conditions in
+   // td_k's order -- the ROB, a dependency, the scheduler credits (its lane's, the head-op register,
+   // the FP queue, the MD stage), rename, the SQ, the LQ, serialisation -- and names what the stall
+   // row names. Slot k > 0 behind a dispatching slot is cut by a group rule or a room credit.
    function [7:0] head_why;
       input integer k;
-      reg [15:0] g;
+      reg [15:0] g;  reg [CRW-1:0] cr;
       begin
-         g = dut.core.fe.g[k];
+         g = dut.core.fe.g[k];  cr = dut.core.crd;
          if (dut.core.fe.take[k])                          head_why = "q";   // pops: in the IR next cycle
          else if (k > 0 && !dut.core.fe.take[k-1])         head_why = "q";   // an older one holds
          else if (!dut.core.fe.rule[k])                    head_why = "g";   // cut by a group rule
-         else if (!dut.core.crd[CRV_POP])
-            head_why = (dut.core.redirect_q | dut.core.fr_v | dut.core.dec_red_q) ? "r"
-                     : dut.core.rn_stall ? "n" : "z";
-         else if (k == 0 && (g[15] ? !dut.core.crd[CRV_SER] : g[14] ? !dut.core.crd[CRV_CSR]
-                             : (g[4] & ~g[7] & ~g[15]) ? !dut.core.crd[CRV_CBO] : 1'b0))
-                                                           head_why = "z";   // a serialising, CSR or CBO gate
-         else if (!dut.core.crd[CRV_ROB1 + k])             head_why = "O";   // no ROB row
-         else if (g[5] & !dut.core.crd[CRV_IA + k])        head_why = "I";   // its lane's scheduler
-         else if (g[6] & !dut.core.crd[CRV_F])             head_why = "I";   // the FP queue
-         else if (g[2] & !dut.core.crd[CRV_DIV])           head_why = "I";   // the MD stage, for a divide
-         else if (g[4] & !dut.core.crd[CRV_L])             head_why = "o";   // a head op in flight
-         else if (g[12] & !dut.core.crd[CRV_LD])           head_why = "L";
-         else if (g[13] & !dut.core.crd[CRV_ST])           head_why = "S";
+         else if (k == 0) begin
+            if (dut.core.redirect_q | dut.core.fr_v | dut.core.dec_red_q) head_why = "r";   // dispatch frozen
+            else if (dut.core.st_rob)                      head_why = "O";   // no ROB row
+            else if (dut.core.dep_ld | dut.core.dep_fp)    head_why = "W";   // nothing issues: a load or FP wait
+            else if (!dut.core.hd_sched)                   head_why = (g[dut.core.GC_L] & !dut.core.cr_l) ? "o" : "I";
+            else if (dut.core.rn_stall)                    head_why = "n";   // a rename shard is low
+            else if (dut.core.hd_sq)                       head_why = "S";
+            else if (dut.core.hd_lq)                       head_why = "L";
+            else                                           head_why = "z";   // serialisation, a CSR or CBO gate
+         end
+         else if (!cr[CR_ROB1 + k])                        head_why = "O";
+         else if ((g[dut.core.GC_I] & !cr[CR_IA + k]) | (g[dut.core.GC_FC] & !cr[CR_F]) | (g[dut.core.GC_M] & !cr[CR_DIV]))
+                                                           head_why = "I";   // its lane's scheduler, the FP queue, the MD stage
+         else if (g[dut.core.GC_ST] & !cr[CR_ST])          head_why = "S";
+         else if (g[dut.core.GC_LD] & !cr[CR_LD])          head_why = "L";
          else                                              head_why = "?";
       end
    endfunction
-   // smolrv64_credits.vh's indices, at this width
-   localparam integer CRV_IA = 0, CRV_L = PT_IW, CRV_F = PT_IW + 1, CRV_LD = PT_IW + 2, CRV_ST = PT_IW + 3,
-                      CRV_ROB1 = PT_IW + 4, CRV_POP = 2*PT_IW + 4, CRV_SER = 2*PT_IW + 5, CRV_CSR = 2*PT_IW + 6,
-                      CRV_CBO = 2*PT_IW + 7, CRV_DIV = 2*PT_IW + 8;
 
    // Why fetch hands the bundle register nothing in a cycle it could take a bundle (FK_*), the
-   // fetch rows' and FETCH-SIM's one classifier.
+   // fetch rows' and FETCH-SIM's one classifier: itlb is the iMMU without a translation of the PC
+   // or with a fault for it, in-flight the ring empty with its room reserved by the pairs in flight.
    localparam integer FK_N = 12;
    function [3:0] fetch_k;
       input dummy;
@@ -145,7 +148,7 @@
       input [3:0] k;
       case (k)
         4'd0: fetch_name = "redirect";    4'd1: fetch_name = "freeze";      4'd2: fetch_name = "itlb";
-        4'd3: fetch_name = "page";        4'd4: fetch_name = "pq-full";     4'd5: fetch_name = "ring-full";
+        4'd3: fetch_name = "page";        4'd4: fetch_name = "pq-full";     4'd5: fetch_name = "in-flight";
         4'd6: fetch_name = "icache-busy"; 4'd7: fetch_name = "icache-wait"; 4'd8: fetch_name = "straddle";
         4'd9: fetch_name = "reject";      4'd10: fetch_name = "bytes-late"; default: fetch_name = "align";
       endcase
@@ -162,13 +165,13 @@
 
    // ---- each lane's state, flattened for the per-cycle loop (a generate index must be constant) ----
    localparam integer PT_NI = 10;                    // a lane scheduler's entries (smolrv64_core NI)
-   wire [PT_IW-1:0]        pl_stg_v, pl_iss_v, pl_x, pl_m1, pl_m2;
-   wire [7:0]              pl_stg_rob [0:PT_IW-1], pl_iss_ent [0:PT_IW-1], pl_rob [0:PT_IW-1];
-   wire [7:0]              pl_mrob1 [0:PT_IW-1], pl_mrob2 [0:PT_IW-1];
-   wire [PT_IW*PT_NI-1:0]  pl_iq_v, pl_iq_rdy;
-   wire [7:0]              pl_iq_rob [0:PT_IW*PT_NI-1];
+   wire [IW-1:0]           pl_stg_v, pl_iss_v, pl_x, pl_m1, pl_m2;
+   wire [7:0]              pl_stg_rob [0:IW-1], pl_iss_ent [0:IW-1], pl_rob [0:IW-1];
+   wire [7:0]              pl_mrob1 [0:IW-1], pl_mrob2 [0:IW-1];
+   wire [IW*PT_NI-1:0]     pl_iq_v, pl_iq_rdy;
+   wire [7:0]              pl_iq_rob [0:IW*PT_NI-1];
    genvar gpl, gpe;
-   generate for (gpl = 0; gpl < PT_IW; gpl = gpl + 1) begin: ptl
+   generate for (gpl = 0; gpl < IW; gpl = gpl + 1) begin: ptl
       assign pl_stg_v[gpl]   = dut.core.ln[gpl].stg_v;
       assign pl_stg_rob[gpl] = 8'(dut.core.ln[gpl].stg_rob);
       assign pl_iss_v[gpl]   = dut.core.ln[gpl].iss_v;
@@ -191,13 +194,13 @@
    task put;  input [7:0] ix; input [7:0] code; begin nc[ix] = code; end endtask
 
    always @(posedge clk) if (!reset && kan_on) begin : pipetrace
-      reg [7:0] ix;  reg [8*12-1:0] gk;  reg [8*40-1:0] lb;  reg ready;
+      reg [7:0] ix;  reg [8*12-1:0] gk;  reg [8*40-1:0] lb;  reg [4:0] sk;
       // 1. what holds or moves every dispatched instruction this cycle
       for (pi = 0; pi < 256; pi = pi + 1)
          if (pt_v[pi]) nc[pi] = dut.core.u_rob.done[pi] ? "=" : "?";
       // the lanes: the dispatch stage (a cycle on the way to the scheduler), and the scheduler
       // (waiting for an operand, ready, picked)
-      for (pj = 0; pj < PT_IW; pj = pj + 1) begin
+      for (pj = 0; pj < IW; pj = pj + 1) begin
          if (pl_stg_v[pj]) put(pl_stg_rob[pj], "t");
          for (pk = 0; pk < PT_NI; pk = pk + 1)
             if (pl_iq_v[pj*PT_NI + pk])
@@ -218,7 +221,8 @@
       // waiting for its data, a result waiting in its lane's landing buffer
       for (pj = 0; pj < dut.core.LQ_N; pj = pj + 1) if (dut.core.u_lq.v[pj]) begin
          ix = 8'(dut.core.u_lq.rob[pj]);
-         if (dut.core.la_v[pj])                         put(ix, "m");
+         if (dut.core.u_lq.lnd[pj]) ;                   // landed and watched: complete
+         else if (dut.core.la_v[pj])                    put(ix, "m");
          else if (dut.core.u_lq.av[pj] & dut.core.u_lq.sent[pj])  put(ix, "l");
          else if (dut.core.u_lq.av[pj] & !dut.core.u_rob.done[ix]) put(ix, "k");
       end
@@ -229,7 +233,7 @@
          else if (dut.core.u_sq.av[pj])                 put(ix, "=");
       end
       if (dut.core.m_valid) put(8'(dut.core.m_rob_idx), "M");
-      for (pj = 0; pj < PT_IW; pj = pj + 1)
+      for (pj = 0; pj < IW; pj = pj + 1)
          for (pk = 0; pk < dut.core.LBN; pk = pk + 1)
             if (pk < dut.core.lb_n[pj])
                put(8'(dut.core.lb_rob[pj*dut.core.LBN + ((dut.core.lb_h[pj] + pk) % dut.core.LBN)]), "e");
@@ -237,14 +241,14 @@
       if (dut.core.md_v)  put(8'(dut.core.md_rob), "v");
       if (dut.core.mq_v)  put(8'(dut.core.mq_rob), "v");
       // a lane's multiply in flight, and what it executes this cycle
-      for (pj = 0; pj < PT_IW; pj = pj + 1) begin
+      for (pj = 0; pj < IW; pj = pj + 1) begin
          if (pl_m1[pj]) put(pl_mrob1[pj], "u");
          if (pl_m2[pj]) put(pl_mrob2[pj], "u");
          if (pl_x[pj])  put(pl_rob[pj], 8'("a" + pj));
       end
       // a mispredicted CTI waiting for its restart (it completes at the squash or the release), and
       // the entries the kill marked dead, waiting for the release that drops them
-      for (pj = 0; pj < PT_IW; pj = pj + 1)
+      for (pj = 0; pj < IW; pj = pj + 1)
          if (dut.core.lr_v[pj] & dut.core.lr_mis[pj]) put(8'(dut.core.lr_rob[pj]), "!");
       if (dut.core.fr_v) put(8'(dut.core.fr_rob), "!");
       if (dut.core.rob_kd_v)
@@ -263,10 +267,10 @@
          end
       for (pj = 0; pj < qm_n; pj = pj + 1)
          if (ps_v[qm_seq[pj]]) begin
-            kan_code(ps_id[qm_seq[pj]], ps_c[qm_seq[pj]], (pj < PT_IW) ? head_why(pj) : "q");
-            ps_c[qm_seq[pj]] = (pj < PT_IW) ? head_why(pj) : "q";
+            kan_code(ps_id[qm_seq[pj]], ps_c[qm_seq[pj]], (pj < IW) ? head_why(pj) : "q");
+            ps_c[qm_seq[pj]] = (pj < IW) ? head_why(pj) : "q";
          end
-      for (pj = 0; pj < PT_IW; pj = pj + 1)
+      for (pj = 0; pj < IW; pj = pj + 1)
          if (dut.core.s_v[pj] && ps_v[dut.core.s_seq[pj]]) begin
             kan_code(ps_id[dut.core.s_seq[pj]], ps_c[dut.core.s_seq[pj]], dut.core.d_take ? "i" : "r");
             ps_c[dut.core.s_seq[pj]] = dut.core.d_take ? "i" : "r";
@@ -274,7 +278,7 @@
 
       // 3. the ends of this cycle: retire, the squashes, dispatch binding a ROB index, the IR's
       // dropped group, a frontend redirect
-      for (pj = 0; pj < PT_IW; pj = pj + 1)
+      for (pj = 0; pj < IW; pj = pj + 1)
          if (dut.core.rc_v[pj] && pt_v[dut.core.rc_idx[pj]]) begin
             kan_close(pt_id[dut.core.rc_idx[pj]], pt_c[dut.core.rc_idx[pj]], 1'b0);  pt_v[dut.core.rc_idx[pj]] = 1'b0;
          end
@@ -283,7 +287,7 @@
       if (dut.core.fr_rel)
          for (pi = 0; pi < dut.core.ROB_DEPTH; pi = pi + 1)
             if (dut.core.rob_kd[pi] && pt_v[pi]) begin kan_close(pt_id[pi], pt_c[pi], 1'b1); pt_v[pi] = 1'b0; end
-      for (pj = 0; pj < PT_IW; pj = pj + 1)
+      for (pj = 0; pj < IW; pj = pj + 1)
          if (dut.core.s_v[pj] && ps_v[dut.core.s_seq[pj]]) begin
             if (dut.core.s_takev[pj]) begin
                ix = 8'(dut.core.s_rob[pj]);
@@ -336,14 +340,22 @@
          end
       end
       kan_gk = gk;
-      // 5. the stall row: one per run of cycles with the same non-producing cause
-      if (trace_on && td_k != kan_sk) begin
+      // 5. the stall row: one per run of cycles with the same non-producing cause (td_k 3..20);
+      // the window's end closes it (31: outside the window)
+      sk = trace_on ? td_k : 5'd31;
+      if (sk != kan_sk) begin
          if (kan_sopen) begin kan_close(kan_sid, "#", 1'b1); kan_sopen = 1'b0; end
-         if (td_k > 5'd2 && td_k < 5'd21) begin
+         if (sk >= 5'd3 && sk <= 5'd20) begin
             kan_sid = kan_next;  kan_next = kan_next + 64'd1;  kan_sopen = 1'b1;
-            $sformat(lb, "** %0s", td_name(td_k));
+            $sformat(lb, "** %0s", td_name(sk));
             kan_open(kan_sid, lb, "#");
          end
       end
-      kan_sk = td_k;
+      kan_sk = sk;
    end
+   task kan_finish;               // the run ends: close the open fetch and stall rows
+      begin
+         if (kan_gopen) begin kan_close(kan_gid, "~", 1'b1); kan_gopen = 1'b0; end
+         if (kan_sopen) begin kan_close(kan_sid, "#", 1'b1); kan_sopen = 1'b0; end
+      end
+   endtask

@@ -117,9 +117,9 @@ at least 2 x FW: a bundle is pushed only with room for a whole one.
 
 ## 3. Stall taxonomy
 
-Every non-retiring cycle is attributed to exactly one bucket by the hardware counters in
-§11, and the buckets are additive because `st_m` (M stalled) and `m_advance` are exact
-complements.
+Every cycle is charged to exactly one top-down cause (`td_k`, §11 and §11.2): dispatching, bad
+speculation, front-end or back-end, and a cause beneath each. The stall counters below (§11's
+`ST_*`, `FE_*`) say what each kind of wait looks like; they overlap, and only `td_k` ranks them.
 
 ### 3.1 F stalls — the frontend has nothing to hand over
 
@@ -128,8 +128,8 @@ complements.
 | I$ miss | `FE_IC` r0312 | line fill through the memory arbiter |
 | iTLB miss / page-table walk | `FE_MMU` r0311 | PTW runs as a line requester |
 | had bytes, no complete instruction | `FE_ALN` r0313 | window is `SMOLRV64_HW` halfwords |
-| had an instruction, decoupling queue empty | `FE_QUE` r0314 | backend drained the queue |
-| X idle for any other reason | `FE_BUB` r0310 | catch-all frontend bubble; not the IR's refill after a backend stall |
+| had an instruction, not yet in the IR | `FE_QUE` r0314 | queue latency, or a dispatch freeze |
+| the IR empty, nothing behind it waiting on a credit | `FE_BUB` r0310 | `FE_MMU + FE_IC + FE_ALN + FE_QUE`; not the IR's refill after a backend stall |
 
 ### 3.2 X stalls — the queue head without a credit
 
@@ -157,7 +157,7 @@ while a rename shard is below `LOWAT` (4 covers two groups, each allocating at m
 register per shard), or while a serialising op is in the IR or in flight. A CBO, which waits
 in M for the ROB head, pops only once every older load and store has its address (`CR_CBO`:
 no LQ or SQ entry unfilled, none in the IR), and no load or store pops while a CBO is in the
-IR or in flight (`cbo_n`): nothing can need M behind it, reach memory ahead of it, or fill
+IR or in flight (`cbo_any`): nothing can need M behind it, reach memory ahead of it, or fill
 the store queue it waits on.
 
 A dispatch stall is `hd_wait`, the head holding an instruction it has no credit for. In the
@@ -169,7 +169,7 @@ held a group until its room appeared and dispatched it in that cycle.
 |---|---|
 | *(operands)* | **no longer a dispatch stall.** Waiting for operands happens in the scheduler now (§2.1); dispatch is blocked by structural resources only. |
 | `~cr_rob1..3` | no free ROB row (64 rows) beyond the IR group's (`st_rob`) |
-| `~cr_ia/ib/ic/l/f` | the member's scheduler has no entry beyond its dispatch-stage register and the IR's op — integer 10 each, in-order 12; for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
+| `~cr_ia/ib/ic/l/f` | the member's scheduler has no entry beyond its dispatch-stage register and the IR's op — integer 10 each; the head-op register holds one (`cr_l`: none in flight, none in the IR); for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
 | `rn_stall` | any rename shard below `LOWAT`=4 free registers (`st_rn`) |
 | `cr_ser`, `cr_csr` | a serializing op -- a fence, `fence.i`, an AMO, an xret, `ecall`/`ebreak`/`wfi`/`sfence.vma`, a trap from dispatch -- is **alone in flight**: it pops only when the ROB AND the store queue have drained (`drained`, rule C5) and the IR is empty, and nothing pops behind it until it commits. A CSR op does not drain: it waits only for the CSR op before it (`csr_infl`, or one in the IR) (`st_srz`) |
 
@@ -1697,8 +1697,9 @@ Not present in synthesis (`ifndef SYNTHESIS`), listed so nobody counts them as a
 ## 11. Counters and observability
 
 `Zihpm` with **13** programmable counters (`mhpmcounter3..15`), driven by a registered 44-bit
-`hpm_ev` bus plus three per-cycle counts (the queue occupancies and `DPATCH`). A 13-event `perf
-stat` fills the counters; more is multiplexed, and its counts are estimates.
+`hpm_ev` bus, four per-cycle counts (the queue occupancies, the fast loads in flight and
+`DPATCH`) and the registered top-down cause `td_k`. A 13-event `perf stat` fills the counters;
+more is multiplexed, and its counts are estimates.
 
 **Sscofpmf (sampling).** Each `mhpmeventN` carries OF (bit 63) and MINH/SINH/UINH (62:60);
 VSINH/VUINH (59:58) are stored and never consulted. A counter stops in a privilege whose INH bit
@@ -1709,8 +1710,9 @@ ranks last, after STI. `scountovf` (0xDA0) reads the OF bits; below M a bit read
 `mcounteren` grants that counter. Linux's SBI PMU driver samples on it, so `perf record -g`
 works (the kernel keeps frame pointers). The privilege filter compares the current privilege
 with the event bus, which runs two cycles late, so an event in the cycle of a privilege change
-may count on either side of it. A read of `mhpmeventN` or `mhpmcounterN` (`csrr`) writes
-nothing, so it cannot swallow that cycle's increment or overflow. `core/directed/sscofpmf.S`
+may count on either side of it. A write of `mhpmeventN` selects its event from the stored
+register a cycle later, and the counter holds for that cycle. A read of `mhpmeventN` or
+`mhpmcounterN` (`csrr`) writes nothing, so it cannot swallow that cycle's increment or overflow. `core/directed/sscofpmf.S`
 checks overflow, OF's silence, the INH bits in M and S, LCOFI's priority and delegation, and
 `scountovf`'s masking and U-mode trap.
 
@@ -1722,85 +1724,107 @@ instructions on programmable counters, which do filter.
 **TOP-DOWN (§11.2, on the board).** `smolrv64_core`'s one classifier (`td_k`) charges every cycle to
 exactly one of bad speculation, front-end, back-end or dispatching; its events count it, so
 `TD_BS + TD_FE + TD_BE` plus the dispatching cycles is the cycle count by construction, and the
-simulator's `TOPDOWN-SIM` prints the same classifier. `tools/perf-smol.sh td CMD 2>&1 |
-tools/perf-cpi-stack.py` is the report: level 1, the depth under each parent, and the slots.
+simulator's `TOPDOWN-SIM` prints the same classifier. A cycle whose IR group dispatches is a
+dispatching cycle whatever waits behind it (the queue head's credit is the next group's), so the
+dispatching cycles' instructions are exactly `DPATCH`. `tools/perf-smol.sh td CMD 2>&1 |
+tools/perf-cpi-stack.py` is the report: level 1, the depth under each parent, and the slots; the
+`tdbe` and `tdfe` sets add level 3, `td_k` itself.
 
 | event | id | meaning |
 |---|---|---|
-| `TD_BS` | r0401 | bad speculation: a redirect, or a resolved restart waiting for the head |
-| `TD_FE` | r0407 | front-end: the IR is empty and the queue head is not waiting for a credit (it has nothing), M not held, not bad speculation |
-| `TD_BE` | r0402 | back-end: M held, or the queue head holds an instruction it has no credit for (`hd_wait`, §3.2), or a frozen IR |
-| `TD_BE_MEM` / `TD_BE_ROB` / `TD_BE_IQ` | r0403 / r0404 / r0405 | within `TD_BE`: memory (M on a memory op, or waiting for a load result) / no ROB credit / no scheduler, LQ or SQ credit; the rest of `TD_BE` is M held on a non-memory op, a dependency on the FPU, rename (a shard below `LOWAT`) and serialisation |
-| `TD_FE_LAT` | r0406 | within `TD_FE`: latency, the iMMU walking or no fetch bytes |
-| `DPATCH` | r0408 | instructions dispatched (0..3 a cycle): the slots against 3 × cycles |
+| `TD_BS` | r0401 | bad speculation: a redirect, or a resolved restart waiting |
+| `TD_FE` | r0407 | front-end: the IR is empty, the queue head waits for no credit, M is free, not bad speculation |
+| `TD_BE` | r0402 | back-end, unless the IR's group dispatches: M holds a head op, the queue head waits for a credit (`hd_wait`, §3.2), the IR holds its group, or the refill cycle after one |
+| `TD_BE_MEM` / `TD_BE_ROB` / `TD_BE_IQ` | r0403 / r0404 / r0405 | within `TD_BE`: memory (td_k 10, 13: M holds a head op, or issue waits on an integer load, AMO or CSR read) / no ROB room (12) / no scheduler, store-queue or load-queue credit (15, 17, 18) |
+| `TD_FE_LAT` | r0406 | within `TD_FE`: the iMMU, or no fetch bytes (td_k 5, 6) |
+| `DPATCH` | r0408 | instructions dispatched, 0..IW a cycle: the slots against IW × cycles |
+| `TDK_*` | r05nn | the cycles with td_k = nn, one event per cause below |
+
+| td_k | `TDK_` | TOPDOWN-SIM | the cycle |
+|---|---|---|---|
+| 0 / 1 / 2 / 22 | `OK1` / `OK2` / `OK3` / `OK4` | ok:1 .. ok:4 | the IR's group dispatches 1 / 2 / 3 / 4 instructions (4: IW=4) |
+| 3 / 4 | `REDIRECT` / `DRAIN` | bs:redirect / bs:drain | a redirect / a resolved mispredict's restart (`RD_WAIT`) |
+| 5 / 6 / 7 / 8 | `FE_IMMU` / `FE_ICACHE` / `FE_ALIGN` / `FE_QUEUE` | fe:immu / fe:icache / fe:align / fe:queue | the iMMU cannot translate / no fetch bytes / bytes but no whole instruction / an instruction not yet in the IR |
+| 10 | `BE_MMEM` | be:M-mem | M holds a head op (AMO, LR/SC, CBO) |
+| 12 | `BE_ROB` | be:rob-full | no ROB row for the head's group |
+| 13 / 14 | `BE_DEPLD` / `BE_DEPFP` | be:dep-load / be:dep-fp | no lane issued while a scheduler's reported entry waits on an integer load, AMO or CSR read / on an FP op's, FP load's, FP-port or divide result |
+| 15 | `BE_IQ` | be:iq-full | the head's scheduler credit: lane A's (slot A is lane A), the FP queue's, the head-op register's or the divide's |
+| 16 / 17 / 18 | `BE_RN` / `BE_SQ` / `BE_LQ` | be:rename / be:sq-full / be:lq-full | a rename shard below `LOWAT` / no store-queue credit / no load-queue credit |
+| 19 | `BE_SER` | be:serialize | a serialising op drains or is in flight, a CSR op waits for the one before it, a CBO waits for older addresses |
+| 20 | `BE_HELD` | be:held | the IR holds its group otherwise: the cycle after a redirect or a decode resteer |
+
+td_k 9 (fe:other), 11 (M on a non-memory op) and 21 (a dispatching cycle with nothing
+dispatched) cannot happen, and the core asserts it: FE_MMU..FE_QUE cover the empty IR, M takes
+only memory ops, and a dispatching cycle has the IR's group taken.
 
 The wait-cycle events below overlap (a cycle waits on several things at once) and are depth,
-never a partition:
+never a partition. `docs/smolrv64-perf-events.json`, generated from `src/csr_file.v`'s event map,
+has every event's exact description; this is the map by family:
 
 | event | id | meaning |
 |---|---|---|
-
-| event | id | meaning |
-|---|---|---|
-| `ST_MEM` | r0300 | M stalled on a memory op **+** no scheduler issuing while one's blocked entry waits for a load result (`dep_ld`) |
-| `ST_FPU` | r0303 | M stalled on the FPU **+** X held for a pending FP result |
-| `ST_DSP` | r0304 | the queue head holds an instruction it has no credit for (`hd_wait`), not the ROB and not a data dependency: a scheduler, rename, a queue or a serializing op |
-| `FE_BUB` | r0310 | frontend bubble |
-| `FE_MMU` / `FE_IC` | r0311 / r0312 | iMMU walking / I$ no window |
-| `FE_ALN` / `FE_QUE` | r0313 / r0314 | no whole instruction / queue empty |
-| D$ / I$ access, miss | r0100/r0102, r0110/r0112 | per request, never per replay: the D$ counts loads and stores taken and line fills started, the I$ requests taken and first-lookup misses |
-| redirects | r0005 | |
-| `RED_BR` / `RED_JLR` / `RED_TRP` | r0006 / r0007 / r0008 | redirects by cause: conditional branch / jalr / trap or system op |
-| `ST_ROB` | r0305 | the queue head waits for ROB room (`hd_wait & ~cr_rob1`) |
-| `ST_IQ` / `ST_RN` / `ST_SQ` / `ST_LQ` / `ST_SRZ` | r0306 / r0307 / r0308 / r0309 / r030a | `ST_DSP` by cause, disjoint, in this order: the head's scheduler, or a divide's MD stage, has no credit / a rename shard is below `LOWAT` / no store-queue credit / no load-queue credit / the rest, a serializing op draining or one in flight |
-| `RD_WAIT` | r0317 | a mispredict's restart in progress: from its resolve to its release (the walk and the kill, §6) or its squash at the ROB head |
-| `DT_WALK` / `DTLB_MISS` | r0318 / r0104 | cycles the data MMU is busy, its second level's lookup included (a subset of `ST_MEM`) / first-level misses, each a second-level lookup and, when that misses, a walk. The dTLB is 64 entries direct-mapped on VPN[5:0] and its second level 2048 on VPN[10:0]; two hot pages 8 MiB apart share a second-level index and cost a walk per load and no D$ miss |
-| `ST_MUL` / `ST_DIV` | r0302 / r0301 | occupancy, not stalls: cycles a multiply is in flight in any lane (`m*_1`, `m*_2`) / the MD stage holds a divide |
-| `MEM_HITSER` | r0319 | a ready load candidate the LSU door did not take (hit serialization) |
-| `MEM_LDINFL` | r031a | a load access in flight; a hit is ~3 cycles, the rest is miss wait |
-| `MEM_STDOOR` | r031b | a store at the D$ door, unaccepted |
-| `MEM_ALIAS_UNK` / `MEM_ALIAS_OVL` | r031c / r031d | the load candidate blocked by an older store whose address is unknown / that is known to overlap |
-| `MEM_REORD` | r031e | loads issued past an uncommitted older store (count) |
-| `MEM_WPKILL` | r031f | wrong-path loads whose landing was killed after their access ran (count) |
-| `MEM_DEVWAIT` | r0320 | a device load waiting to be the ROB head |
+| `ST_MEM` | r0300 | M holds an unfinished head op **+** no lane issued while a scheduler's reported entry waits on an integer load, AMO or CSR read (`dep_ld`) |
+| `ST_FPU` | r0303 | stage F holds an op it cannot advance **+** no lane issued while a reported entry waits on an FP, FP-load, FP-port or divide result (`dep_fp`) |
+| `ST_DSP` | r0304 | the queue head waits for a credit other than the ROB's, while M can advance and no dependency holds issue: `ST_IQ + ST_RN + ST_SQ + ST_LQ + ST_SRZ` |
+| `ST_ROB` | r0305 | the queue head waits for ROB room |
+| `ST_IQ` / `ST_RN` / `ST_SQ` / `ST_LQ` / `ST_SRZ` | r0306 / r0307 / r0308 / r0309 / r030a | `ST_DSP` by cause, disjoint, in this order: lane A's scheduler, the FP queue, the head-op register or the divide credit / a rename shard below `LOWAT` / a store with no store-queue credit / a load with no load-queue credit (neither has one while a head op is in flight or in the IR) / serialising, a CSR op or a CBO waiting |
+| `FE_BUB` | r0310 | the IR is empty, the head waits for no credit, M is free, no redirect is live and no back-end refill is due: `FE_MMU + FE_IC + FE_ALN + FE_QUE` |
+| `FE_MMU` / `FE_IC` / `FE_ALN` / `FE_QUE` | r0311 / r0312 / r0313 / r0314 | within `FE_BUB`: the iMMU cannot translate (a second-level lookup, a walk, or a walk held behind a weak branch) / no fetch bytes / bytes but no whole instruction / an instruction not yet in the IR |
+| `RD_WAIT` | r0317 | a mispredict's restart: from its resolve to its release (the walk and the kill, §6) or its squash at the ROB head |
+| `ST_MUL` / `ST_DIV` | r0302 / r0301 | occupancy, not stalls: a multiply in flight in any lane / the MD stage holds a divide |
+| D$ requests / fills | r0100 / r0102 | requests taken (a read at the door, loads and page-table-walk reads, or a write into the store queue) / line fills started (an MSHR allocated; a join of a fill in flight is not one) |
+| I$ requests / misses | r0110 / r0112 | requests taken, one 16-byte pair each / requests whose lookup misses the virtual tag |
+| `DT_WALK` / `DTLB_MISS` | r0318 / r0104 | the dMMU walker busy (a second-level lookup or a walk, for a queued load or store or M's head op) / walker starts (a request the first level does not hold). The dTLB is 64 entries direct-mapped on VPN[5:0] and its second level 2048 on VPN[10:0]; two hot pages 8 MiB apart share a second-level index and cost a walk per load and no D$ miss |
+| redirects | r0005 / r0006 / r0007 / r0008 | restarts (a squash at the head, a mispredict's release) / conditional branches / jalr / exceptions, interrupts, faults and memory-ordering replays (xRET, sfence.vma, CSR-write redirects and fence.i are restarts of neither kind) |
+| `LOAD` / `STORE` | r0003 / r0004 | load landings (fast, slow or forwarded; wrong-path and replayed landings included; AMO and LR not) / stores the store queue hands the LSU after commit |
+| `MEM_HITSER` | r0319 | the LQ has a ready candidate the LSU port does not take |
+| `MEM_LDINFL` / `MEM_LDSENT` | r031a / r0323 | fast-path loads in flight (tags whose D$ response or store-queue forward is due), summed per cycle / fast-path load starts: their ratio is the mean fast-load latency in cycles, a hit's and a miss's together |
+| `MEM_STDOOR` | r031b | a write at the D$ door that has no room and no device acknowledge |
+| `MEM_ALIAS_UNK` / `MEM_ALIAS_OVL` | r031c / r031d | an LQ candidate is alias-blocked, while a blocked load with its wait bit set waits on an older store's unknown address / and none does |
+| `MEM_REORD` | r031e | loads the port takes with an older store, committed or not, live in the store queue (count) |
+| `MEM_WPKILL` | r031f | load landings dropped by a kill that came while the access ran, fast or slow path (count) |
+| `MEM_DEVWAIT` | r0320 | no candidate is ready and an unblocked device load waits to be the ROB head |
 | `MEM_LQOCC` / `MEM_SQOCC` | r0321 / r0322 | load / store queue occupancy summed per cycle (mean = count / cycles) |
 
-`ST_MEM` and `ST_FPU` deliberately include the *dependent* wait, charged to the unit that
-owns the register being waited on: when a unit stopped blocking M, the wait did not go away,
-it moved to X, and charging it to `ST_SER` made a data dependency read as a serializing op.
-A consumer waiting on both a load and an FP result is charged to `ST_MEM`. The schedulers'
-"blocked on" reports are registered before they are classified, so the dependent wait is the
-one the schedulers reported the cycle before.
+`ST_MEM` and `ST_FPU` include the *dependent* wait, charged to the unit that owns the register
+being waited on; the events OR their parts, so a consumer waiting on both a load and an FP
+result counts in both, and only `td_k` ranks them (dep-load before dep-fp). The schedulers'
+"blocked on" reports are registered before they are classified, so the dependent wait is the one
+the schedulers reported the cycle before; each scheduler reports its lowest-slot waiting entry
+(it compares no age).
 
 **Reading the report.** On the board (once, `tools/perf-smol-setup.sh` lowers
 `perf_event_paranoid` so no `sudo` is needed; copy `docs/smolrv64-perf-events.json` beside
 the script):
 
-    tools/perf-smol.sh td  CMD 2>&1 | tools/perf-cpi-stack.py    # where the cycles go
-    tools/perf-smol.sh cpi CMD 2>&1 | tools/perf-cpi-stack.py    # which wait, in depth
-    tools/perf-smol.sh mem CMD 2>&1 | tools/perf-cpi-stack.py    # what the memory wait is made of
+    tools/perf-smol.sh td     CMD 2>&1 | tools/perf-cpi-stack.py    # where the cycles go
+    tools/perf-smol.sh tdbe   CMD 2>&1 | tools/perf-cpi-stack.py    # the back-end's causes
+    tools/perf-smol.sh tdfe   CMD 2>&1 | tools/perf-cpi-stack.py    # bad speculation, front-end, width
+    tools/perf-smol.sh cpi    CMD 2>&1 | tools/perf-cpi-stack.py    # the wait events, in depth
+    tools/perf-smol.sh memcpi CMD 2>&1 | tools/perf-cpi-stack.py    # the memory events, fast-load latency
 
 Each set is one run of 13 counters; never ask for more (`all`), which multiplexes. `perf stat`
 counts the whole command, so the answer is about the whole command: run the region of interest
-in a loop long enough to dominate start-up, or read it with a different window and say so.
+in a loop long enough to dominate start-up, or read it with a different window and say so. For
+Geekbench, `IV=1000 tools/board/gb5-run.sh <rtl>` counts each second as well (+0.12% cycles), and
+`tools/gb5-subtests.py <perf.txt> <ts.log>` sums the seconds into each subtest.
 
 The `td` report, top to bottom:
 
-- **level 1** partitions the cycles: *dispatching* (a group dispatched), *bad speculation*,
-  *front-end*, *back-end*. It sums to 100% by construction; if it does not, the event map is
-  wrong and the script stops.
+- **level 1** partitions the cycles: *dispatching* (the IR's group dispatched), *bad
+  speculation*, *front-end*, *back-end*. It sums to 100% by construction; if it does not, the
+  event map is wrong and the script stops.
 - **bad speculation** splits into the redirect itself and *a resolved restart waiting*
-  (`RD_WAIT`, a mispredict's restart from its resolve to its release or its squash). The per-1k redirect counts beneath say
-  which kind: conditional branches and jalr point at the predictor, traps at the program.
-- **front-end**: the queue head had nothing. *latency* is the iMMU walking or no fetch bytes
-  (the I$; see `I$ misses` per 1k); the rest is alignment and the queue refilling after a
-  redirect (`cpi` set: `FE_ALN`, `FE_QUE`).
-- **back-end**: *memory* is M on a memory op or a scheduler waiting for a load (`mem` set
-  next); *the ROB is full* means something long-latency at the head with nothing behind it to
-  retire; *a scheduler or load/store queue is full* means one class saturated (the `cpi` set's
-  `ST_IQ`/`ST_LQ`/`ST_SQ` say which); the rest is rename and serialisation (`ST_RN`,
-  `ST_SRZ`).
-- **slots** are 3 per cycle: *retired* is the IPC as a share, and *dispatched, squashed* is
+  (`RD_WAIT`). The per-1k redirect counts beneath say which kind: conditional branches and jalr
+  point at the predictor, exceptions and replays at the program and the memory speculation.
+- **front-end**: the IR was empty with nothing waiting behind it. *latency* is the iMMU or no
+  fetch bytes (the I$; see `I$ misses` per 1k); the rest is alignment and the queue refilling
+  after a redirect (`tdfe`).
+- **back-end**: *memory* is M holding a head op or a scheduler waiting on an integer load
+  (`memcpi` next); *the ROB is full* means something long-latency at the head with nothing behind
+  it to retire; *a scheduler or load/store queue is full* means one class saturated; `tdbe` gives
+  every cause, the rest (rename, serialisation, FP waits, the IR held after a redirect) included.
+- **slots** are IW per cycle: *retired* is the IPC as a share, and *dispatched, squashed* is
   the wrong-path work.
 
 The `cpi` set's wait-cycle rows overlap (a cycle waiting on a load and on ROB room counts in
@@ -1849,15 +1873,32 @@ crash exonerates the whole logged set in one read. Simulation keeps the log hone
 split down to the core's own stall taps. The classifier is `smolrv64_core`'s `td_k`, the one the
 `TD_*` counters count (§11), and the run's `perf-stat-sim` block (the event bus counted per
 cycle, printed as `perf stat` would) run through `tools/perf-cpi-stack.py` reproduces the
-`TOPDOWN-SIM` totals exactly. Bad
+`TOPDOWN-SIM` totals exactly (the `TDK_*` set; csr_file's event map is the bench's, read through
+`hpm_sel_of`/`hpm_val`, so the two cannot drift). Bad
 speculation (`bs:redirect`, `bs:drain` = `rd_wait`) wins over frontend (`fe:immu`, `fe:icache`,
-`fe:align`, `fe:queue`), which wins over backend (`be:M-mem`, `be:M-other`, `be:rob-full`,
-`be:dep-load`, `be:dep-fp`, `be:iq-full`, `be:rename`, `be:sq-full`, `be:lq-full`,
-`be:serialize`, in `d_hold`'s order). The IR loads the group the queue head takes, so the cycle
+`fe:align`, `fe:queue`), which wins over backend (`be:M-mem`, `be:rob-full`, `be:dep-load`, `be:dep-fp`, `be:iq-full`,
+`be:rename`, `be:sq-full`, `be:lq-full`, `be:serialize`, `be:held`, in `d_hold`'s order). The IR loads the group the queue head takes, so the cycle
 after the head waits on a backend credit finds the IR empty with the queue still full: that
 refill cycle (`td_rf`) takes the previous cycle's backend cause, and no `FE_*` event counts it.
-Any other cycle is `ok:N`, where N is the number of instructions dispatched that cycle. The run prints the totals as `TOPDOWN-SIM` lines, and
-`closed: <cycles>` confirms the causes sum to the run's cycle count.
+Any other cycle is `ok:N`, where N is the number of instructions dispatched that cycle. The run
+prints the nonzero totals as `TOPDOWN-SIM` lines and closes them: the causes sum to the run's
+cycles, and Σ N·ok:N equals the instructions the IR took outside redirect cycles (a group the IR
+takes in a redirect's cycle is wrong-path, and the cycle is `bs:redirect`; the board's `DPATCH`
+counts those too). Either failing is a `$fatal`.
+
+Beside it, one line per backend cause splits that cause by the state the core holds that cycle,
+and each `$fatal`s on a cycle it cannot account for: `RENAME-SIM` (the shard below `LOWAT`),
+`IQFULL-SIM` (the head's missing credit: lane A's, the head-op register's, the FP queue's, the
+divide's; and lane A's alone while another lane has room), `DEPLD-SIM` (the load the reported
+entry waits on: not issued, at M, a dTLB miss, faulting, ready, held behind an unknown or an
+overlapping store, a device load at the head, forwarding, a D$ waiter, in the D$, the slow path,
+in a landing buffer; a CSR read in the SYSQ; an AMO in M), `SER-SIM` (the serialising op, the CSR
+op or the CBO the head waits behind), `MEM-SIM` (the D$'s misses), `DISP-SIM` (why slot k does not
+dispatch behind slot k-1: a group rule, or the credit it lacks), `FWD-SIM` (the loads the store
+queue holds, by whether they can forward), `SQ-DRAIN` (the store queue's head: the door
+unaccepted, drainable with the LSU idle, not drainable), `XLATE-SIM` (dTLB hits, address faults,
+the walker), `FRING-SIM` (the fetch stream, its taken and not-taken marks) and `FPORT-SIM`/
+`TRAIN-SIM` (the register-file readers, the predictor's training).
 
 `+kanata=<file>` writes the **pipe trace** (`core/tb_pipetrace.vh`) as a Konata pipe view
 (github.com/shioyadan/Konata), limited to the `+trace_from`/`+trace_to` window: one row per
@@ -1869,7 +1910,7 @@ register; it is keyed by the fetch sequence number until dispatch binds a ROB in
 |---|---|---|
 | `f` / `Q` | the bundle register / held there, the queue full | mirrors of the bundle register and the queue (`q_push`, `q_pop`; a mismatch with `q_cnt` is printed) |
 | `q` | the decoupling queue, behind the head group or popping | |
-| `g r n z O I L S o` | at the queue head, not popping: a group rule; a redirect freeze; rename low; a serialising, CSR or CBO gate; no ROB row; its scheduler full (a divide: the MD stage); LQ full; SQ full; a head op in flight | `take`, `rule`, `crd` in the order the frontend's `room()` checks them |
+| `g r O W I o n S L z` | at the queue head, not popping: a group rule; a redirect freeze; no ROB row; nothing issues, a load or FP result awaited; its scheduler full (a divide: the MD stage; the FP queue); a head op in flight; rename low; SQ full; LQ full; a serialising, CSR or CBO gate | `take`, `rule`; slot A, the head, takes td_k's conditions in td_k's order (`st_rob`, `dep_ld`/`dep_fp`, `hd_sched`, `rn_stall`, `hd_sq`, `hd_lq`), so it names what the stall row names; slot k > 0 the room credit it lacks (`crd`) |
 | `i` | the IR, dispatching | `s_v`, `d_take` |
 | `t` | a scheduler's dispatch stage (for F, the head of its FIFO) | `stg_v` |
 | `w` / `s` / `p` | in a scheduler: an operand pending / ready, not picked / picked | the scheduler's `v`, `srdy`, `iss_ent` |
@@ -1881,7 +1922,9 @@ register; it is keyed by the fetch sequence number until dispatch binds a ROB in
 
 A FETCH row (`~~ fetch: <cause>`) covers each run of cycles in which the bundle register could
 take a bundle and fetch has none: `redirect`, `freeze` (fence.i, an I$ invalidation, a mapping
-change, a rejected mark), `itlb`, `page` (the stream left the PC's page), `pq-full`, `ring-full`,
+change, a rejected mark), `itlb` (no translation of the PC, or a fault for it), `page` (the
+stream left the PC's page), `pq-full`, `in-flight` (the ring empty, its room reserved by the pairs
+in flight),
 `icache-busy` (the I$ refuses the request), `icache-wait` (requests out, no bytes back yet),
 `straddle`, `reject`, `bytes-late`, `align`. A STALL row (`** <cause>`) covers each run of
 non-producing cycles with the core's top-down cause above, so each stall appears in program
@@ -2938,8 +2981,8 @@ is open in a plain write's last cycle.** The same bench:
 cache's door (§8, `fin_wr`). At HW=4 the 3.00 that remains is the FRONTEND, not the store
 path: stbench's loop is 15 instructions of mixed 16- and 32-bit code per 8 stores, and at
 8 bytes per fetch window the 32-bit stores straddle (febench's 2-byte-offset case, 0.40
-IPC). In that loop M is empty 63% of the cycles, dispatch is held 0.05%, and the new
-`SB-STORE` line of `tb_smolrv64_linux` shows the queue holding stores that cannot drain yet --
+IPC). In that loop M is empty 63% of the cycles, dispatch is held 0.05%, and the
+`SQ-DRAIN` line of `tb_smolrv64_linux` shows the queue holding stores that cannot drain yet --
 allocated at dispatch, waiting for their translate pass through a starved M -- while the LSU
 sits idle and the door is free. The 16-byte window (item 2, build K) takes it to 2.31; the
 floor is 2.00. tiny128 boot at 60 M cycles: 11,604,336 -> 13,291,779 (4a, **+14.5%**) ->

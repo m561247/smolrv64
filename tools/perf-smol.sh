@@ -8,14 +8,19 @@
 #
 #   ./perf-smol.sh td   ./prog      TOP-DOWN: level 1 closes to 100% of cycles, depth under each
 #                                   parent, slots, redirects and misses per 1k          (13)
-#   ./perf-smol.sh cpi  ./prog      CPI stack: every stall cause, the frontend breakdown,
-#                                   ROB-full, the redirect drain, redirects, D$ misses (13)
-#   ./perf-smol.sh mem  ./prog      D$/I$ traffic, loads/stores, dTLB walks            ( 8)
-#   ./perf-smol.sh br   ./prog      redirect causes + the drain                        ( 5)
-#   ./perf-smol.sh all  ./prog      everything -- MULTIPLEXED, estimates only          (24)
+#   ./perf-smol.sh tdbe ./prog      TOP-DOWN level 3: the back-end's ten causes (td_k), which
+#                                   sum to TD_BE                                        (13)
+#   ./perf-smol.sh tdfe ./prog      TOP-DOWN level 3: bad speculation's and the front-end's
+#                                   causes and the dispatch width                       (13)
+#   ./perf-smol.sh cpi  ./prog      the wait events (overlapping): every ST_* cause, the frontend
+#                                   breakdown, ROB-full, the redirect drain, D$ misses  (13)
+#   ./perf-smol.sh mem  ./prog      D$/I$ traffic, loads/stores, the dMMU walker        ( 8)
+#   ./perf-smol.sh memcpi ./prog    the memory events, queue occupancies, fast-load latency (13)
+#   ./perf-smol.sh br   ./prog      redirect causes + the drain                         ( 5)
+#   ./perf-smol.sh all  ./prog      24 of the events -- MULTIPLEXED, estimates only     (24)
 #
-# Running only the FE_* events (r0310-r0314) is NOT a CPI stack: every backend stall then
-# lands in "retire" and the tool reports it as unattributed.  Use 'cpi'.
+# Running only the FE_* events (r0310-r0314) names no back-end wait: every one lands in
+# "unattributed".  Use 'cpi', or the td sets.
 #
 # Pipe the output through tools/perf-cpi-stack.py.
 #
@@ -28,25 +33,29 @@ case "$SET" in
   # so level 1 closes by construction; TD_BE_MEM/ROB/IQ and TD_FE_LAT are subsets of their
   # parent, RD_WAIT splits bad speculation, DPATCH gives the slots. 13, the whole counter file.
   td)  EV=r0401,r0407,r0402,r0408,r0403,r0404,r0405,r0406,r0317,r0006,r0007,r0102,r0112 ;;
+  # td_k itself (the TDK_* events, 0x05nn = cycles with td_k == nn): level 1 again, and the
+  # back-end's ten causes, which the report checks sum to TD_BE.
+  tdbe) EV=r0401,r0407,r0402,r050a,r050c,r050d,r050e,r050f,r0510,r0511,r0512,r0513,r0514 ;;
+  # ...and bad speculation's two causes, the front-end's four and dispatched 1/2/3, with DPATCH.
+  tdfe) EV=r0401,r0407,r0402,r0503,r0504,r0505,r0506,r0507,r0508,r0500,r0501,r0502,r0408 ;;
   # ST_MEM..ST_ROB + FE_MMU/FE_IC/FE_ALN/FE_QUE + RD_WAIT + REDIR + DCMISS = 13, the whole
-  # counter file.  FE_BUB (r0310) is deliberately NOT here: it is the sum of the four FE_*
-  # causes, so the parser reconstructs it and we spend the counter on something we cannot
-  # derive.  r0305 (ROB full) and r0317 (the mispredict drain) are stack terms since
-  # 2026-09-05; the set that lacked them read "issue / retire" 10 points too high.
+  # counter file.  FE_BUB (r0310) is not here: it is the sum of the four FE_* causes, so the
+  # report reconstructs it and the counter goes to something it cannot derive.
   cpi) EV=r0300,r0301,r0302,r0303,r0304,r0305,r0311,r0312,r0313,r0314,r0317,r0005,r0102 ;;
-  # + the dTLB: first-level misses (r0104) and cycles in its second level or walking (r0318), a subset of ST_MEM.
+  # + the dMMU walker: its starts (r0104) and its busy cycles (r0318).
   mem) EV=r0003,r0004,r0100,r0102,r0110,r0112,r0104,r0318 ;;
-  # What ST_MEM is made of (2026-09-17): the door, the miss wait, the alias blocks, the reorders,
-  # the wrong-path kills, the device waits and the queue occupancies, with loads and misses beside.
-  memcpi) EV=r0300,r0319,r031a,r031b,r031c,r031d,r031e,r031f,r0320,r0321,r0322,r0003,r0102 ;;
+  # The memory events: the port, the door, the alias blocks, the reorders, the dropped landings,
+  # the device waits, the queue occupancies, and fast loads in flight with their starts (their
+  # ratio is the mean fast-load latency), with loads and misses beside.
+  memcpi) EV=r0319,r031a,r031b,r031c,r031d,r031e,r031f,r0320,r0321,r0322,r0323,r0003,r0102 ;;
   br)  EV=r0005,r0006,r0007,r0008,r0317 ;;
   # The dispatch hold (ST_DSP) broken down: scheduler / rename / store queue / load queue /
-  # serializing, with the ROB and the redirects beside them (2026-09-07).
+  # serializing, with the ROB and the redirects beside them.
   hold) EV=r0304,r0305,r0306,r0307,r0308,r0309,r030a,r0005 ;;
   all) EV=r0003,r0004,r0005,r0006,r0007,r0008,r0100,r0102,r0104,r0110,r0112,r0300,r0301,r0302,r0303,r0304,r0305,r0310,r0311,r0312,r0313,r0314,r0317,r0318
        echo "warning: 24 raw events > 13 counters -- perf will multiplex and every count is" >&2
        echo "         a scaled ESTIMATE.  The CPI-stack residual will not close.  Prefer 'cpi'." >&2 ;;
-  *)   echo "usage: $0 {td|cpi|mem|memcpi|br|hold|all} COMMAND..." >&2; exit 2 ;;
+  *)   echo "usage: $0 {td|tdbe|tdfe|cpi|mem|memcpi|br|hold|all} COMMAND..." >&2; exit 2 ;;
 esac
 
 # No sudo if the admin lowered perf_event_paranoid (see tools/perf-smol-setup.sh); fall back

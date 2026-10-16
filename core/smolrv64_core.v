@@ -23,28 +23,21 @@
    P``rs1_v, P``rs2_v, P``rs3_v, P``ord, P``sq_tag, P``lq_idx}
 `default_nettype none
 
-// In-order pipelined RVA22S64 core: F | X | M.
+// smolrv64_core: an out-of-order RVA22S64 core, IW (3) instructions a cycle (docs/SmolRV64-Spec.md
+// is its normative description: geometry, latencies, what stalls and what restarts).
 //
-//   F : PC -> iMMU -> I$ window -> aligner -> RVC expand -> decode   (smolrv64_frontend)
-//   X : regfile read + M-bypass -> exec_alu (ALU/AGU/compare) -> branch_unit
-//   M : LSU (dMMU + D$) | csr_file | trap | redirect | regfile write
-//   (multiplies: the lanes; divides: the MD stage, which the lanes hand their operands)
+//   frontend : the fetch ring and the predictor at the fetch stream, decode before the
+//              decoupling queue; groups form at the queue head and dispatch from the IR
+//   rename   : the maps and per-shard free lists (a physical register names its shard)
+//   lanes    : IW uniform lanes, each a scheduler, its integer register-file shard, an ALU,
+//              a multiplier, branch resolution and address generation; landing buffers
+//   F        : the FP FIFO and scheduler in front of the CVFPU; the MD stage divides
+//   memory   : M fills the load and store queues; the queues' port reaches the D$; head ops
+//              (AMO, LR/SC, CBO) run at the ROB head; the SYSQ runs system and CSR ops there
+//   ROB      : rows of IW, commit in order, the restart walk on a mispredict or a trap
 //
-// M IS THE ONLY COMMIT POINT. Every architectural side effect happens there and
-// nowhere else, which is what makes traps precise for free: when an instruction is
-// in M nothing older can still fault (older ones have retired) and nothing younger
-// has changed anything (X and F hold no state). All the OoO core's recovery
-// machinery -- checkpoints, replay-to-solo fault delivery, the illegal/data-fault
-// latches, the AMO dispatch gap, rollback priority -- collapses into one mux here.
-//
-// STALLS. Anything multi-cycle (D$ access or miss, page-table walk)
-// freezes the whole pipe: M holds its instruction until `m_done`, X holds
-// because it cannot hand off, F holds because `accept` is low. One bypass level
-// (M -> X) covers every RAW hazard, because an instruction two ahead has already
-// written the regfile.
-//
-// SERIALIZATION. A CSR/system/fence op lets nothing follow it into X until it has
-// left M, so CSR values, privilege, satp and mstatus.FS are never read stale.
+// Every cycle is charged to one top-down cause (td_k below; SmolRV64-Spec 11.2), the same
+// classifier the board's counters and the testbench's TOPDOWN-SIM read.
 `ifndef SMOLRV64_HW
  `define SMOLRV64_HW 8                 // fetch window halfwords: 16 bytes, the shipping build since 2026-09-05 (4 before)
 `endif
@@ -1694,11 +1687,6 @@ module smolrv64_core
       .f_v(sq_f_v), .f_rob(sq_f_rob), .f_fc(sq_f_fc), .f_pc(sq_f_pc), .f_seq(sq_f_seq),
       .occupancy(sq_occ), .flush(redirect), .kd_v(rob_kd_v), .kd(rob_kd), .kmask(sq_kmask));
 
-   // Instrumentation for "did a load actually get reordered past a store". A load STARTS
-   // its access only when ~ld_block, so a start with an older store still live is exactly
-   // one reordering that the old in-order machine could not have done.
-   wire sq_ld_reorder = lq_x_take & sq_ld_older;
-
    // ------------------------------------------------------------------- LOAD QUEUE
    wire                lq_d_ready, lq_x_v, lq_x_signed, lq_x_fp, lq_x_unc, lq_x_head, lq_l_rd_v, lq_b_ok;
    // store-to-load forwarding (smolrv64_sq l_fwd / f_data, smolrv64_lq x_fwd, smolrv64_lsu fw_*)
@@ -2135,7 +2123,8 @@ module smolrv64_core
    // lsu_started is the point after which a load cannot fault -- what lets M let go of it
    // without a ROB walk. Not consumed yet: cutting m_done over to it is the next step.
    wire        lsu_started;
-   wire        lsu_done, lsu_done_acc, lsu_fault, lsu_idle, lsu_xo_early, lsu_ld_busy;
+   wire        lsu_done, lsu_done_acc, lsu_fault, lsu_idle, lsu_xo_early, lsu_ld_sent, lsu_ld_fkill;
+   wire [5:0]  lsu_ld_infl;
    wire [55:0] lsu_cos_pa;  wire [1:0] lsu_cos_kind;   // cosim memory-effect capture
    wire [63:0] lsu_cos_data; wire [3:0] lsu_cos_size;
    wire [63:0] lsu_rd_val, lsu_fault_tval;
@@ -2205,7 +2194,7 @@ module smolrv64_core
       .mem_wready(dmem_wready), .mem_waccept(dmem_waccept), .mem_wroom(dmem_wroom),
       .cos_pa(lsu_cos_pa), .cos_kind(lsu_cos_kind), .cos_data(lsu_cos_data), .cos_size(lsu_cos_size),
       .started(lsu_started), .done(lsu_done), .done_acc(lsu_done_acc), .rd_val(lsu_rd_val), .fault(lsu_fault),
-      .fault_cause(lsu_fault_cause), .fault_tval(lsu_fault_tval), .ld_busy(lsu_ld_busy),
+      .fault_cause(lsu_fault_cause), .fault_tval(lsu_fault_tval), .ld_infl(lsu_ld_infl), .ld_sent(lsu_ld_sent), .ld_fkill(lsu_ld_fkill),
       .err(lsu_err), .idle(lsu_idle));
    // FENCE.I's drain: every store older than it handed to the D$. The store queue is senior to
    // retirement, so at the fire a committed store may still wait in it; after the redirect it holds
@@ -2820,22 +2809,18 @@ module smolrv64_core
    wire [3:0]  xtrap_cause = m_lsu_fc;
    wire [63:0] xtrap_tval  = lsu_fault_tval;
 
-   // ---- stall attribution: turn CPI into a CPI stack ----
-   // The pipe fails to retire on a given cycle for exactly one of two reasons: M is
-   // holding an instruction that has not completed (charged to the unit it is waiting
-   // on), or X had no instruction to give (a frontend bubble, sub-attributed to the
-   // iMMU walking vs the I$ having no window). `st_ser` is the third case: M is free
-   // but a serializing op in flight keeps the frontend from handing anything over.
+   // ---- stall attribution: the ST_* events ----
+   // Each says when it fires, and they overlap: a cycle can wait on a load and an FP result at
+   // once. The exclusive charge of every cycle is the top-down classifier (td_k) below.
    // REDEFINED when the LSU and the FPU stopped blocking M. The wait did not go away, it
    // MOVED: M advances and the consumer is held in X instead, which landed in `st_ser`
    // (accept's ~d_hold term) and made a dependent stall read as a serializing op. Each
    // dependent wait is now charged to the unit that owns the register it is waiting for,
-   // so the stack stays additive and comparable across the change. st_m and m_advance are
-   // exact complements, so the two halves of each bucket cannot double-count.
-   wire st_m      = m_valid & ~m_done;              // M stalled at all
-   // The dependent wait no longer happens in X -- it happens in the scheduler, which
-   // reports WHICH register its oldest entry is blocked on. A physical register carries its
-   // shard in the top bits, so the stall is charged to the unit that owns the result.
+   // so the stack stays additive and comparable across the change.
+   wire st_m      = m_valid & ~m_done;              // M holds an op: a head op (AMO, LR/SC, CBO) not done
+   // A dependent wait happens in a scheduler, which reports which register its lowest-slot
+   // waiting entry is blocked on (the scheduler compares no age). A physical register carries
+   // its shard in the top bits, so the stall is charged to the unit that owns the result.
    // ---- DEPENDENCY ATTRIBUTION: per scheduler, not through a priority mux -------------
    // `iq_blk_pr` is `rl_blk_v ? rl_blk_pr : rf_blk_v ? rf_blk_pr : ri_blk_pr` -- a priority
    // mux built when there was one scheduler and kept when there were three. With three, an
@@ -2888,7 +2873,7 @@ module smolrv64_core
             if ((lb_live[k*RN_PBITS +: RN_PBITS] == p) & (p != {RN_PBITS{1'b0}})) ld_dst = 1'b1;
       end
    endfunction
-   reg  dep_ld_l, dep_fp_l;                     // a lane's oldest blocked operand waits on a load / FP
+   reg  dep_ld_l, dep_fp_l;                     // a lane's reported blocked operand waits on a load / FP
    integer dpk;
    always @* begin
       dep_ld_l = 1'b0;  dep_fp_l = 1'b0;
@@ -2916,9 +2901,9 @@ module smolrv64_core
    reg  st_mul;                                     // a multiply in flight in a lane
    integer smk;
    always @* begin st_mul = 1'b0; for (smk = 0; smk < NL; smk = smk + 1) st_mul = st_mul | l_m1[smk] | l_m2[smk]; end
-   // ST_FPU watches stage F: `f_valid & ~fp_disp` is stage F holding an op the unit will not
-   // yet take. (~f_advance is the same expression; written out for clarity.)
-   wire st_fpu    = (f_valid & ~fp_disp) | dep_fp;  // ...on the FPU
+   // ST_FPU watches stage F: `f_valid & ~f_advance` is stage F holding an op it cannot advance
+   // (the CVFPU will not take it yet, or an in-core op's result register is full).
+   wire st_fpu    = (f_valid & ~f_advance) | dep_fp;  // ...on the FPU
    // ~st_rob: the two are now disjoint, so the stack does not count a ROB-full cycle
    // twice under two different names.
    // THE DISPATCH HOLD, NAMED (2026-09-07). `st_ser` was this whole residual -- M could advance,
@@ -2945,7 +2930,7 @@ module smolrv64_core
    // credit the IR is empty although the queue is not: that refill cycle is the stall's (td_rf),
    // and takes the previous cycle's backend cause.
    reg  td_pbe;
-   wire ir_mt     = ~st_m & ~d_valid & ~hd_wait & ~redirect;   // X starved, M not already stalled
+   wire ir_mt     = ~st_m & ~d_valid & ~hd_wait & ~redirect;   // the IR is empty and nothing behind it waits on a credit
    wire td_rf     = ir_mt & fe_hd_v & td_pbe;
    wire fe_bub    = ir_mt & ~td_rf;
    wire fe_mmu    = fe_bub & ~immu_ready;           // ...iMMU walking
@@ -2990,29 +2975,36 @@ module smolrv64_core
    // backend did, and a backend rewrite would move one number. Each of these is a fact the
    // queues already compute, registered here like the rest; none is in any completion cone.
    wire mem_hitser    = lq_x_v & ~lq_x_take;                 // a ready load candidate the door did not take
-   wire mem_ldinfl    = lsu_ld_busy;                          // a load access in flight (hit ~3 cycles; the rest is miss wait)
-   wire mem_stdoor    = dmem_wen & ~dmem_wroom & ~dmem_waccept;   // a store at the door, not taken
-   wire mem_alias_unk = sq_ld_block &  sq_l_block_unk_q[lq_x_idx];   // blocked: an older store's address is unknown
-   wire mem_alias_ovl = sq_ld_block & ~sq_l_block_unk_q[lq_x_idx];   // blocked: a known older store overlaps
-   wire mem_reord     = sq_ld_reorder;                        // a load issued past an uncommitted older store (the payoff)
-   wire mem_wpkill    = lsu_pt_ld_done & lsu_pt_ld_kill;      // a wrong-path load's landing killed after its access ran
+   wire mem_ldsent    = lsu_ld_sent;                          // a fast-path load starts (MEM_LDINFL's count is the LSU's lsu_ld_infl)
+   wire mem_stdoor    = dmem_wen & ~dmem_wroom & ~dmem_waccept;   // a write at the D$ door that has no room and no device acknowledge
+   // an alias-blocked candidate, split by whether a blocked load (wait bit set) waits on an older
+   // store's unknown address: the per-entry vectors, so the split is the whole queue's
+   wire al_unk_any    = |(lq_e_block & lq_e_wt & sq_l_block_unk_q);
+   wire mem_alias_unk = sq_ld_block &  al_unk_any;
+   wire mem_alias_ovl = sq_ld_block & ~al_unk_any;
+   wire mem_reord     = lq_x_take & sq_l_older[lq_x_idx];     // the port takes a load with an older store live in the store queue
+   wire mem_wpkill    = (lsu_pt_ld_done & lsu_pt_ld_kill) | lsu_ld_fkill;   // a load's landing dropped by a kill that came while it ran
    wire mem_devwait   = lq_x_devwait;                         // a device load waiting to be the head
    // ---- TOP-DOWN (docs/PLAN-2026-09-20-topdown-counters.md, Variant A; SmolRV64-Spec 11.2) -------
    // Every cycle is exactly ONE of bad speculation, front-end, back-end or dispatching, by
    // construction: a redirect or a resolved-but-waiting restart is bad speculation; otherwise an
-   // empty decode (fe_bub, which excludes st_m and d_valid) is front-end; otherwise M held or an
-   // instruction present and not taken is back-end; what remains dispatched 0..3. td_k names the
+   // empty IR (fe_bub, which excludes st_m and d_valid) is front-end; otherwise, unless the IR's
+   // group dispatches, M held, the queue head without a credit or a group held in the IR is
+   // back-end; what remains dispatched 1..IW. td_k names the
    // cause, deepest first, in the order the testbench and the pipe views print it:
-   //   0-2 dispatched 1-3, 21 dispatched 0 (a squashed take)   3 redirect   4 drain
-   //   5 iMMU  6 no fetch bytes  7 no whole insn  8 queue empty  9 other front-end
-   //   10 M on memory  11 M other  12 ROB full  13 wait on a load  14 wait on FP  15 scheduler full
+   //   0-2 dispatched 1-3, 22 dispatched 4 (21: dispatched 0, cannot happen)   3 redirect   4 drain
+   //   5 iMMU  6 no fetch bytes  7 no whole insn  8 queue empty  (9 other front-end: cannot happen)
+   //   10 M holds a head op  (11 M other: cannot happen)  12 ROB full  13 wait on a load  14 wait on FP  15 scheduler full
    //   16 rename  17 SQ full  18 LQ full  19 serializing  20 held otherwise
    reg  [4:0] td_pk;
    wire       td_bs  = redirect | rd_wait;
    wire       td_fe  = ~td_bs & fe_bub;
-   wire       td_be  = ~td_bs & (st_m | hd_wait | (d_valid & ~d_take) | td_rf);   // M held, the queue head without credit, a frozen IR, or the refill after
+   // A cycle the IR's group dispatches is a dispatching cycle, whatever waits behind it: the queue
+   // head's credit (hd_wait) is the NEXT group's, so it must not charge this one to the back-end.
+   wire       td_disp = d_valid & d_take;
+   wire       td_be  = ~td_bs & ~td_disp & (st_m | hd_wait | (d_valid & ~d_take) | td_rf);   // M held, the queue head without credit, a frozen IR, or the refill after
    wire [3:0] td_n4  = ones_nl(s_takev);
-   wire [1:0] td_nd  = td_n4[1:0];
+   wire [2:0] td_nd  = td_n4[2:0];
    reg  [4:0] td_k;
    always @* begin
       if (td_bs)      td_k = redirect ? 5'd3 : 5'd4;
@@ -3020,8 +3012,14 @@ module smolrv64_core
       else if (td_be) td_k = td_rf ? td_pk : st_m ? (m_mem_op ? 5'd10 : 5'd11)
                            : st_rob ? 5'd12 : dep_ld ? 5'd13 : dep_fp ? 5'd14 : st_iq ? 5'd15
                            : st_rn ? 5'd16 : st_sq ? 5'd17 : st_lq ? 5'd18 : st_srz ? 5'd19 : 5'd20;
-      else            td_k = (td_nd == 2'd0) ? 5'd21 : {3'b0, td_nd} - 5'd1;
+      else            td_k = (td_nd == 3'd0) ? 5'd21 : (td_nd == 3'd4) ? 5'd22 : {2'b0, td_nd} - 5'd1;
    end
+   // Causes the classifier names but the core cannot produce: fe:other (FE_MMU..FE_QUE cover
+   // FE_BUB), M-other (M takes only queue loads and stores and head ops, all memory ops) and a
+   // dispatching cycle with nothing dispatched (a dispatching cycle has the IR's group taken).
+   always @(posedge clk)
+      if (!reset && (td_k == 5'd9 || td_k == 5'd11 || td_k == 5'd21))
+         $fatal(1, "smolrv64_core: top-down cause td_k=%0d, which cannot happen (fe:other, M-other, dispatched 0)", td_k);
    initial begin td_pbe = 1'b0; td_pk = 5'd0; end
    always @(posedge clk) begin
       td_pbe <= ~reset & (td_k >= 5'd10) & (td_k <= 5'd20);
@@ -3034,7 +3032,7 @@ module smolrv64_core
    wire td_fe_lat = (td_k == 5'd5)  | (td_k == 5'd6);                        // front-end latency: iMMU walk, no bytes
    wire [43:0] hpm_ev = {td_fe_lat, td_be_iq, td_be_rob, td_be_mem, td_be,
                          mem_devwait, mem_wpkill, mem_reord, mem_alias_ovl, mem_alias_unk,
-                         mem_stdoor, mem_ldinfl, mem_hitser,
+                         mem_stdoor, mem_ldsent, mem_hitser,
                          st_srz, st_lq, st_sq, st_rn, st_iq,
                          lsu_dtlb_walk_beg, lsu_dtlb_walking, rd_wait, st_rob, td_fe, td_bs,
                          fe_que, fe_aln, red_trap, red_jalr, red_br,
@@ -3049,7 +3047,7 @@ module smolrv64_core
 
    // FMAX: the Zihpm event bus is REGISTERED. hpm_ev -> hpm_inc -> a 64-bit mhpmcounter
    // carry chain was 823 of 3113 failing endpoints at 6 ns and the WORST family in the
-   // design (m_addr -> ... -> u_csr/mhpmcounter[12][63]).  These 15 bits are pure
+   // design (m_addr -> ... -> u_csr/mhpmcounter[12][63]).  These bits are pure
    // instrumentation and cost nothing to delay: a counter is read through a CSR many
    // cycles later, and no software can observe which cycle an event landed on.  They only
    // became timing-critical when 9a6f8de3 correctly un-gated perf_access/perf_miss from
@@ -3068,23 +3066,26 @@ module smolrv64_core
    // 10x CARRY8). mhpmcounterN is instrumentation by the same argument as hpm_ev above --
    // read through a CSR many cycles later, and no software can observe which cycle an
    // event landed on -- so it takes the delayed copy and minstret keeps the live one.
-   // Registering it here rather than in csr_file also keeps the src/ OoO core, which
-   // shares that module, bit-identical: it passes its live count to both ports.
    // Two stages: the first has no reset or initial value, so synthesis retiming may pull it back
    // into the attribution cone (the top-down events read M's done, the redirect and the door).
    reg [43:0] hpm_ev_p, hpm_ev_q;
-   reg [1:0]  hpm_disp_q;                 // instructions dispatched this cycle (DPATCH)
+   reg [2:0]  hpm_disp_q;                 // instructions dispatched this cycle (DPATCH)
+   reg [4:0]  hpm_tdk_q;                  // this cycle's top-down cause (the TDK_* events)
    reg [5:0]  hpm_lqocc_q, hpm_sqocc_q;   // queue occupancies, per cycle (MEM_LQOCC / MEM_SQOCC)
+   reg [5:0]  hpm_ldinfl_q;               // fast-path loads in flight, per cycle (MEM_LDINFL)
    reg [5:0]  hpm_ret_q;
    // The occupancies as the 6-bit fields the PMU and core_dbg carry: a queue of up to 32 entries.
    wire [5:0] lq_occ6 = lq_occ, sq_occ6 = sq_occ;
    initial if (LQ_N > 32 || SQ_N > 32)
       $fatal(1, "smolrv64_core: LQ_N=%0d SQ_N=%0d; the 6-bit occupancy fields count to 32", LQ_N, SQ_N);
-   initial begin hpm_ev_q = 44'd0; hpm_ret_q = 6'd0; hpm_lqocc_q = 6'd0; hpm_sqocc_q = 6'd0; hpm_disp_q = 2'd0; end
+   initial begin hpm_ev_q = 44'd0; hpm_ret_q = 6'd0; hpm_lqocc_q = 6'd0; hpm_sqocc_q = 6'd0; hpm_disp_q = 3'd0;
+                 hpm_tdk_q = 5'd0; hpm_ldinfl_q = 6'd0; end
    always @(posedge clk) begin
       hpm_ev_p  <= hpm_ev;
       hpm_ev_q  <= reset ? 44'd0 : hpm_ev_p;
-      hpm_disp_q <= reset ? 2'd0 : td_nd;
+      hpm_disp_q <= reset ? 3'd0 : td_nd;
+      hpm_tdk_q  <= reset ? 5'd0 : td_k;
+      hpm_ldinfl_q <= reset ? 6'd0 : lsu_ld_infl;
       hpm_lqocc_q <= reset ? 6'd0 : lq_occ6;
       hpm_sqocc_q <= reset ? 6'd0 : sq_occ6;
       hpm_ret_q <= reset ? 6'd0 : {2'd0, ones_nl(retire)};
@@ -3121,7 +3122,8 @@ module smolrv64_core
       // in its second cycle at the ROB head (m_head_q), by which time every older retirement
       // has been counted; csr_file drops the CSR op's own retirement after a minstret write.
       .hw_ip(hw_ip), .mtime(mtime), .retire_cnt(hpm_ret_q),
-      .hpm_retire_cnt(hpm_ret_q), .hpm_ev(hpm_ev_q), .hpm_lqocc(hpm_lqocc_q), .hpm_sqocc(hpm_sqocc_q), .hpm_disp(hpm_disp_q),
+      .hpm_retire_cnt(hpm_ret_q), .hpm_ev(hpm_ev_q), .hpm_lqocc(hpm_lqocc_q), .hpm_sqocc(hpm_sqocc_q), .hpm_ldinfl(hpm_ldinfl_q),
+      .hpm_disp(hpm_disp_q), .hpm_tdk(hpm_tdk_q),
       .irq_v(csr_irq_v), .irq_cause(csr_irq_cause),
       // csr_file's ILA debug bus. The SoC puts no ILA on the CSR file, so these
       // outputs go nowhere -- named and left EMPTY on purpose. PINMISSING gates this build

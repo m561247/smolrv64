@@ -137,8 +137,9 @@ timing:
 
 # Device utilization from the newest impl checkpoint. "Is it full?" is the first question
 # before more critical-path surgery -- see rule I7.
+#   make util [DCP=<checkpoint>] [OUT=<dir>]
 util:
-	$(VIVADO) $(VFLAGS) -source report_util.tcl
+	$(VIVADO) $(VFLAGS) -source report_util.tcl -tclargs '$(DCP)' '$(OUT)'
 
 # Where each block physically sits, by clock region. The input to any floorplanning.
 place-report:
@@ -173,10 +174,16 @@ worst:
 	$(VIVADO) $(VFLAGS) -source report_worst.tcl -tclargs $(DCP) $(if $(N),$(N),10)
 
 # The worst routed path between two cell groups, pin by pin (the census names the family).
-#   make path FROM=<cell glob> TO=<cell glob> [N=1]
+#   make path FROM=<cell glob> TO=<cell glob> [N=1] [DCP=<checkpoint>]
 path:
-	@test -n "$(FROM)" -a -n "$(TO)" || { echo "usage: make path FROM=<cell glob> TO=<cell glob> [N=1]"; exit 2; }
-	$(VIVADO) $(VFLAGS) -source report_path.tcl -tclargs '$(FROM)' '$(TO)' $(if $(N),$(N),1)
+	@test -n "$(FROM)" -a -n "$(TO)" || { echo "usage: make path FROM=<cell glob> TO=<cell glob> [N=1] [DCP=<checkpoint>]"; exit 2; }
+	$(VIVADO) $(VFLAGS) -source report_path.tcl -tclargs '$(FROM)' '$(TO)' $(if $(N),$(N),1) '$(DCP)'
+
+# The worst path of each family in a file of "<from glob> <to glob>" lines, in one session.
+#   make paths PAIRS=<file> [DCP=<checkpoint>] [OUT=paths.txt]
+paths:
+	@test -n "$(PAIRS)" || { echo "usage: make paths PAIRS=<file> [DCP=<checkpoint>] [OUT=paths.txt]"; exit 2; }
+	$(VIVADO) $(VFLAGS) -source report_paths.tcl -tclargs '$(PAIRS)' '$(DCP)' '$(OUT)'
 
 # Last-mile timing closure: targeted post-route phys_opt on the routed checkpoint
 # (no re-place/route). Writes the .bit iff it reaches WNS >= 0, and banks it like `make bit`

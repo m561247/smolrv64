@@ -12,117 +12,117 @@
   {
     "EventName": "LOAD",
     "EventCode": "0x0003",
-    "BriefDescription": "Load completions (LSU)"
+    "BriefDescription": "Load landings: a plain or FP load's data written back, fast or slow path or forwarded (a wrong-path or replayed landing included; AMO and LR not)"
   },
   {
     "EventName": "STORE",
     "EventCode": "0x0004",
-    "BriefDescription": "Store completions (LSU)"
+    "BriefDescription": "Stores the store queue hands to the LSU after commit (AMO, SC and CBO writes not)"
   },
   {
     "EventName": "REDIR",
     "EventCode": "0x0005",
-    "BriefDescription": "Pipeline restart: a squash at the ROB head, or a mispredict's release"
+    "BriefDescription": "Pipeline restarts: a squash at the ROB head, or a mispredict's release (decode resteers not)"
   },
   {
     "EventName": "DCACC",
     "EventCode": "0x0100",
-    "BriefDescription": "D$ line lookups resolved (hit or miss)"
+    "BriefDescription": "D$ requests taken: a read at its door (loads and page-table-walk reads) or a write into its store queue"
   },
   {
     "EventName": "DCMISS",
     "EventCode": "0x0102",
-    "BriefDescription": "D$ line lookups that missed"
+    "BriefDescription": "D$ line fills started (an MSHR allocated) by a load, store, cbo.zero or page-table-walk read; a join of a fill in flight not"
   },
   {
     "EventName": "ICACC",
     "EventCode": "0x0110",
-    "BriefDescription": "I$ line lookups resolved (hit or miss)"
+    "BriefDescription": "I$ requests taken, one 16-byte pair each (run-ahead and wrong-path ones included)"
   },
   {
     "EventName": "ICMISS",
     "EventCode": "0x0112",
-    "BriefDescription": "I$ line lookups that missed"
+    "BriefDescription": "I$ requests whose lookup misses the virtual tag (a physical-tag reconcile, a prefetch-buffer hit or an L2 fill follows)"
   },
   {
     "EventName": "ST_MEM",
     "EventCode": "0x0300",
-    "BriefDescription": "M stalled on the LSU, + X held for a pending load"
+    "BriefDescription": "M holds an unfinished AMO, LR, SC or CBO, + no lane issued while a scheduler's lowest-slot waiting entry needs an integer load's, AMO's or CSR read's result"
   },
   {
     "EventName": "ST_DIV",
     "EventCode": "0x0301",
-    "BriefDescription": "the MD stage holds a divide (occupancy)"
+    "BriefDescription": "The MD stage holds a divide (occupancy)"
   },
   {
     "EventName": "ST_MUL",
     "EventCode": "0x0302",
-    "BriefDescription": "a multiply in flight in a lane (occupancy)"
+    "BriefDescription": "A multiply in flight in a lane (occupancy)"
   },
   {
     "EventName": "ST_FPU",
     "EventCode": "0x0303",
-    "BriefDescription": "M stalled on the CVFPU, + X held for a pending FP result"
+    "BriefDescription": "Stage F holds an op it cannot advance, + no lane issued while a scheduler's lowest-slot waiting entry needs an FP op's, FP load's, FP-port or divide result"
   },
   {
     "EventName": "ST_DSP",
     "EventCode": "0x0304",
-    "BriefDescription": "the queue head without a credit, not the ROB: the sum of ST_IQ..ST_SRZ"
+    "BriefDescription": "The queue head waits for a credit other than the ROB's while M can advance and no load or FP dependency holds issue: ST_IQ + ST_RN + ST_SQ + ST_LQ + ST_SRZ"
   },
   {
     "EventName": "ST_ROB",
     "EventCode": "0x0305",
-    "BriefDescription": "the queue head waits for ROB room"
+    "BriefDescription": "The queue head waits for ROB room"
   },
   {
     "EventName": "ST_IQ",
     "EventCode": "0x0306",
-    "BriefDescription": "the queue head: its scheduler, or a divide's MD stage, has no credit"
+    "BriefDescription": "The queue head: lane A's scheduler, the FP FIFO and scheduler, the head-op register or the divide credit is full"
   },
   {
     "EventName": "ST_RN",
     "EventCode": "0x0307",
-    "BriefDescription": "the queue head: a rename shard is below LOWAT"
+    "BriefDescription": "The queue head: a rename shard is below LOWAT"
   },
   {
     "EventName": "ST_SQ",
     "EventCode": "0x0308",
-    "BriefDescription": "the queue head: no store-queue credit"
+    "BriefDescription": "The queue head holds a store and has no store-queue credit (none while a head op is in flight or in the IR)"
   },
   {
     "EventName": "ST_LQ",
     "EventCode": "0x0309",
-    "BriefDescription": "the queue head: no load-queue credit"
+    "BriefDescription": "The queue head holds a load and has no load-queue credit (none while a head op is in flight or in the IR)"
   },
   {
     "EventName": "ST_SRZ",
     "EventCode": "0x030a",
-    "BriefDescription": "the queue head: a serializing op drains or is in flight (the rest of ST_DSP)"
+    "BriefDescription": "The queue head: a serializing op drains or is in flight, a CSR op waits for the one before it, or a CBO waits for older addresses (the rest of ST_DSP)"
   },
   {
     "EventName": "FE_BUB",
     "EventCode": "0x0310",
-    "BriefDescription": "X idle: frontend supplied no instruction"
+    "BriefDescription": "The IR is empty, the queue head waits for no credit, M is free, no redirect is live and no back-end refill is due: FE_MMU + FE_IC + FE_ALN + FE_QUE"
   },
   {
     "EventName": "FE_MMU",
     "EventCode": "0x0311",
-    "BriefDescription": "X idle: because the iMMU was walking"
+    "BriefDescription": "FE_BUB while the iMMU cannot translate the fetch address (a second-level lookup, a walk, or a walk held behind a weak branch)"
   },
   {
     "EventName": "FE_IC",
     "EventCode": "0x0312",
-    "BriefDescription": "X idle: because the fetch window was empty"
+    "BriefDescription": "FE_BUB while the fetch window is empty"
   },
   {
     "EventName": "FE_ALN",
     "EventCode": "0x0313",
-    "BriefDescription": "X idle: had bytes but no complete instruction"
+    "BriefDescription": "FE_BUB while fetch has bytes but no complete instruction"
   },
   {
     "EventName": "FE_QUE",
     "EventCode": "0x0314",
-    "BriefDescription": "X idle: had an instruction; decoupling queue empty"
+    "BriefDescription": "FE_BUB while fetch has an instruction that has not reached the IR (queue latency or a dispatch freeze)"
   },
   {
     "EventName": "RED_BR",
@@ -137,7 +137,7 @@
   {
     "EventName": "RED_TRP",
     "EventCode": "0x0008",
-    "BriefDescription": "Redirect: trap / exception / system op"
+    "BriefDescription": "Redirect: an exception, an interrupt, a dispatch-time or queue-entry fault, or a memory-ordering replay (xRET, sfence.vma, CSR-write redirects and fence.i not)"
   },
   {
     "EventName": "RD_WAIT",
@@ -147,52 +147,52 @@
   {
     "EventName": "DT_WALK",
     "EventCode": "0x0318",
-    "BriefDescription": "Data MMU busy: its second-level lookup or a walk (cycles; inside ST_MEM)"
+    "BriefDescription": "dMMU walker busy (cycles): a second-level lookup or a walk, for a queued load or store or for M's head op"
   },
   {
     "EventName": "DTLB_MISS",
     "EventCode": "0x0104",
-    "BriefDescription": "dTLB first-level miss: a second-level lookup began, and a page-table walk when that misses"
+    "BriefDescription": "dMMU walker starts: a request the 64-entry first level does not hold (a second-level lookup, and a walk when that misses)"
   },
   {
     "EventName": "MEM_HITSER",
     "EventCode": "0x0319",
-    "BriefDescription": "a ready load candidate the LSU door did not take"
+    "BriefDescription": "The LQ has a ready candidate the LSU port does not take (a store has the port, the FSM is busy, the D$ read door is full, or its tag's response is due)"
   },
   {
     "EventName": "MEM_LDINFL",
     "EventCode": "0x031a",
-    "BriefDescription": "a load access in flight (hit ~3 cycles each; the rest is miss wait)"
+    "BriefDescription": "Load reads in flight at the D$, summed per cycle (fast-path tags awaiting their response, and the FSM's load): / MEM_LDSENT is the mean load-read latency"
   },
   {
     "EventName": "MEM_STDOOR",
     "EventCode": "0x031b",
-    "BriefDescription": "a store at the D$ door, unaccepted"
+    "BriefDescription": "The LSU presents a write (a store, an AMO's write, a CBO) that the D$ store queue has no room for and no device acknowledges"
   },
   {
     "EventName": "MEM_ALIAS_UNK",
     "EventCode": "0x031c",
-    "BriefDescription": "load candidate blocked: an older store's address is unknown"
+    "BriefDescription": "An LQ candidate is alias-blocked while a blocked load with its wait bit set waits on an older store whose address is unknown"
   },
   {
     "EventName": "MEM_ALIAS_OVL",
     "EventCode": "0x031d",
-    "BriefDescription": "load candidate blocked: a known older store overlaps"
+    "BriefDescription": "An LQ candidate is alias-blocked and no blocked load waits on an unknown older address (a known older store overlaps)"
   },
   {
     "EventName": "MEM_REORD",
     "EventCode": "0x031e",
-    "BriefDescription": "loads issued past an uncommitted older store (count)"
+    "BriefDescription": "Loads the port takes while an older store, committed or not, is live in the store queue (count)"
   },
   {
     "EventName": "MEM_WPKILL",
     "EventCode": "0x031f",
-    "BriefDescription": "wrong-path loads killed after their access ran (count)"
+    "BriefDescription": "Loads whose landing is dropped because a kill arrived while their access ran, fast or slow path (count)"
   },
   {
     "EventName": "MEM_DEVWAIT",
     "EventCode": "0x0320",
-    "BriefDescription": "a device load waiting to be the ROB head"
+    "BriefDescription": "No LQ candidate is ready and an unblocked device load waits to be the ROB head"
   },
   {
     "EventName": "MEM_LQOCC",
@@ -212,36 +212,156 @@
   {
     "EventName": "TD_BE",
     "EventCode": "0x0402",
-    "BriefDescription": "top-down: back-end (M held, or the queue head without a credit)"
+    "BriefDescription": "top-down: back-end (M held, the queue head without a credit, a frozen IR, or the refill cycle after one)"
   },
   {
     "EventName": "TD_BE_MEM",
     "EventCode": "0x0403",
-    "BriefDescription": "top-down: back-end waiting on memory (M on a memory op, or a load result)"
+    "BriefDescription": "top-down: back-end waiting on memory (td_k 10 or 13: M on a head op, or a dependency on an integer load, AMO or CSR read)"
   },
   {
     "EventName": "TD_BE_ROB",
     "EventCode": "0x0404",
-    "BriefDescription": "top-down: back-end, no ROB room"
+    "BriefDescription": "top-down: back-end, no ROB room (td_k 12)"
   },
   {
     "EventName": "TD_BE_IQ",
     "EventCode": "0x0405",
-    "BriefDescription": "top-down: back-end, no scheduler or load/store queue room"
+    "BriefDescription": "top-down: back-end, no scheduler, store-queue or load-queue credit (td_k 15, 17, 18)"
   },
   {
     "EventName": "TD_FE_LAT",
     "EventCode": "0x0406",
-    "BriefDescription": "top-down: front-end latency (iMMU walking, or no fetch bytes)"
+    "BriefDescription": "top-down: front-end latency (td_k 5, 6: iMMU, or no fetch bytes)"
   },
   {
     "EventName": "TD_FE",
     "EventCode": "0x0407",
-    "BriefDescription": "top-down: front-end (the queue head has nothing, not bad speculation)"
+    "BriefDescription": "top-down: front-end (FE_BUB outside bad speculation)"
   },
   {
     "EventName": "DPATCH",
     "EventCode": "0x0408",
-    "BriefDescription": "instructions dispatched (0..3 per cycle)"
+    "BriefDescription": "Instructions dispatched (0..IW per cycle)"
+  },
+  {
+    "EventName": "MEM_LDSENT",
+    "EventCode": "0x0323",
+    "BriefDescription": "Load reads sent to the D$ (count: a fast-path tag issued, or the FSM starting a load)"
+  },
+  {
+    "EventName": "TDK_OK1",
+    "EventCode": "0x0500",
+    "BriefDescription": "top-down cause td_k = 0: dispatched 1 (ok:1)"
+  },
+  {
+    "EventName": "TDK_OK2",
+    "EventCode": "0x0501",
+    "BriefDescription": "top-down cause td_k = 1: dispatched 2 (ok:2)"
+  },
+  {
+    "EventName": "TDK_OK3",
+    "EventCode": "0x0502",
+    "BriefDescription": "top-down cause td_k = 2: dispatched 3 (ok:3)"
+  },
+  {
+    "EventName": "TDK_REDIRECT",
+    "EventCode": "0x0503",
+    "BriefDescription": "top-down cause td_k = 3: bad speculation: a redirect (bs:redirect)"
+  },
+  {
+    "EventName": "TDK_DRAIN",
+    "EventCode": "0x0504",
+    "BriefDescription": "top-down cause td_k = 4: bad speculation: a resolved restart waiting (bs:drain)"
+  },
+  {
+    "EventName": "TDK_FE_IMMU",
+    "EventCode": "0x0505",
+    "BriefDescription": "top-down cause td_k = 5: front-end: the iMMU (fe:immu)"
+  },
+  {
+    "EventName": "TDK_FE_ICACHE",
+    "EventCode": "0x0506",
+    "BriefDescription": "top-down cause td_k = 6: front-end: no fetch bytes (fe:icache)"
+  },
+  {
+    "EventName": "TDK_FE_ALIGN",
+    "EventCode": "0x0507",
+    "BriefDescription": "top-down cause td_k = 7: front-end: bytes but no whole instruction (fe:align)"
+  },
+  {
+    "EventName": "TDK_FE_QUEUE",
+    "EventCode": "0x0508",
+    "BriefDescription": "top-down cause td_k = 8: front-end: an instruction not yet in the IR (fe:queue)"
+  },
+  {
+    "EventName": "TDK_FE_OTHER",
+    "EventCode": "0x0509",
+    "BriefDescription": "top-down cause td_k = 9: front-end: any other (fe:other)"
+  },
+  {
+    "EventName": "TDK_BE_MMEM",
+    "EventCode": "0x050a",
+    "BriefDescription": "top-down cause td_k = 10: back-end: M holds a head op (be:M-mem)"
+  },
+  {
+    "EventName": "TDK_BE_MOTHER",
+    "EventCode": "0x050b",
+    "BriefDescription": "top-down cause td_k = 11: back-end: M holds a non-memory op (be:M-other)"
+  },
+  {
+    "EventName": "TDK_BE_ROB",
+    "EventCode": "0x050c",
+    "BriefDescription": "top-down cause td_k = 12: back-end: no ROB room (be:rob-full)"
+  },
+  {
+    "EventName": "TDK_BE_DEPLD",
+    "EventCode": "0x050d",
+    "BriefDescription": "top-down cause td_k = 13: back-end: issue waits on an integer load, AMO or CSR read (be:dep-load)"
+  },
+  {
+    "EventName": "TDK_BE_DEPFP",
+    "EventCode": "0x050e",
+    "BriefDescription": "top-down cause td_k = 14: back-end: issue waits on an FP, FP-load, FP-port or divide result (be:dep-fp)"
+  },
+  {
+    "EventName": "TDK_BE_IQ",
+    "EventCode": "0x050f",
+    "BriefDescription": "top-down cause td_k = 15: back-end: no scheduler credit at the queue head (be:iq-full)"
+  },
+  {
+    "EventName": "TDK_BE_RN",
+    "EventCode": "0x0510",
+    "BriefDescription": "top-down cause td_k = 16: back-end: a rename shard below LOWAT (be:rename)"
+  },
+  {
+    "EventName": "TDK_BE_SQ",
+    "EventCode": "0x0511",
+    "BriefDescription": "top-down cause td_k = 17: back-end: no store-queue credit (be:sq-full)"
+  },
+  {
+    "EventName": "TDK_BE_LQ",
+    "EventCode": "0x0512",
+    "BriefDescription": "top-down cause td_k = 18: back-end: no load-queue credit (be:lq-full)"
+  },
+  {
+    "EventName": "TDK_BE_SER",
+    "EventCode": "0x0513",
+    "BriefDescription": "top-down cause td_k = 19: back-end: serialisation, a CSR op or a CBO waiting (be:serialize)"
+  },
+  {
+    "EventName": "TDK_BE_HELD",
+    "EventCode": "0x0514",
+    "BriefDescription": "top-down cause td_k = 20: back-end: the IR held otherwise (be:held)"
+  },
+  {
+    "EventName": "TDK_OK0",
+    "EventCode": "0x0515",
+    "BriefDescription": "top-down cause td_k = 21: dispatched 0: the take squashed (ok:0)"
+  },
+  {
+    "EventName": "TDK_OK4",
+    "EventCode": "0x0516",
+    "BriefDescription": "top-down cause td_k = 22: dispatched 4 (ok:4)"
   }
 ]

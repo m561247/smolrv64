@@ -1,7 +1,8 @@
 // pipeview: a terminal pipe viewer for the testbench's Kanata stream (tb_smolrv64_linux
-// +kanata=<file>, docs/SmolRV64-Spec.md §11.2). One row per dispatched instruction and one per run
-// of non-producing cycles (a stall row, labelled with its cause); one column per cycle, each cell
-// the stage the row is in. Zero dependencies beyond rvdisasm: raw mode via `stty`, ANSI drawing.
+// +kanata=<file>, docs/SmolRV64-Spec.md §11.2). One row per fetched instruction, one per run of
+// cycles fetch hands the bundle register nothing (a fetch row) and one per run of non-producing
+// cycles (a stall row), each labelled with its cause; one column per cycle, each cell the stage the
+// row is in. Zero dependencies beyond rvdisasm: raw mode via `stty`, ANSI drawing.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,13 +14,18 @@ stage the instruction moved to, or what holds it. Read from the hardware's state
 
   the frontend
     f  in the bundle register (decoded)            Q  ...held: the decoupling queue is full
-    q  in the decoupling queue (8 entries)
-  at the queue head, not popping (the dispatch credits and the group rules)
-    g  cut from the group by a rule (one FP-port op, load, store; not plain; after a
-       decode-redirect CTI)                        r  dispatch frozen: a redirect or restart
-    n  rename: a shard below its low-water mark    z  serialising: a fence, CSR or CBO gate
-    O  no ROB row      I  its scheduler is full    L  the LQ is full     S  the SQ is full
-    H  its lane's handoff op in flight             o  a head op in flight
+    q  in the decoupling queue (16 entries)
+  at the queue head, not popping (the dispatch credits and the group rules); slot A's code takes
+  the top-down cause's conditions in its order, so it names what the stall row names
+    r  dispatch frozen: a redirect, a restart or a decode resteer
+    O  no ROB row
+    W  nothing issues while a scheduler waits on a load or FP result (be:dep-load, be:dep-fp)
+    I  its scheduler is full (its lane's, the FP queue, the MD stage)    o  a head op in flight
+    n  rename: a shard below its low-water mark    S  the SQ is full     L  the LQ is full
+    z  serialising: a serialising op drains or is in flight, a CSR op waits for the one before
+       it, or a CBO for older addresses
+    g  cut from the group by a rule: at most one op for the F stage, MD stage or SYSQ, one load
+       and one store; nothing beside a non-plain op; nothing after a decode-resteer CTI
     i  in the IR (dispatches this cycle)
   after dispatch
     t  in its scheduler's dispatch stage (one cycle on the way in)
@@ -27,7 +33,6 @@ stage the instruction moved to, or what holds it. Read from the hardware's state
                                                        the lane's slot is reserved)
     p  picked (select)          a b c d  executes in lane A / B / C / D
     u  a multiply in flight (its lane's reserved slot comes two cycles on)
-    h  in its lane's handoff register, waiting for its unit (MD, F, the SYSQ)
     v  a divide in the MD stage                    j  in the FP port's select register
     F  in stage F or the FPU                       Y  a system op in the SYSQ, waiting
                                                       for the ROB head
@@ -45,12 +50,13 @@ Colours: executing (bold), moving (plain), waiting on data (yellow), held by a s
 
   fetch rows ('~~ fetch: cause', '~'): a run of cycles the bundle register could take a bundle
   and fetch has none: redirect, freeze (fence.i, I$ invalidation, a mapping change, a rejected
-  mark), itlb, page (the stream left the PC's page), pq-full, ring-full, icache-busy (the
-  I$ refuses the request), icache-wait (requests out, no bytes yet), straddle, reject,
-  bytes-late, align.
+  mark), itlb (no translation of the PC, or a fetch fault), page (the stream left the PC's
+  page), pq-full, in-flight (the ring empty, its room reserved by pairs in flight),
+  icache-busy (the I$ refuses the request), icache-wait (requests out, no bytes yet),
+  straddle, reject, bytes-late, align.
   stall rows ('** cause', '#'): a run of non-producing cycles, the core's top-down cause:
-    bs:redirect bs:drain fe:immu fe:icache fe:align fe:queue be:M-mem be:M-other
-    be:rob-full be:dep-load be:dep-fp be:iq-full be:rename be:sq-full be:lq-full be:serialize
+    bs:redirect bs:drain fe:immu fe:icache fe:align fe:queue be:M-mem be:rob-full
+    be:dep-load be:dep-fp be:iq-full be:rename be:sq-full be:lq-full be:serialize be:held
 
 The header counts the visible rows: the cycle span, retired instructions, IPC, flushed rows,
 and the cycles each fetch and stall cause took.
@@ -137,8 +143,8 @@ fn glyph(stage: &str) -> u8 {
 fn sgr(g: u8) -> &'static str {
     match g {
         b'a' | b'b' | b'c' | b'd' | b'A' | b'B' | b'C' | b'D' | b'M' | b'F' | b'u' | b'v' | b'l' | b'R' => "1",
-        b'w' | b'k' | b'y' | b'm' | b'e' | b'Y' => "33",
-        b'Q' | b'g' | b'r' | b'n' | b'z' | b'O' | b'I' | b'L' | b'S' | b'H' | b'o' | b's' | b'h' | b'!' => "31",
+        b'w' | b'W' | b'k' | b'y' | b'm' | b'e' | b'Y' => "33",
+        b'Q' | b'g' | b'r' | b'n' | b'z' | b'O' | b'I' | b'L' | b'S' | b'o' | b's' | b'!' => "31",
         b'=' | b'x' | b'X' => "2",
         b'?' => "35",
         _ => "",
