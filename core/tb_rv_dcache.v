@@ -234,7 +234,7 @@ module tb;
          c_sq1 = c_sq1 + (dut.st_go & dut.si);  c_sqbk = c_sqbk + dut.sq_bk;
          c_skew = c_skew + (dut.m_alloc & dut.pick1 & (dut.s1_set1 != dut.s1_set));   // way 1 filled away from way 0's set
          c_age = c_age + (dut.m_alloc & dut.nru_age);
-         c_icw = c_icw + (dut.m_clean & dut.cp_dty & dut.sf_ic[0]);   // an I$ clean found the line dirty
+         c_icw = c_icw + (dut.m_clean & dut.cp_dty & dut.sf_ic[dut.sq_hp]);   // an I$ clean found the line dirty
          // ---- the load taken at the last edge
          if (took) begin out_v[took_tag] = 1'b1; out_t[took_tag] = now; n_req = n_req + 1; end
          // ---- the store port: a committed store is presented for one cycle when wr_room says the

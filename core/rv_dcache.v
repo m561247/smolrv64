@@ -242,18 +242,23 @@ module rv_dcache #(
    reg [63:0]       wt_va   [0:NW-1], wt_pa [0:NW-1];
    reg [EPW-1:0]    wt_ep   [0:NW-1];
    reg              wt_ph   [0:NW-1], wt_nc [0:NW-1];
-   // the store queue: taken, not yet written, merged or complete; entry 0 is the head
+   // the store queue: taken, not yet written, merged or complete. A RING of four slots holding at
+   // most SD: entry k (k = 0, the head) is slot sq_hp + k. A store that completes moves sq_hp, so
+   // the lookup's verdict reaches two pointer flops, not every slot's enable; a store taken lands
+   // at the tail, slot sq_hp + sc, whether or not the head completes in its cycle.
    reg  [1:0]       sc;                           // entries held
-   reg              sf_iss  [0:SD-1];            // issued: in the lookup, or (the head) parked as the store's waiter
-   reg  [63:0]      sf_va   [0:SD-1], sf_pa [0:SD-1], sf_wd [0:SD-1];
-   reg  [7:0]       sf_wm   [0:SD-1];
-   reg              sf_nc   [0:SD-1], sf_cbo [0:SD-1], sf_zero [0:SD-1], sf_keep [0:SD-1];
-   reg              sf_ic   [0:SD-1];             // the I$'s clean, not the store port's
+   reg  [1:0]       sq_hp;                        // the head's slot
+   reg              sf_iss  [0:3];               // issued: in the lookup, or (the head) parked as the store's waiter
+   reg  [63:0]      sf_va   [0:3], sf_pa [0:3], sf_wd [0:3];
+   reg  [7:0]       sf_wm   [0:3];
+   reg              sf_nc   [0:3], sf_cbo [0:3], sf_zero [0:3], sf_keep [0:3];
+   reg              sf_ic   [0:3];                // the I$'s clean, not the store port's
    reg              icq;                          // the I$'s clean is queued
    reg              ic_slow;                      // ...and did not finish clean on its first look
-   wire [63:0]      st_wd   = sf_wd[0];          // the head's: only the head resolves
-   wire [7:0]       st_wm   = sf_wm[0];
-   wire             st_cbo  = sf_cbo[0], st_zero = sf_zero[0], st_keep = sf_keep[0];
+   wire [1:0]       sq_h1   = sq_hp + 2'd1;       // entry 1's slot
+   wire [63:0]      st_wd   = sf_wd[sq_hp];      // the head's: only the head resolves
+   wire [7:0]       st_wm   = sf_wm[sq_hp];
+   wire             st_cbo  = sf_cbo[sq_hp], st_zero = sf_zero[sq_hp], st_keep = sf_keep[sq_hp];
 
    // ---------------------------------------------------------------- the write-back buffer
    reg              wb_v    [0:NWB-1];
@@ -313,22 +318,23 @@ module rv_dcache #(
    wire [TB-1:0]  rp_t   = rm_v ? rm_t : ra_t;
    // the queue issues its head, or the entry behind it in the cycle the head is in the compare
    wire           s1_hd  = s1_v & s1_tag[RTW] & s1_head;
-   wire           sq_i0  = (sc != 2'd0) & ~sf_iss[0];
-   wire           sq_i1  = (sc > 2'd1) & sf_iss[0] & ~sf_iss[1] & s1_hd;
+   wire           sq_i0  = (sc != 2'd0) & ~sf_iss[sq_hp];
+   wire           sq_i1  = (sc > 2'd1) & sf_iss[sq_hp] & ~sf_iss[sq_h1] & s1_hd;
    wire           st_go  = ~(rm_v | ra_v) & ~hold & sdoor & (sq_i0 | sq_i1);
    wire           si     = ~sq_i0;                // the entry issued
+   wire [1:0]     sq_ps  = si ? sq_h1 : sq_hp;     // ...its slot
    wire           new_go = ~(rm_v | ra_v) & ~hold & door & ~st_go & rd_req;
    assign rd_ack = new_go;
    wire           a_take = rp_v | st_go | new_go;
-   wire           a_ph  = (VIRT == 0) | (rp_v ? wt_ph[rp_t] : st_go ? (sf_nc[si] | sf_cbo[si]) : (rd_phys | rd_nc));
-   wire           a_nc  = rp_v ? wt_nc[rp_t] : st_go ? (sf_nc[si] & ~sf_cbo[si]) : rd_nc;
-   wire [63:0]    a_pa  = rp_v ? wt_pa[rp_t] : st_go ? sf_pa[si] : rd_pa;
-   wire [63:0]    a_va  = a_ph ? a_pa : rp_v ? wt_va[rp_t] : st_go ? sf_va[si] : rd_va;   // by PA: the PA's own colour
+   wire           a_ph  = (VIRT == 0) | (rp_v ? wt_ph[rp_t] : st_go ? (sf_nc[sq_ps] | sf_cbo[sq_ps]) : (rd_phys | rd_nc));
+   wire           a_nc  = rp_v ? wt_nc[rp_t] : st_go ? (sf_nc[sq_ps] & ~sf_cbo[sq_ps]) : rd_nc;
+   wire [63:0]    a_pa  = rp_v ? wt_pa[rp_t] : st_go ? sf_pa[sq_ps] : rd_pa;
+   wire [63:0]    a_va  = a_ph ? a_pa : rp_v ? wt_va[rp_t] : st_go ? sf_va[sq_ps] : rd_va;   // by PA: the PA's own colour
    // taking a store: a CBO or NC store held for its completion is the one already queued
    reg            sq_cn;                          // a CBO or an NC store is queued
    always @* begin
       sq_cn = 1'b0;
-      for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_cbo[i] | sf_nc[i]) & ~sf_ic[i]) sq_cn = 1'b1;
+      for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_cbo[sq_hp + i[1:0]] | sf_nc[sq_hp + i[1:0]]) & ~sf_ic[sq_hp + i[1:0]]) sq_cn = 1'b1;
    end
    wire           wr_take = wr_req & (sc != SD) & ~((cbo_req | wr_nc) & sq_cn);
    // the I$'s clean takes a slot the store port leaves: never in a cycle it presents, so the room
@@ -382,7 +388,7 @@ module rv_dcache #(
    reg  sq_ln;
    always @* begin
       sq_ln = 1'b0;
-      for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_pa[i][OFFB +: LB] == s1_pa[OFFB +: LB])) sq_ln = 1'b1;
+      for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_pa[sq_hp + i[1:0]][OFFB +: LB] == s1_pa[OFFB +: LB])) sq_ln = 1'b1;
    end
    wire blk_st = s1_v & ~s1_tag[RTW] & sq_ln;
    // a store behind the head while the head is parked: it goes back to the queue, untouched
@@ -494,8 +500,7 @@ module rv_dcache #(
    wire nc_done   = fin_nc | (nc_rdy & ~ans);                         // the NC slot frees
    // where the issued and the taken entries sit after this edge's pop (a pop is the head leaving,
    // and an issue of the head itself never meets one: the head is unissued)
-   wire [1:0]     sq_pi = {1'b0, si} - {1'b0, st_done};
-   wire [1:0]     sq_pt = sc - {1'b0, st_done};
+   wire [1:0]     sq_pt = sq_hp + sc;              // the tail's slot
 
    // the store write: its bytes over the chunk it read
    assign sw_v    = s_write;
@@ -641,7 +646,7 @@ module rv_dcache #(
    always @(posedge clk) begin
       if (reset) begin
          cur_ep <= {EPW{1'b0}};  door <= 1'b0;  sdoor <= 1'b0;  s1_v <= 1'b0;  rd_valid <= 1'b0;  wr_acc <= 1'b0;  wr_cpl <= 1'b0;
-         sc <= 2'd0;  wr_room <= 1'b0;  icq <= 1'b0;  ic_ack <= 1'b0;  ic_dty <= 1'b0;  ic_slow <= 1'b0;
+         sc <= 2'd0;  sq_hp <= 2'd0;  wr_room <= 1'b0;  icq <= 1'b0;  ic_ack <= 1'b0;  ic_dty <= 1'b0;  ic_slow <= 1'b0;
          nc_v <= 1'b0;  nc_rdy <= 1'b0;  cl_pend <= 1'b0;  cl_on <= 1'b0;  cl_wait <= 1'b0;
          scan_on <= 1'b1;  scan <= {(IB+1){1'b0}};  fl_v <= 1'b0;  ra_ptr <= {TB{1'b0}};  w1_v <= 1'b0;
          iq_n <= 0;  iq_rd <= 0;  iq_wr <= 0;  fb_v <= 1'b0;  fb_last <= 1'b0;  ro_on <= 1'b0;  rl_v <= 1'b0;
@@ -659,28 +664,23 @@ module rv_dcache #(
          // the store queue: the head leaves when it is done, a store taken joins the tail, an entry
          // behind a parked head goes back to waiting its turn
          wr_acc <= wr_take;
-         wr_cpl <= st_done & st_cbo & ~sf_ic[0] | fin_nc;
-         ic_ack <= st_done & sf_ic[0];
+         wr_cpl <= st_done & st_cbo & ~sf_ic[sq_hp] | fin_nc;
+         ic_ack <= st_done & sf_ic[sq_hp];
          ic_dty <= ic_slow;
          // the I$'s clean at the head in the lookup: done now and clean, or anything else -- a
          // write-back, a wait on a write-back or a fill of its line -- which may change memory
-         if (st_done & sf_ic[0]) ic_slow <= 1'b0;
-         else if (s1_v & s1_st & s1_head & sf_ic[0] & ~fin_now) ic_slow <= 1'b1;
-         if (ic_take) icq <= 1'b1;  else if (st_done & sf_ic[0]) icq <= 1'b0;
-         if (st_done)
-            for (i = 0; i < SD - 1; i = i + 1) begin
-               sf_iss[i] <= sf_iss[i+1];  sf_va[i] <= sf_va[i+1];  sf_pa[i] <= sf_pa[i+1];  sf_wd[i] <= sf_wd[i+1];
-               sf_wm[i] <= sf_wm[i+1];  sf_nc[i] <= sf_nc[i+1];  sf_cbo[i] <= sf_cbo[i+1];
-               sf_zero[i] <= sf_zero[i+1];  sf_keep[i] <= sf_keep[i+1];  sf_ic[i] <= sf_ic[i+1];
-            end
-         if (st_go) sf_iss[sq_pi] <= 1'b1;
+         if (st_done & sf_ic[sq_hp]) ic_slow <= 1'b0;
+         else if (s1_v & s1_st & s1_head & sf_ic[sq_hp] & ~fin_now) ic_slow <= 1'b1;
+         if (ic_take) icq <= 1'b1;  else if (st_done & sf_ic[sq_hp]) icq <= 1'b0;
+         if (st_done) sq_hp <= sq_h1;
+         if (st_go) sf_iss[sq_ps] <= 1'b1;
          if (sq_take) begin                        // a store-port op, else the I$'s clean (a cbo.clean by PA)
             sf_iss[sq_pt] <= 1'b0;  sf_va[sq_pt] <= wr_take ? wr_va : ic_pa;  sf_pa[sq_pt] <= wr_take ? wr_pa : ic_pa;
             sf_wd[sq_pt] <= wr_data;  sf_wm[sq_pt] <= wr_mask;  sf_nc[sq_pt] <= wr_take & wr_nc;
             sf_cbo[sq_pt] <= ~wr_take | cbo_req;  sf_zero[sq_pt] <= wr_take & cbo_zero;
             sf_keep[sq_pt] <= ~wr_take | cbo_keep;  sf_ic[sq_pt] <= ~wr_take;
          end
-         if (sq_bk) sf_iss[1] <= 1'b0;
+         if (sq_bk) sf_iss[sq_h1] <= 1'b0;
          sc      <= sc + {1'b0, sq_take} - {1'b0, st_done};
          wr_room <= (sc + {1'b0, sq_take} - {1'b0, st_done}) != SD;
          // a load's answer: from the lookup, else the NC slot's
@@ -825,7 +825,7 @@ module rv_dcache #(
    wire e_wdone   = cw_valid & ~cw_ok & ~fin_nc;                     // a write completion for no write sent
    wire e_beat    = cr_f & ms_v[cr_m] & (cr_beat != ms_bt[cr_m]);    // beats out of order within a burst
    wire e_two     = mis & ((pm & (pm - 1'b1)) != 0);                 // two pvalid copies of one physical line
-   wire e_span    = (new_go & ~a_ph & (rd_va[11:0] != rd_pa[11:0])) | (st_go & ~a_ph & (sf_va[si][11:0] != sf_pa[si][11:0]));   // VA/PA disagree in the page offset
+   wire e_span    = (new_go & ~a_ph & (rd_va[11:0] != rd_pa[11:0])) | (st_go & ~a_ph & (sf_va[sq_ps][11:0] != sf_pa[sq_ps][11:0]));   // VA/PA disagree in the page offset
    wire e_wtbusy  = new_go & (wt_v[{1'b0, rd_tag}] | (s1_v & (s1_tag == {1'b0, rd_tag})));   // a tag reused while outstanding
    reg  e_wdead;                                                     // a waiter parked on an MSHR that is not live
    always @* begin
