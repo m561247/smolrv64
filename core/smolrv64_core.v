@@ -292,7 +292,7 @@ module smolrv64_core
    end
 
    localparam DCR_HIT = 2;   // BIMW-1: the BTB-hit bit inside the carried predict details
-   localparam integer DCR_BACK = 1;   // static-taken for a BACKWARD conditional branch on a BTB miss (loop back-edge bet)
+   localparam integer DCR_BACK = 0;   // a conditional the BTB misses falls through: the BTB holds every branch once taken
    smolrv64_frontend #(.PCW(PCW), .SEQW(SEQW), .HW(HW), .IW(IW), .FW(`SMOLRV64_FW), .PDW(PDW), .RASB(RASB), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK),
                   .QDEPTH(`SMOLRV64_QD), .QAW($clog2(`SMOLRV64_QD)), .RESET_PC(RESET_PC)) fe
      (.clk(clk), .reset(reset), .accept(accept), .consume(fe_consume),

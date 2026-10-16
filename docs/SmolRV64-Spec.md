@@ -338,6 +338,27 @@ history shifts at most once per pair. The corrector is read with the history bef
 pair of lag), and the index read is the one carried for training. Training recomputes the key
 from the resolving CTI's PC and length.
 
+**The BTB is skewed-associative and taken-only.** Each halfword bank is `W` = 2 ways
+(`BTBW`=1); way `w` reads row `lo ^ rotl(hi, w)`, `lo` the 7 address bits above the pair and
+`hi` the 7 above those, so halfwords that share a row in one way rarely share it in another. A
+pair reads both ways of all eight banks; a halfword's entry is its first way whose tag
+matches. Every jump, call and return is allocated; a conditional is allocated only when it
+resolves taken, so a conditional the BTB misses is one never taken (or evicted) and falls
+through, with no decode redirect (`DCR_BACK`=0). Training reads the CTI's two slots (each
+way's write-side port) and rewrites the way that matches, else allocates the first way whose
+recently-trained bit is clear (set when trained; when that would set both, the other
+clears), else a rotating way. Training's own read, not the hit fetch carried, decides,
+so the in-flight instances of a loop's first-taken branch make one entry, not two.
+Modelled in Simmerv over GB5 single-core (690 G instructions), the BTB-coverage cost (decode
+redirects and mispredicts a BTB miss causes) is 44.8 cycles/K instructions for the 2048-entry
+direct-mapped, allocate-every-CTI BTB with backward-taken decode redirects, 1.9 for 2048 entries
+2-way skewed taken-only, and 0.2 for 8192 entries 4-way. Each position decides from the hits
+below it alone whether the pair ends there, and each way's next row is skewed from every candidate
+address (the restart's, the ending CTI's target, this pair's, the next pair's) before the pick, so
+no find-first chain and no skew stand between the rows read and the next rows' address: out of
+context at 6.000 ns the predictor meets with +0.624 ns, as the 2048-entry direct-mapped one did
+(+0.625).
+
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
 banks by position parity, one write each) in order (a pair pushes up to two; the stream moves
 only with two entries free): taken, the target,
@@ -365,7 +386,7 @@ frontend reaches 214.6 MHz (196.5 with the ring alone).
 
 | structure | size | organisation | storage |
 |---|---|---|---|
-| BTB | **2048 entries** (`BTBB`=11), 8 halfword banks of 256 | 12-bit tag + 3-bit type + 38-bit target | distributed RAM (the read is in the predictor's loop), read as the stream moves |
+| BTB | **2048 entries** (`BTBB`=11), 8 halfword banks x 2 skewed ways (`BTBW`=1) of 128 | 12-bit tag + 3-bit type + 38-bit target | distributed RAM (the read is in the predictor's loop), read as the stream moves and by training |
 | YAGS corrector | 2048 entries (`YBITS`=11), 8 halfword banks | 8-bit tag + 2-bit counter | distributed RAM, read as the stream moves |
 | GHR | 11 bits (`GHL`) | path history | flops |
 | RAS | 8 entries (`RASB`=3) | call/return stack | flops |
@@ -1596,10 +1617,11 @@ queue's commit, the second ALU); the only yield left is M's, to a landing load o
 
 | array | module | shape | width | bits | storage |
 |---|---|---|---|---|---|
-| `bank[b].btb` | `smolrv64_predictor` | 8 x 256 | 53 | 108 544 | distributed RAM (its read is the predictor's loop), read as the stream moves |
+| `bank[b].way[w].btb` | `smolrv64_predictor` | 8 x 2 x 128 | 53 | 108 544 | distributed RAM (its read is the predictor's loop), read as the stream moves and by training |
 | `bank[b].yc` | `smolrv64_predictor` | 8 x 256 | 10 | 20 480 | distributed RAM, read as the stream moves |
 | `ras` | `smolrv64_predictor` | 8 | 64 | 512 | flops |
-| `bank[b].bc` | `smolrv64_predictor` | 8 x 256 | 2 | 4 096 | distributed RAM, read as the stream moves and by training |
+| `bank[b].way[w].bc` | `smolrv64_predictor` | 8 x 2 x 128 | 2 | 4 096 | distributed RAM, read as the stream moves and by training |
+| `bank[b].way[w].nu` | `smolrv64_predictor` | 8 x 2 x 128 | 1 | 2 048 | distributed RAM, the recently-trained bit, read and written by training |
 | `pq0`, `pq1` | `smolrv64_predictor` | 2 x 4 | 95 | 760 | the prediction queue: even and odd positions, one write each |
 | `ring`, `rmk`, `rst` | `smolrv64_fring` | 32 | 18 | 576 | flops (the halfword, its mark, its start bit) |
 

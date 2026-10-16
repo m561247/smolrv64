@@ -46,7 +46,8 @@
 // aliased tag or a mis-restored RAS costs a redirect, never a wrong result.
 module smolrv64_predictor
   #(parameter PCW   = 64,
-    parameter BTBB  = 11,            // log2 BTB entries, all banks
+    parameter BTBB  = 11,            // log2 BTB entries, all banks and ways
+    parameter BTBW  = 1,             // log2 BTB ways (skewed), at least 1
     parameter TAGW  = 12,
     parameter TGTW  = 38,            // stored target bits [38:1] (canonical VA, sign-extended)
     parameter GHL   = 11,            // global history length
@@ -95,7 +96,8 @@ module smolrv64_predictor
     input  wire                 res_rvc,    // ...and its length
     output wire [2:0]           err);       // its invariants, registered (the integrity log)
 
-   localparam RB   = BTBB - 3;              // row bits per BTB bank
+   localparam W    = 1 << BTBW;             // BTB ways
+   localparam RB   = BTBB - 3 - BTBW;       // row bits per BTB bank and way
    localparam YB   = YBITS - 3;             // row bits per corrector bank
    localparam NB   = 1 << RB;
    localparam NY   = 1 << YB;
@@ -104,21 +106,35 @@ module smolrv64_predictor
    // BTB type: 0xx = cond branch, xx = 2-bit bimodal (00 S_N .. 11 S_T); 1xx = uncond
    localparam [2:0] TY_JMP = 3'b100, TY_CALL = 3'b101, TY_RET = 3'b110;
 
-   // ------------------------------------------------------------ BTB: eight banks of 1R1W RAM
+   // ------------------------------------------------------------ BTB: eight banks of W skewed ways
    // entry = {tag, type[2:0], target[38:1]}, and NO valid bit: the tag carries it. A never-written
    // entry reads as all zeros, believed only by a halfword whose tag is also 0, and it then says "a
    // strongly-not-taken conditional ends here": a mark the aligner drops when no branch ends there.
    // Configuration INIT zeroes every bank. Bank b holds the halfwords at address bits [3:1] == b, so
-   // a pair's halfword k is in bank k.
+   // a pair's halfword k is in bank k; each bank is W ways of 1R1W RAM.
+   //
+   // SKEWED: way w reads row lo ^ rotl(hi, w), lo the RB address bits above the pair and hi the RB
+   // bits above those, so halfwords that share a row in one way rarely share it in another, and
+   // W ways do the work of 2W set-associative ones. A CTI's W candidate slots are one per way.
+   //
+   // TAKEN ONLY: every jump is allocated, a conditional only when it resolves taken. A
+   // conditional the BTB misses is one never taken (or evicted), and falls through.
    localparam EW = TAGW + 3 + TGTW;
 `include "smolrv64_phist.vh"
 
    // The tag folds higher bits in, so halfwords that agree in the index but differ above still
    // miss: the kernel's pre-MMU execution at PA 0x802xxxxx aliases its VAs 0xffffffff80xxxxxx in
    // every index bit, and without the fold an early-boot entry steers the paged kernel to a bare
-   // address.
+   // address. Its low RB bits carry hi, which the skewed row consumed (rule B9).
    function [TAGW-1:0] btag(input [PCW-1:0] a);
       btag = a[RB+TAGW+3:RB+4] ^ a[RB+2*TAGW+3:RB+TAGW+4] ^ {{(TAGW-1){1'b0}}, a[63]};
+   endfunction
+   function [RB-1:0] bslot(input [PCW-1:0] a, input integer w);
+      reg [2*RB-1:0] hh;
+      begin
+         hh    = {a[2*RB+3:RB+4], a[2*RB+3:RB+4]};
+         bslot = a[RB+3:4] ^ hh[2*RB-1-w -: RB];
+      end
    endfunction
 
    // ------------------------------------------------------------ YAGS corrector: eight banks
@@ -200,7 +216,8 @@ module smolrv64_predictor
    // its own hit, corrector hit and direction from registers at once; the marks are the hits in
    // order up to the first taken one, or the M-th.
    localparam integer M = 2;                 // marks per pair (the queue's pushes per cycle)
-   wire [EW-1:0]   bq [0:7];
+   wire [EW-1:0]   bq [0:7];                 // halfword k's entry (its first matching way)...
+   wire [7:0]      bh;                       // ...and whether any way matched
    wire [YEW-1:0]  yq [0:7];
    reg  [7:0]      hv, hy, hd1;              // per position: hit, corrector hit, direction taken
    reg  [7:0]      mkv;                      // the marks
@@ -221,34 +238,36 @@ module smolrv64_predictor
          ek     = bq[k];
          ck     = yq[k];
          ak[3:1] = k[2:0];
-         hv[k]  = ~np_q & (k[2:0] >= sk_q) & (ek[EW-1 -: TAGW] == stag);
+         hv[k]  = ~np_q & (k[2:0] >= sk_q) & bh[k];
          hy[k]  = ~ek[TGTW+2] & (ck[YEW-1 -: YTAGW] == ytagf(ak));
          hd1[k] = ek[TGTW+2] | (hy[k] ? ck[1] : ek[TGTW+1]);
       end
    end
-   // The marks in parallel, one-hot: the first hit, the second, and the first taken one. The pair
-   // ends at the first taken hit when it is one of the first two, else at the second hit (M = 2),
-   // else at its own end; the marks are the hits up to where it ends.
-   wire [7:0] h1   = hv & (~hv + 8'd1);                    // the first hit
-   wire [7:0] hv2  = hv & ~h1;
-   wire [7:0] h2   = hv2 & (~hv2 + 8'd1);                  // the second
-   wire [7:0] tkv  = hv & hd1;
-   wire [7:0] t1   = tkv & (~tkv + 8'd1);                  // the first taken
-   wire       t_in = |(t1 & (h1 | h2));
-   wire [7:0] coh  = t_in ? t1 : h2;                       // where the pair ends, one-hot (0: its end)
+   // Where the pair ends, one-hot (0: at its own end): at the first taken hit when it is one of
+   // the first two, else at the second hit (M = 2). Each position decides from the bits below it
+   // alone -- a taken hit with no hit below, or any hit with one untaken hit below -- so no
+   // find-first chain stands between the rows and the next pair's address. The marks are the
+   // hits up to where it ends, and its entry is the one-hot pick of the eight.
+   wire [7:0] tkv = hv & hd1;
+   reg  [7:0] coh, blo;
    always @* begin
+      for (k = 0; k < 8; k = k + 1) begin
+         blo    = hv & ((8'd1 << k) - 8'd1);
+         coh[k] = hv[k] & ((~|blo & tkv[k])
+                         | (|blo & ~|(blo & (blo - 8'd1)) & ~|(tkv & ((8'd1 << k) - 8'd1))));
+      end
       cut = |coh;
-      mkv = cut ? (hv & ((coh - 8'd1) | coh)) : hv;
+      for (k = 0; k < 8; k = k + 1) mkv[k] = hv[k] & ~|(coh & ((8'd1 << k) - 8'd1));
       nmk = {3'd0, |mkv} + {3'd0, |(mkv & (mkv - 8'd1))};
-      hk  = 3'd7;
-      for (k = 0; k < 8; k = k + 1) if (coh[k]) hk = k[2:0];
-      e   = cut ? bq[hk] : {EW{1'b0}};
+      hk  = {~|(coh & 8'h0f), ~|(coh & 8'h33), ~|(coh & 8'h55)};   // 7 when it ends at its end
+      e   = {EW{1'b0}};
+      for (k = 0; k < 8; k = k + 1) e = e | ({EW{coh[k]}} & bq[k]);
    end
    wire [PCW-1:0]  h    = {sa_q[PCW-1:4], hk, 1'b0};               // its address (the pair's, plus the halfword)
    wire [PCW-1:0]  sa16 = sa_q + 64'd16;                            // the next pair (an adder from a register)
    wire [2:0]      ety  = e[TGTW +: 3];
    wire [TGTW-1:0] etg  = e[TGTW-1:0];
-   wire            dir  = cut & hd1[hk];
+   wire            dir  = |(coh & hd1);
    wire            call = (ety == TY_CALL), ret = (ety == TY_RET);
    assign p_cut = cut;
    assign p_end = hk;
@@ -257,7 +276,10 @@ module smolrv64_predictor
    // the halfword after the CTI: the next one of this pair, or the next pair (no adder behind
    // the mark: the mark's position is the loop's latest signal)
    wire [PCW-1:0]  ftc  = (hk == 3'd7) ? sa16 : {sa_q[PCW-1:4], hk + 3'd1, 1'b0};
-   wire [PCW-1:0]  tgt  = ret ? ras[ras_ptr] : {{(PCW-TGTW-1){etg[TGTW-1]}}, etg, 1'b0};
+   function [PCW-1:0] tadr(input [EW-1:0] x);                      // an entry's target
+      tadr = {{(PCW-TGTW-1){x[TGTW-1]}}, x[TGTW-1:0], 1'b0};
+   endfunction
+   wire [PCW-1:0]  tgt  = ret ? ras[ras_ptr] : tadr(e);
    wire [PCW-1:0]  p_nx = tk ? tgt : cut ? ftc : sa16;
    wire [RASB-1:0] rsp_post = (tk & call) ? ras_ptr + 1'b1 : (tk & ret) ? ras_ptr - 1'b1 : ras_ptr;
    wire [GHL-1:0]  ghr_post = tk ? phist_step(ghr, h) : ghr;
@@ -300,13 +322,45 @@ module smolrv64_predictor
    wire [PCW-1:0]  t_last  = res_pc + (res_rvc ? 64'd0 : 64'd2);
    wire            t_hit   = res_pdet[2];
    wire [1:0]      t_ctr   = res_pdet[1:0];
+   // THE CTI'S SLOTS, READ NOW. Training reads the W candidate slots in its last halfword's bank
+   // (each way's write address, so the read is the RAM's write-side port) and decides from them,
+   // not from the hit fetch carried: every in-flight instance of a loop's first-taken branch
+   // carries a miss, and only the slots as they are now keep it to one entry. A hit rewrites its
+   // way; a miss allocates the first way not recently trained (each slot's nu bit, set when
+   // trained; when that would set all W, the others clear), or the rotating way when none is.
+   wire [RB-1:0]   tsl     [0:W-1];          // way w's slot for the CTI
+   wire [TAGW-1:0] tr_tg   [0:W-1];          // ...its tag, now
+   wire [1:0]      tr_bc   [0:W-1];          // ...its bimodal counter, now
+   wire [W-1:0]    tr_nu;                    // ...its recently-trained bit, now
+   wire [TAGW-1:0] t_tag   = btag(t_last);
+   wire [W-1:0]    tm;
+   genvar gt;
+   generate for (gt = 0; gt < W; gt = gt + 1) begin : tw
+      assign tsl[gt] = bslot(t_last, gt);
+      assign tm[gt]  = tr_tg[gt] == t_tag;
+   end endgenerate
+   reg  [BTBW-1:0] vrot;                     // the way a miss takes when every slot is recent
+   initial vrot = {BTBW{1'b0}};
+   wire            tr_hit  = |tm;
+   wire [W-1:0]    tm1     = tm & (~tm + 1'b1);                     // the first matching way
+   wire [W-1:0]    tz      = ~tr_nu;
+   wire [W-1:0]    tz1     = tz & (~tz + 1'b1);                     // the first not recent
+   wire [W-1:0]    tsel    = tr_hit ? tm1 : (|tz) ? tz1 : ({{(W-1){1'b0}}, 1'b1} << vrot);
+   wire            tw_v    = res_v & (tr_hit | res_taken);          // rewrite a hit; allocate taken
+   wire [W-1:0]    nu_set  = tr_nu | tsel;
+   wire [W-1:0]    nu_d    = (&nu_set) ? tsel : nu_set;
+   reg  [1:0]      bc_tr;                    // the bimodal counter in the hit way, now
+   integer         tk_i;
+   always @* begin
+      bc_tr = 2'b00;
+      for (tk_i = 0; tk_i < W; tk_i = tk_i + 1) if (tm1[tk_i]) bc_tr = tr_bc[tk_i];
+   end
    // READ-MODIFY-WRITE: the counters a training nudges are the tables' CURRENT ones (bc_tr, yc_tr,
-   // read at the CTI's own row), never the snapshot it carried from fetch: training waits for the
+   // read at the CTI's own slot), never the snapshot it carried from fetch: training waits for the
    // CTI to be non-speculative, and every instance of a loop's branch in flight carries the same
    // stale snapshot, so blind writes of it lose the updates in between.
-   wire [1:0]      bc_tr;                    // the bimodal counter at the CTI's halfword, now
    wire [YEW-1:0]  yc_tr;                    // the corrector entry at its index, now
-   wire [1:0]      t_base  = t_hit ? bc_tr : (res_taken ? 2'b10 : 2'b01);  // miss -> install weak
+   wire [1:0]      t_base  = tr_hit ? bc_tr : (res_taken ? 2'b10 : 2'b01);  // miss -> install weak
    wire [1:0]      t_nudge = res_taken ? ((t_base == 2'b11) ? 2'b11 : t_base + 1'b1)
                                        : ((t_base == 2'b00) ? 2'b00 : t_base - 1'b1);
    wire [2:0]      t_type  = res_cbr  ? {1'b0, t_nudge}
@@ -333,39 +387,90 @@ module smolrv64_predictor
    wire [PCW-1:0]  na    = flush ? rst_a : p_nx;
    wire [PCW-1:0]  ra    = {na[PCW-1:4], 4'b0000};
    wire [2:0]      rk    = na[3:1];
-   wire [RB-1:0]   rr    = ra[RB+3:4];
    wire [YB-1:0]   yr    = ra[YB+3:4];
-   genvar gb;
-   wire [1:0]      bc_rd [0:7];
+   genvar gb, gw;
+   // Way w's row for the next pair, each candidate skewed before the pick rather than the picked
+   // address after it: the restart's; the ending CTI's target, the RAS top for a return, else its
+   // entry's, the eight skewed and picked one-hot as the entry is; this pair's own, after a
+   // not-taken mark short of the pair's end (the next halfword is in this pair); else the next.
+   wire [RB-1:0]   rr    [0:W-1];
+   generate for (gw = 0; gw < W; gw = gw + 1) begin : rw
+      reg [RB-1:0] rt;
+      integer      ki;
+      always @* begin
+         rt = {RB{1'b0}};
+         for (ki = 0; ki < 8; ki = ki + 1) rt = rt | ({RB{coh[ki]}} & bslot(tadr(bq[ki]), gw));
+      end
+      assign rr[gw] = flush ? bslot(rst_a, gw) : tk ? (ret ? bslot(ras[ras_ptr], gw) : rt)
+                    : (cut & (hk != 3'd7)) ? bslot(sa_q, gw) : bslot(sa16, gw);
+      always @(posedge clk) if (!reset && mv && (rr[gw] != bslot(ra, gw)))
+         $fatal(1, "smolrv64_predictor: way %0d reads row %0h for the next pair, whose row is %0h", gw, rr[gw], bslot(ra, gw));
+   end endgenerate
+   // every bank and way's slot for the training CTI, {bank, way}; the CTI's bank is picked below
+   wire [TAGW-1:0] tg_rd [0:8*W-1];
+   wire [1:0]      bc_rd [0:8*W-1];
+   wire            nu_rd [0:8*W-1];
    wire [YEW-1:0]  yc_rd [0:7];
    // The BTB banks are distributed RAM: their read is the predictor's loop (the rows read for
    // this pair -> the marks -> the next pair's address -> the rows read for it), and a block
    // RAM's clock-to-out is a third of the period before the first compare.
    generate for (gb = 0; gb < 8; gb = gb + 1) begin : bank
-      (* ram_style = "distributed" *) reg [EW-1:0]  btb [0:NB-1];
-      reg [1:0]     bc  [0:NB-1];             // a conditional's bimodal counter (the entry's type
-                                              // field carries only conditional-or-not for it)
+      localparam [2:0] BI = gb;
+      wire [EW-1:0] wq [0:W-1];               // each way's entry for halfword gb
+      wire [W-1:0]  wm;                       // ...whether its tag is the pair's
+      for (gw = 0; gw < W; gw = gw + 1) begin : way
+         localparam [BTBW-1:0] WI = gw;
+         (* ram_style = "distributed" *) reg [EW-1:0] btb [0:NB-1];
+         reg [1:0]    bc  [0:NB-1];           // a conditional's bimodal counter (the entry's
+                                              // type field carries only conditional-or-not for it)
+         reg          nu  [0:NB-1];           // trained recently
+         reg [EW-1:0] q;
+         reg [1:0]    cq;
+         integer bi;
+         initial for (bi = 0; bi < NB; bi = bi + 1) begin btb[bi] = {EW{1'b0}}; bc[bi] = 2'b00; nu[bi] = 1'b0; end
+         initial begin q = {EW{1'b0}}; cq = 2'b00; end
+         wire [EW-1:0] te = btb[tsl[gw]];
+         assign tg_rd[{BI, WI}] = te[EW-1 -: TAGW];
+         assign bc_rd[{BI, WI}] = bc[tsl[gw]];
+         assign nu_rd[{BI, WI}] = nu[tsl[gw]];
+         assign wq[gw] = {q[EW-1:TGTW+2], q[TGTW+2] ? q[TGTW+1:TGTW] : cq, q[TGTW-1:0]};
+         assign wm[gw] = q[EW-1 -: TAGW] == stag;
+         wire   tw_b = tw_v & (t_last[3:1] == BI);
+         always @(posedge clk) begin
+            if (reset | mv) begin q <= btb[rr[gw]];  cq <= bc[rr[gw]]; end
+            if (tw_b & tsel[gw])           btb[tsl[gw]] <= t_ent;
+            if (tw_b & tsel[gw] & res_cbr) bc[tsl[gw]]  <= t_nudge;
+            if (tw_b)                      nu[tsl[gw]]  <= nu_d[gw];
+         end
+      end
+      // the first matching way
+      wire [W-1:0]  wm1 = wm & (~wm + 1'b1);
+      reg  [EW-1:0] ws;
+      integer       wi;
+      always @* begin
+         ws = {EW{1'b0}};
+         for (wi = 0; wi < W; wi = wi + 1) if (wm1[wi]) ws = wq[wi];
+      end
+      assign bq[gb] = ws;
+      assign bh[gb] = |wm;
       reg [YEW-1:0] yc  [0:NY-1];
-      reg [EW-1:0]  q;
-      reg [1:0]     cq;
       reg [YEW-1:0] yqr;
-      integer bi;
-      initial for (bi = 0; bi < NB; bi = bi + 1) btb[bi] = {EW{1'b0}};
-      initial for (bi = 0; bi < NB; bi = bi + 1) bc[bi]  = 2'b00;
-      initial for (bi = 0; bi < NY; bi = bi + 1) yc[bi]  = {YEW{1'b0}};
-      initial begin q = {EW{1'b0}}; cq = 2'b00; yqr = {YEW{1'b0}}; end
-      assign bq[gb] = {q[EW-1:TGTW+2], q[TGTW+2] ? q[TGTW+1:TGTW] : cq, q[TGTW-1:0]};
+      integer yi;
+      initial for (yi = 0; yi < NY; yi = yi + 1) yc[yi] = {YEW{1'b0}};
+      initial yqr = {YEW{1'b0}};
       assign yq[gb] = yqr;
-      assign bc_rd[gb] = bc[t_last[RB+3:4]];
       assign yc_rd[gb] = yc[yc_idx[YBITS-1:3]];
       always @(posedge clk) begin
-         if (reset | mv) begin q <= btb[rr];  cq <= bc[rr];  yqr <= yc[yr ^ yh]; end
-         if (res_v & (t_last[3:1] == gb))         btb[t_last[RB+3:4]]   <= t_ent;
-         if (res_v & res_cbr & (t_last[3:1] == gb)) bc[t_last[RB+3:4]]  <= t_nudge;
-         if (y_wr  & (yc_idx[2:0] == gb))         yc[yc_idx[YBITS-1:3]] <= y_ent;
+         if (reset | mv) yqr <= yc[yr ^ yh];
+         if (y_wr  & (yc_idx[2:0] == gb)) yc[yc_idx[YBITS-1:3]] <= y_ent;
       end
    end endgenerate
-   assign bc_tr = bc_rd[t_last[3:1]];
+   generate for (gw = 0; gw < W; gw = gw + 1) begin : tsel_rd
+      localparam [BTBW-1:0] WI = gw;
+      assign tr_tg[gw] = tg_rd[{t_last[3:1], WI}];
+      assign tr_bc[gw] = bc_rd[{t_last[3:1], WI}];
+      assign tr_nu[gw] = nu_rd[{t_last[3:1], WI}];
+   end endgenerate
    assign yc_tr = yc_rd[yc_idx[2:0]];
 
    always @(posedge clk) begin
@@ -373,6 +478,7 @@ module smolrv64_predictor
          sa_q <= ra;  sk_q <= rk;  yh_q <= yh;
          np_q <= flush & rst_np;
       end
+      if (tw_v & ~tr_hit) vrot <= vrot + 1'b1;
       if (reset) begin
          ghr <= 0; ras_ptr <= 0;
          pq_rp <= 0; pq_wp <= 0; pq_n <= 0;
@@ -423,9 +529,9 @@ module smolrv64_predictor
          $display("[BP] c=%0d PRED pair=%h skip=%0d end=%0d type=%b yhit=%b dir=%b tk=%b nx=%h ghr=%h rsp=%0d",
                   bpt_cyc, sa_q, sk_q, p_end, ety, hy[hk], dir, tk, p_nx, ghr, ras_ptr);
       if (bpt_on & res_v)
-         $display("[BP] c=%0d RES pc=%h rvc=%b cbr=%b call=%b ret=%b taken=%b tgt=%h | carried hit=%b ctr=%0d yhit=%b yctr=%0d yidx=%0d | ywr=%b",
+         $display("[BP] c=%0d RES pc=%h rvc=%b cbr=%b call=%b ret=%b taken=%b tgt=%h | carried hit=%b ctr=%0d yhit=%b yctr=%0d yidx=%0d | ywr=%b | now hit=%b nu=%b way=%b wr=%b",
                   bpt_cyc, res_pc, res_rvc, res_cbr, res_call, res_ret, res_taken, res_tgt,
-                  t_hit, t_ctr, yc_hit, yc_ctr, yc_idx, y_wr);
+                  t_hit, t_ctr, yc_hit, yc_ctr, yc_idx, y_wr, tr_hit, tr_nu, tsel, tw_v);
       if (bpt_on & flush)
          $display("[BP] c=%0d RESTART at=%h rollback=%b ghr<=%h ras_ptr<=%0d", bpt_cyc, rst_a, rollback, rs_ghr, rs_rsp);
    end

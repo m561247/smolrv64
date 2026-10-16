@@ -51,22 +51,9 @@ col[*].mem x3 : ROB entries, one column per slot {pold, noret, rd, prd}
 qbank[0].mem : fetch queue data, bank 0 (of NBANKS=next_pow2(IW))
 qbank[1].mem : fetch queue data, bank 1
 ras     : return address stack
-bank[0].btb : branch target buffer, halfword bank 0 of 8, 256 x 53 -- read as the fetch stream moves
-bank[1].btb : branch target buffer, halfword bank 1 of 8, 256 x 53 -- read as the fetch stream moves
-bank[2].btb : branch target buffer, halfword bank 2 of 8, 256 x 53 -- read as the fetch stream moves
-bank[3].btb : branch target buffer, halfword bank 3 of 8, 256 x 53 -- read as the fetch stream moves
-bank[4].btb : branch target buffer, halfword bank 4 of 8, 256 x 53 -- read as the fetch stream moves
-bank[5].btb : branch target buffer, halfword bank 5 of 8, 256 x 53 -- read as the fetch stream moves
-bank[6].btb : branch target buffer, halfword bank 6 of 8, 256 x 53 -- read as the fetch stream moves
-bank[7].btb : branch target buffer, halfword bank 7 of 8, 256 x 53 -- read as the fetch stream moves
-bank[0].bc  : bimodal counters, halfword bank 0 of 8, 256 x 2 -- read as the stream moves and by training
-bank[1].bc  : bimodal counters, halfword bank 1 of 8, 256 x 2 -- read as the stream moves and by training
-bank[2].bc  : bimodal counters, halfword bank 2 of 8, 256 x 2 -- read as the stream moves and by training
-bank[3].bc  : bimodal counters, halfword bank 3 of 8, 256 x 2 -- read as the stream moves and by training
-bank[4].bc  : bimodal counters, halfword bank 4 of 8, 256 x 2 -- read as the stream moves and by training
-bank[5].bc  : bimodal counters, halfword bank 5 of 8, 256 x 2 -- read as the stream moves and by training
-bank[6].bc  : bimodal counters, halfword bank 6 of 8, 256 x 2 -- read as the stream moves and by training
-bank[7].bc  : bimodal counters, halfword bank 7 of 8, 256 x 2 -- read as the stream moves and by training
+bank[*].way[*].btb x16 : BTB, 8 halfword banks x 2 skewed ways, 128 x 53 -- read as the fetch stream moves and by training
+bank[*].way[*].bc x16  : bimodal counters, 8 halfword banks x 2 skewed ways, 128 x 2 -- read as the stream moves and by training
+bank[*].way[*].nu x16  : the recently-trained bit, 8 halfword banks x 2 skewed ways, 128 x 1 -- read and written by training
 bank[0].yc  : YAGS corrector, halfword bank 0 of 8, 256 x 10 -- read as the fetch stream moves
 bank[1].yc  : YAGS corrector, halfword bank 1 of 8, 256 x 10 -- read as the fetch stream moves
 bank[2].yc  : YAGS corrector, halfword bank 2 of 8, 256 x 10 -- read as the fetch stream moves
