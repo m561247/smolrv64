@@ -1726,7 +1726,10 @@ module smolrv64_core
    // A replay sets the counter to 2. The store queue reports, for every load, the cycle the last
    // unknown older address comes in and whether the load overlapped it: an overlap counts up (the
    // wait was needed), a miss counts down. So a load that aliases rarely is soon speculating again,
-   // and one that aliases often keeps waiting. One event trains per cycle (a hint: the rest drop).
+   // and one that aliases often keeps waiting. One event trains per cycle (a hint: the rest drop),
+   // a cycle after it resolves: the event's pick and its counter's index are registered (md_*_q),
+   // so the store queue's resolution flops reach a register, and the table's read, step and write
+   // start from one.
    localparam integer MDW_B = 8;
    reg  [2*(1 << MDW_B)-1:0] mdw;
    reg  [21:0]               mdw_age;
@@ -1740,15 +1743,22 @@ module smolrv64_core
       md_i = {LQ_IB{1'b0}};
       for (mdk = LQ_N - 1; mdk >= 0; mdk = mdk - 1) if (md_ev[mdk]) md_i = mdk[LQ_IB-1:0];
    end
-   wire [MDW_B-1:0]          md_p   = lq_e_pch[md_i*8 +: 8];
-   wire [1:0]                md_cur = mdw[2*md_p +: 2];
-   wire [1:0]                md_new = sq_l_res_a[md_i] ? ((md_cur == 2'd3) ? 2'd3 : md_cur + 2'd1)
-                                                       : ((md_cur == 2'd0) ? 2'd0 : md_cur - 2'd1);
+   reg                       md_v_q, md_a_q;
+   reg  [MDW_B-1:0]          md_p_q;
+   initial md_v_q = 1'b0;
+   always @(posedge clk) begin
+      md_v_q <= ~reset & (|md_ev);
+      md_a_q <= sq_l_res_a[md_i];
+      md_p_q <= lq_e_pch[md_i*8 +: 8];
+   end
+   wire [1:0]                md_cur = mdw[2*md_p_q +: 2];
+   wire [1:0]                md_new = md_a_q ? ((md_cur == 2'd3) ? 2'd3 : md_cur + 2'd1)
+                                             : ((md_cur == 2'd0) ? 2'd0 : md_cur - 2'd1);
    wire [MDW_B-1:0]          rp_p   = sy_pc_w[MDW_B:1];
    assign ld_wt = (`SMOLRV64_MDSPEC == 0) ? 1'b1 : (`SMOLRV64_MDSPEC == 2) ? 1'b0 : mdw[2*gld_pc[MDW_B:1] + 1];
    always @(posedge clk) begin
       mdw_age <= reset ? 22'd0 : mdw_age + 22'd1;
-      if (|md_ev) mdw[2*md_p +: 2] <= md_new;
+      if (md_v_q) mdw[2*md_p_q +: 2] <= md_new;
       if (rp_fire) mdw[2*rp_p +: 2] <= 2'd2;                    // after the training arm: a replay wins
       if (reset | (&mdw_age)) mdw <= {(2*(1 << MDW_B)){1'b0}};  // now and then, forget
    end

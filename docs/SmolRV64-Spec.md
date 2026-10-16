@@ -1270,7 +1270,7 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
     forgotten every 4 M cycles. A load waits for older unknown addresses when its counter is 2 or
     3. A replay sets it to 2. The store queue reports, for every load, the cycle the last unknown
     older address comes in and whether the load overlapped it (`l_res_a`, `l_res_c`): overlap
-    counts up, no overlap counts down, one event a cycle. A load that aliases rarely goes back to
+    counts up, no overlap counts down, one event a cycle, trained the cycle after it resolves. A load that aliases rarely goes back to
     speculating after one clear resolution; one that aliases often keeps waiting.
   - *Measured* (lockstep, IW=3, rvbench): replaying costs ~28 cycles, a wait about as much, so the
     table waits only after a replay. Dhrystone never replays; rsort 85-119 times in 94-103 K cycles.
