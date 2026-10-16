@@ -92,8 +92,7 @@ module smolrv64_predictor
     input  wire                 res_taken,
     input  wire [PDW-1:0]       res_pdet,   // the resolving instruction's own details
     input  wire [PCW-1:0]       res_tgt,    // taken-target (train the BTB)
-    input  wire [PCW-1:0]       res_pc,     // the resolving CTI's own PC...
-    input  wire                 res_rvc,    // ...and its length
+    input  wire [PCW-1:0]       res_last,   // the resolving CTI's last halfword's address
     output wire [2:0]           err);       // its invariants, registered (the integrity log)
 
    localparam W    = 1 << BTBW;             // BTB ways
@@ -319,7 +318,7 @@ module smolrv64_predictor
    // One BTB write per resolved CTI (oldest per cycle), into the bank of its last halfword.
    // Bimodal: nudge the carried counter toward the outcome; uncond: record the class (call/return
    // classified at resolve from the executed instruction); target: the resolved taken-target.
-   wire [PCW-1:0]  t_last  = res_pc + (res_rvc ? 64'd0 : 64'd2);
+   wire [PCW-1:0]  t_last  = res_last;
    wire            t_hit   = res_pdet[2];
    wire [1:0]      t_ctr   = res_pdet[1:0];
    // THE CTI'S SLOTS, READ NOW. Training reads the W candidate slots in its last halfword's bank
@@ -529,8 +528,8 @@ module smolrv64_predictor
          $display("[BP] c=%0d PRED pair=%h skip=%0d end=%0d type=%b yhit=%b dir=%b tk=%b nx=%h ghr=%h rsp=%0d",
                   bpt_cyc, sa_q, sk_q, p_end, ety, hy[hk], dir, tk, p_nx, ghr, ras_ptr);
       if (bpt_on & res_v)
-         $display("[BP] c=%0d RES pc=%h rvc=%b cbr=%b call=%b ret=%b taken=%b tgt=%h | carried hit=%b ctr=%0d yhit=%b yctr=%0d yidx=%0d | ywr=%b | now hit=%b nu=%b way=%b wr=%b",
-                  bpt_cyc, res_pc, res_rvc, res_cbr, res_call, res_ret, res_taken, res_tgt,
+         $display("[BP] c=%0d RES last=%h cbr=%b call=%b ret=%b taken=%b tgt=%h | carried hit=%b ctr=%0d yhit=%b yctr=%0d yidx=%0d | ywr=%b | now hit=%b nu=%b way=%b wr=%b",
+                  bpt_cyc, res_last, res_cbr, res_call, res_ret, res_taken, res_tgt,
                   t_hit, t_ctr, yc_hit, yc_ctr, yc_idx, y_wr, tr_hit, tr_nu, tsel, tw_v);
       if (bpt_on & flush)
          $display("[BP] c=%0d RESTART at=%h rollback=%b ghr<=%h ras_ptr<=%0d", bpt_cyc, rst_a, rollback, rs_ghr, rs_rsp);

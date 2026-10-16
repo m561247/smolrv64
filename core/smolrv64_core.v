@@ -231,9 +231,8 @@ module smolrv64_core
    reg                      res_taken_q;
    reg [PDW-1:0]            res_pdet_q;
    reg [PCW-1:0]            res_tgt_q;
-   reg [PCW-1:0]            res_pc_q;     // the resolving CTI's own PC and length: u_bp
-   reg                      res_rvc_q;    // recomputes its BTB key and its PC-only tags from
-                                          // them instead of carrying them.
+   reg [PCW-1:0]            res_last_q;   // the resolving CTI's last halfword's address: u_bp's
+                                          // BTB key and its PC-only tags, computed at enqueue
    initial res_v_q = 1'b0;
    always @(posedge clk) begin
       res_v_q     <= ~reset & res_v;
@@ -243,8 +242,7 @@ module smolrv64_core
       res_taken_q <= res_taken;
       res_pdet_q  <= tr_pdet;       // control flow resolves in the lanes
       res_tgt_q   <= res_tgt;
-      res_pc_q    <= tr_pc;
-      res_rvc_q   <= tr_rvc;
+      res_last_q  <= tr_last;
    end
 
    // ---- FMAX: the frontend sees the redirect one cycle late ----------------------
@@ -301,7 +299,7 @@ module smolrv64_core
       .imem_fault(immu_ready & immu_fault), .imem_cause(immu_cause),
       .res_v(res_v_q), .res_cbr(res_cbr_q), .res_call(res_call_q), .res_ret(res_ret_q),
       .res_taken(res_taken_q), .res_pdet(res_pdet_q), .res_tgt(res_tgt_q),
-      .res_pc(res_pc_q), .res_rvc(res_rvc_q),
+      .res_last(res_last_q),
       .cur_seq(fe_cur_seq), .fe_err(fe_err_f));
 
    // the dispatch group: slot k's decoded record (smolrv64_irec.vh), unpacked under its names
@@ -3536,12 +3534,12 @@ module smolrv64_core
    end
    reg  [TQB-1:0] tq_h, tq_t;
    reg  [TQB:0]   tq_n;
-   reg  [PCW-1:0] tq_pc [0:TQN-1];
+   reg  [PCW-1:0] tq_last [0:TQN-1];   // the CTI's last halfword's address (its PC, + 2 unless RVC)
    reg  [PCW-1:0] tq_tgt [0:TQN-1];
    reg  [PDW-1:0] tq_pdet [0:TQN-1];
    reg  [SEQW-1:0] tq_seq [0:TQN-1];
    reg  [ROB_IDXB-1:0] tq_rob [0:TQN-1];
-   reg  [TQN-1:0] tq_rvc, tq_cbr, tq_call, tq_ret, tq_taken;
+   reg  [TQN-1:0] tq_cbr, tq_call, tq_ret, tq_taken;
    reg  [TQN-1:0] tq_dk;          // the kill marked the entry's CTI dead: it is discarded, never trained
    reg  [TQN-1:0] tq_rt;          // the entry's CTI has retired: it may train
    initial tq_dk = {TQN{1'b0}};
@@ -3603,8 +3601,9 @@ module smolrv64_core
          for (tk = 0; tk < NL; tk = tk + 1) if (tq_w[tk]) begin : enq
             reg [TQB-1:0] a;
             a = tq_t + {{(TQB-RKB){1'b0}}, rk[tk]};
-            tq_pc[a] <= lr_pc[tk];  tq_tgt[a] <= lr_ttgt[tk];  tq_pdet[a] <= lr_pdet[tk];
-            tq_seq[a] <= lr_seq[tk];  tq_rob[a] <= lr_rob[tk];  tq_rvc[a] <= lr_rvc[tk];
+            tq_last[a] <= lr_pc[tk] + (lr_rvc[tk] ? {PCW{1'b0}} : {{(PCW-2){1'b0}}, 2'd2});
+            tq_tgt[a] <= lr_ttgt[tk];  tq_pdet[a] <= lr_pdet[tk];
+            tq_seq[a] <= lr_seq[tk];  tq_rob[a] <= lr_rob[tk];
             tq_cbr[a] <= lr_br[tk];  tq_call[a] <= l_call[tk];  tq_ret[a] <= l_ret[tk];
             tq_taken[a] <= lr_taken[tk];
             tq_dk[a] <= redirect;              // a redirect's: younger than it (never an enable, rule I11)
@@ -3624,9 +3623,8 @@ module smolrv64_core
    assign res_ret   = tq_ret[tq_h];
    assign res_taken = tq_taken[tq_h];
    assign res_tgt   = tq_tgt[tq_h];
-   wire [PCW-1:0] tr_pc   = tq_pc[tq_h];
+   wire [PCW-1:0] tr_last = tq_last[tq_h];
    wire [PDW-1:0] tr_pdet = tq_pdet[tq_h];
-   wire           tr_rvc  = tq_rvc[tq_h];
    always @(posedge clk) if (!reset & !redirect) begin
       if (tq_n > TQN[TQB:0]) $fatal(1, "smolrv64_core: the training queue holds %0d of %0d", tq_n, TQN);
    end

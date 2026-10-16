@@ -88,8 +88,7 @@ module smolrv64_frontend
     input  wire                    res_ret,
     input  wire                    res_taken,
     input  wire [PDW-1:0]          res_pdet,        // resolving op's predict details (carried)
-    input  wire [PCW-1:0]          res_pc,          // resolving op's own PC...
-    input  wire                    res_rvc,         // ...and length (the predictor's key)
+    input  wire [PCW-1:0]          res_last,        // resolving op's last halfword's address (the predictor's key)
     input  wire [PCW-1:0]          res_tgt,
 
     // ================= the IR: one dispatch group, a decoded record per slot =================
@@ -224,8 +223,8 @@ module smolrv64_frontend
       .pq_tk(bp_tk), .pq_tgt(bp_tgts), .pd_mk(pd_mk), .pd_no(pd_no), .pop(f_pop),
       .rollback(redirect), .rb_rsp(redirect_rsp), .rb_ghr(redirect_ghr),
       .res_v(res_v), .res_cbr(res_cbr), .res_call(res_call), .res_ret(res_ret),
-      .res_taken(res_taken), .res_pdet(res_pdet), .res_tgt(res_tgt), .res_pc(res_pc),
-      .res_rvc(res_rvc), .err(bp_err));
+      .res_taken(res_taken), .res_pdet(res_pdet), .res_tgt(res_tgt), .res_last(res_last),
+      .err(bp_err));
 
    // ------------------------------------------------------------- decoupling queue
    // THE point of this module's shape. fetch's .ready() used to be `accept`, which is
