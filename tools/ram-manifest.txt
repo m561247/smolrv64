@@ -47,9 +47,9 @@ cp[*].smap x3 : speculative map, one copy per rename port; flush clears `lv`, so
 # port k and by the walk (lanes 5.4d/e). The load and store queues' ROB indexes (`rob`) are flops:
 # the kill looks every entry's up each cycle it holds.
 col[*].mem x3 : ROB entries, one column per slot {pold, noret, rd, prd}
-# The fetch queue keeps NBANKS = next_pow2(IW) banks.
-qbank[0].mem : fetch queue data, bank 0 (of NBANKS=next_pow2(IW))
-qbank[1].mem : fetch queue data, bank 1
+# The decoupling queue keeps QNB = next_pow2(FW) banks. As flops they cost the same LUTs (the read
+# and write muxes) and 5.9 K registers more.
+qbank[*].mem x8 : the decoupling queue's records, a bank per position mod QNB, one muxed write each
 ras     : return address stack
 bank[*].way[*].btb x16 : BTB, 8 halfword banks x 2 skewed ways, 128 x 53 -- read as the fetch stream moves and by training
 bank[*].way[*].bc x16  : bimodal counters, 8 halfword banks x 2 skewed ways, 128 x 2 -- read as the stream moves and by training
@@ -70,6 +70,10 @@ tlb_ppn : iTLB/dTLB
 tlb_perm: iTLB/dTLB
 tlb_g   : iTLB/dTLB {installed, generation}: a flush advances the generation, so no per-entry clear
 l2.tlb2 : the second level (mmu L2N) on the first level's miss path, block RAM: the iTLB's 512, the dTLB's 2048
+
+# ---- the I$'s tags: {virtual tag, epoch} per way, block RAM read with the data banks --------
+tg0     : I$ way 0 tags, read at the lookup's set (port B) and by the fill (port A)
+tg1     : I$ way 1 tags
 
 # ---- the D$'s physical state: one LUTRAM per (way, colour), 64 rows, read at two rows -------
 # (32 at DC_KB=128: 2 ways x 16 colours)

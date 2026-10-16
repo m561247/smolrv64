@@ -4,7 +4,8 @@
 //
 // GEOMETRY. SIZE_KB (64) in 2 ways of 64-byte lines. A pair is a 16-byte-aligned quarter of a
 // line (asserted), so a pair is one line's lookup, and each way's data is two block-RAM banks,
-// the even and the odd 8-byte chunks, read at the same row.
+// the even and the odd 8-byte chunks, read at the same row. Each way's tags are a block RAM read
+// with them.
 //
 // HIT. Virtual only: valid, the virtual tag and the request's epoch -- no translation and no
 // physical tag on the hit path (docs/VHPR.md), so an I$ hit never waits on the iTLB.
@@ -101,9 +102,9 @@ module rv_icache #(
    assign l2_wdata = 512'd0;
 
    // ---------------------------------------------------------------- the arrays
-   // tags, per way, in distributed RAM
-   reg [VTB-1:0] vt0 [0:SETS-1], vt1 [0:SETS-1];
-   reg [EPW-1:0] ep0 [0:SETS-1], ep1 [0:SETS-1];
+   // tags, per way, {virtual tag, epoch} by set in block RAM (the tag block below)
+   localparam TGW = VTB + EPW;
+   (* ram_style = "block" *) reg [TGW-1:0] tg0 [0:SETS-1], tg1 [0:SETS-1];
    reg           rr  [0:SETS-1];               // round-robin victim
    integer i;
    initial for (i = 0; i < SETS; i = i + 1) rr[i] = 1'b0;
@@ -181,8 +182,9 @@ module rv_icache #(
    wire [CB-1:0]  s1_col = s1_set[IB-1:6];
    wire vl0_s = v_s[{1'b0, s1_col}];
    wire vl1_s = v_s[{1'b1, s1_col}];
-   wire h0   = vl0_s & (vt0[s1_set] == s1_vtg) & (ep0[s1_set] == s1_ep);
-   wire h1   = vl1_s & (vt1[s1_set] == s1_vtg) & (ep1[s1_set] == s1_ep);
+   wire [TGW-1:0] tq0, tq1;                        // each way's tags at s1_set (the tag block)
+   wire h0   = vl0_s & (tq0 == {s1_vtg, s1_ep});
+   wire h1   = vl1_s & (tq1 == {s1_vtg, s1_ep});
    wire hit  = h0 | h1;
    wire miss = s1_v & ~hit;
    wire [57:0]       m_pl   = s1_pa[63:OFFB];
@@ -244,11 +246,21 @@ module rv_icache #(
          if (inst_k) pt_k[f_set[5:0]] <= f_pline[12-OFFB +: PTB];
       end
    end endgenerate
-   always @(posedge clk) begin
-      if (t_vt & ~f_way) begin vt0[t_set] <= f_line[IB +: VTB]; ep0[t_set] <= f_ep; end
-      if (t_vt &  f_way) begin vt1[t_set] <= f_line[IB +: VTB]; ep1[t_set] <= f_ep; end
-      if (t_inst) rr[t_set] <= ~f_way;
-   end
+   always @(posedge clk) if (t_inst) rr[t_set] <= ~f_way;
+
+   // THE TAG BLOCK. Each way's tags are one block RAM. Port B reads the set the banks are addressed
+   // for (a_line's), so a lookup's tags are out in s1 beside its data. Port A is the fill's, at
+   // t_set: it writes the installed or re-stamped way and reads the other before the write, for the
+   // duplicate check a cycle later. A tag write never shares a cycle with a bank read (asserted:
+   // e_col), so port B never reads a row port A is writing.
+   wire [IB-1:0]  a_set = a_line[IB-1:0];
+   wire [TGW-1:0] t_wd  = {f_line[IB +: VTB], f_ep};
+   reg  [TGW-1:0] tq0_r, tq1_r, td0, td1;
+   always @(posedge clk) begin tq0_r <= tg0[a_set]; tq1_r <= tg1[a_set]; end
+   always @(posedge clk) begin if (t_vt & ~f_way) tg0[t_set] <= t_wd; td0 <= tg0[t_set]; end
+   always @(posedge clk) begin if (t_vt &  f_way) tg1[t_set] <= t_wd; td1 <= tg1[t_set]; end
+   assign tq0 = tq0_r;
+   assign tq1 = tq1_r;
 
    // ---------------------------------------------------------------- the machine
    always @(posedge clk) begin
@@ -297,7 +309,7 @@ module rv_icache #(
               // so a demand read waits for it -- and it may be the very line.
               else if (~f_l2 & ~pf_infl & ~fill_hold) begin
                  if (pf_val & (pf_addr == f_pline)) begin
-                    f_data <= pf_line;  f_k <= 2'd0;  f_way <= v_way;  st <= S_INST;
+                    f_k <= 2'd0;  f_way <= v_way;  st <= S_INST;
                     pf_val <= 1'b0;
                     if (f_pline[5:0] != 6'h3f) begin pf_want <= 1'b1; pf_next <= f_pline + 58'd1; end
                  end else begin
@@ -305,7 +317,7 @@ module rv_icache #(
                  end
               end
               if (f_l2 & l2_ack) begin
-                 f_l2 <= 1'b0;  f_data <= l2_rdata;  f_k <= 2'd0;  f_way <= v_way;  st <= S_INST;
+                 f_l2 <= 1'b0;  f_k <= 2'd0;  f_way <= v_way;  st <= S_INST;
                  if (f_pline[5:0] != 6'h3f) begin pf_want <= 1'b1; pf_next <= f_pline + 58'd1; end
               end
            end
@@ -366,11 +378,16 @@ module rv_icache #(
    wire e_skid   = miss & rd_ack & sk_v;                                 // a second request into a full skid
    wire e_pa     = rd_ack & (rd_pa[11:0] != rd_addr[11:0]);              // VA and PA disagree in the page offset
    wire e_two    = f_l2 & pf_infl;                                       // a demand read and a prefetch both outstanding
-   wire h_dup0   = vl0_f & (vt0[f_set] == f_line[IB +: VTB]) & (ep0[f_set] == f_ep);
-   wire h_dup1   = vl1_f & (vt1[f_set] == f_line[IB +: VTB]) & (ep1[f_set] == f_ep);
-   wire e_dup    = t_vt & ((~f_way & h_dup1) | (f_way & h_dup0));        // stamping a line the other way holds
+   // stamping a line the other way holds: checked a cycle after the tag write, against port A's read
+   reg            dq_v, dq_way, dq_vl0, dq_vl1;
+   reg  [TGW-1:0] dq_wd;
+   always @(posedge clk) begin
+      dq_v <= ~reset & t_vt;  dq_way <= f_way;  dq_vl0 <= vl0_f;  dq_vl1 <= vl1_f;  dq_wd <= t_wd;
+   end
+   wire e_dup    = dq_v & ((~dq_way & dq_vl1 & (td1 == dq_wd)) | (dq_way & dq_vl0 & (td0 == dq_wd)));
    wire e_rc2    = miss & rc0 & rc1;                                     // one physical line in both ways
-   wire [15:0] e_now = {7'd0, e_rc2, e_dup, e_two, e_pa, e_skid, e_align, e_ack, 1'b0, e_dual};
+   wire e_col    = t_vt & a_take;                                        // a tag write beside a bank read
+   wire [15:0] e_now = {6'd0, e_col, e_rc2, e_dup, e_two, e_pa, e_skid, e_align, e_ack, 1'b0, e_dual};
    reg  [15:0] err_q;
    always @(posedge clk) err_q <= reset ? 16'd0 : e_now;
    assign err = err_q;
@@ -381,8 +398,17 @@ module rv_icache #(
       if (e_skid)  $fatal(1, "rv_icache: a request into a full skid");
       if (e_pa)    $fatal(1, "rv_icache: VA %h and PA %h disagree in the page offset", rd_addr, rd_pa);
       if (e_two)   $fatal(1, "rv_icache: a demand read and a prefetch outstanding together");
-      if (e_dup)   $fatal(1, "rv_icache: stamping a line the other way already holds (va line %h)", f_line);
+      if (e_dup)   $fatal(1, "rv_icache: stamping a line the other way already holds ({tag, epoch} %h)", dq_wd);
       if (e_rc2)   $fatal(1, "rv_icache: one physical line resident in both ways (va %h pa %h)", s1_va, s1_pa);
+      if (e_col)   $fatal(1, "rv_icache: a tag write in a bank read's cycle (set %h)", t_set);
    end
+   // The fill line. Only S_INST's bank writes read it, so it loads whenever its line arrives in
+   // S_FILL -- the cycle S_FILL moves to S_INST among them -- and its enable is the arrival alone,
+   // not the hold, the cancel or the prefetch port's state that decide the move.
+   always @(posedge clk)
+      if (st == S_FILL) begin
+         if (f_l2 & l2_ack)                                f_data <= l2_rdata;
+         else if (~f_l2 & pf_val & (pf_addr == f_pline))   f_data <= pf_line;
+      end
 endmodule
 `default_nettype wire

@@ -1636,7 +1636,12 @@ RAMB36 + 4 RAMB18, WNS +0.457 ns at 6 ns):
 | write-back lines | 2 | 512 | 1 024 | flops |
 
 The I$ (`rv_icache`, 128 KiB): data 4 banks of `4096 × 64` (1 048 576 bits, BRAM), even/odd chunk
-banking per way, so any read at any byte offset is served by one access (§9.1).
+banking per way, so any read at any byte offset is served by one access (§9.1). Each way's
+`{virtual tag, epoch}` (`tg0`, `tg1`: `1024 × 31`) is one block RAM read with the banks, at the
+same set, so a lookup's tags arrive in s1 beside its data; its second port is the fill's (the
+write, and the other way's read for the duplicate-stamp check). The physical tags and validity
+(`pst[*]`: 32 × 64 rows of 27 + 2 bits) are LUTRAM, read at the lookup's, the fill's and the
+probe's rows in one cycle.
 
 **The bank is never wider than 64 bits, whatever the port width.** The I$ at `HW=8` reads
 128 bits: the even/odd chunk pair at a 16-byte-aligned address, which is the 2*BANKW window
@@ -1852,7 +1857,7 @@ one to fire. The I$'s parity array stays opt-in (`-DCACHE_PARITY`); the D$ has n
 | bits | unit | source of the numbering |
 |---|---|---|
 | `[15:0]` | D$ | `rv_dcache.v`, invariants block (11 conditions: an orphan fill beat, a response nothing awaits, a write completion nothing sent, beats out of order, two pvalid copies of a line, VA/PA page-offset mismatch, a tag reused while outstanding, a waiter on a dead MSHR, a beat into a line being read out, vvalid without pvalid, a current-epoch virtual hit on another line) |
-| `[31:16]` | I$ | `rv_icache.v`, invariants block (8 conditions: a line hitting in both ways, an unrequested L2 answer, alignment, a full skid, VA/PA page-offset mismatch, a demand read and a prefetch both outstanding, a duplicate stamp, one physical line in both ways) |
+| `[31:16]` | I$ | `rv_icache.v`, invariants block (9 conditions: a line hitting in both ways, an unrequested L2 answer, alignment, a full skid, VA/PA page-offset mismatch, a demand read and a prefetch both outstanding, a duplicate stamp, one physical line in both ways, a tag write in a bank read's cycle) |
 | `[47:32]` | LSU | `smolrv64_lsu.v` (8 conditions: the three B-rule tag checks, the two non-DRAM checks, `pt_ld_done` equivalence, `req_early`, an AMO or CBO off the ROB head) |
 | `[63:48]` | frontend | `smolrv64_frontend.v` (the fetch ring's, the predictor's and fetch's invariants) |
 
