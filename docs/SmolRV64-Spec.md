@@ -175,18 +175,24 @@ held a group until its room appeared and dispatched it in that cycle.
 
 ### 3.3 M stalls — `m_done` low
 
-`m_done = m_done_raw & ~head_block & ~ld_land & ~fp_land`
+`m_done = m_done_raw & ~head_block & ~((port_yield | sy_at_head) & ~m_nb) & ~m_flt_pulse`
 
 | cause | meaning |
 |---|---|
 | unit not complete | LSU / mul / div / FPU still working |
 | `head_block` | the op is a trap, redirect, `fence.i`, CSR/SYSTEM, fault, or faulting memory op, and is **not yet the ROB head** (`m_at_head`, a flop computed a cycle ahead from M's and the ROB's next state: set in the cycle the head reaches M's op) |
-| `ld_land` | a non-blocking load is landing this cycle and takes the LD shard's write port + M's ROB completion port; M yields |
-| `fp_land` | same, for an FP result |
+| `port_yield` | a load or an FP result is landing this cycle (`ld_land`, `fp_land`) and takes the write port + M's ROB completion port; M yields |
+| `sy_at_head` | the SYSQ's op is the ROB head; M's op, younger, waits for it |
+| `m_flt_pulse` | a memory op's fault, in the cycle the LSU reports it: the trap takes the latched fault a cycle later |
 
-Completion is **sticky** (`m_unit_done_q`): every unit's `done` is a one-cycle pulse, and
-`ld_land`/`fp_land` can hold `m_done` low afterwards, so the pulse and its result/fault are
-latched or they are lost.
+A plain load or store (`m_nb`) waits for neither `port_yield` nor `sy_at_head`: it only fills its
+queue entry and completes on neither port, and it leaves M in its fill cycle (asserted). From then
+on the entry is the queue's -- a load lands and leaves, and its slot is allocated again -- so M's
+index into it would name another op's entry.
+
+Completion is **sticky** (`m_unit_done_q`): every unit's `done` is a one-cycle pulse, and the terms
+above can hold `m_done` low afterwards, so the pulse and its result/fault are latched or they are
+lost.
 
 ### 3.4 Restarts
 
@@ -925,8 +931,8 @@ late. The head register's fan-out ends at those flops instead of running through
 candidate pick, the LSU's start and M's completion into every scheduler's wake and hold. `csr_file`'s `raddr` and `upd_*` are the
 register's flops (step 2's lesson: a LUTRAM read in front of `csr_file`'s combinational redirect
 cost IW=3 its closure). The read's value goes to lane A's write slot (§8) and the completion to
-the ROB through lane A's port (M, whose op is younger then, does not complete while the SYSQ's op is the ROB head,
-asserted); a trap through `c_kill`; a redirect through
+the ROB through lane A's port (M's op, younger then, waits while the SYSQ's op is the ROB head,
+a plain load or store excepted: §3.3); a trap through `c_kill`; a redirect through
 the one redirect gate (`redirect`, `fe_red_pulse`, `fe_red_tgt/seq`, `redirect_is_trap`).
 
 The SYSQ also takes FENCE and FENCE.I and every instruction that traps at dispatch (a fetch fault,

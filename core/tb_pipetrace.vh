@@ -12,14 +12,17 @@
    localparam integer PT_IW = `SMOLRV64_IW;          // slots and lanes
    localparam integer PT_FW = `SMOLRV64_FW;          // the bundle register's slots
    localparam integer PT_QD = `SMOLRV64_QD;          // the decoupling queue's depth (QDEPTH)
-   // rows by ROB index (after dispatch) and by sequence number (before)
+   // rows by ROB index (after dispatch: 256 entries, the core's ROB_DEPTH at most) and by sequence
+   // number (before: PT_SB bits, the core's SEQW at most) -- both checked at the start
+   localparam integer PT_SB = 10;
+   localparam integer PT_SN = 1 << PT_SB;
    reg [63:0] pt_id [0:255];  reg pt_v [0:255];  reg [7:0] pt_c [0:255];
-   reg [63:0] ps_id [0:255];  reg ps_v [0:255];  reg [7:0] ps_c [0:255];
-   reg [63:0] ps_pc [0:255];  reg [31:0] ps_raw [0:255];
+   reg [63:0] ps_id [0:PT_SN-1];  reg ps_v [0:PT_SN-1];  reg [7:0] ps_c [0:PT_SN-1];
+   reg [63:0] ps_pc [0:PT_SN-1];  reg [31:0] ps_raw [0:PT_SN-1];
    // mirrors of the bundle register and the decoupling queue: the sequence numbers they hold
-   reg [7:0]  pbm_seq [0:PT_FW-1];  reg [PT_FW-1:0] pbm_v;
-   reg [63:0] pbm_pc [0:PT_FW-1];   reg [31:0] pbm_raw [0:PT_FW-1];
-   reg [7:0]  qm_seq [0:PT_QD-1];   integer qm_n;
+   reg [PT_SB-1:0] pbm_seq [0:PT_FW-1];  reg [PT_FW-1:0] pbm_v;
+   reg [63:0]      pbm_pc [0:PT_FW-1];   reg [31:0] pbm_raw [0:PT_FW-1];
+   reg [PT_SB-1:0] qm_seq [0:PT_QD-1];   integer qm_n;
    // the fetch and stall rows
    reg [63:0] kan_sid, kan_gid;  reg kan_sopen, kan_gopen;  reg [4:0] kan_sk;  reg [8*12-1:0] kan_gk;
    integer    kti;
@@ -28,7 +31,11 @@
       kan_last = 64'd0; kan_next = 64'd0; kan_rid = 64'd0;
       kan_sopen = 1'b0; kan_gopen = 1'b0; kan_sk = 5'd0; kan_gk = "";
       pbm_v = {PT_FW{1'b0}};  qm_n = 0;
-      for (kti = 0; kti < 256; kti = kti + 1) begin pt_v[kti] = 1'b0; ps_v[kti] = 1'b0; end
+      for (kti = 0; kti < 256; kti = kti + 1) pt_v[kti] = 1'b0;
+      for (kti = 0; kti < PT_SN; kti = kti + 1) ps_v[kti] = 1'b0;
+      if (dut.core.ROB_DEPTH > 256 || dut.core.SEQW > PT_SB)
+         $fatal(1, "pipe trace: the core's ROB_DEPTH %0d / SEQW %0d exceed the trace's 256 rows / %0d bits",
+                dut.core.ROB_DEPTH, dut.core.SEQW, PT_SB);
       if (kan_on) begin
          kf = $fopen(kan_path, "w");
          if (kf == 0) begin $display("FATAL: cannot open +kanata=%0s", kan_path); $finish; end
@@ -70,7 +77,7 @@
       end
    endtask
    task ps_new;                   // a fetched instruction enters the bundle register
-      input [7:0] sq; input [63:0] pc; input [31:0] raw;
+      input [PT_SB-1:0] sq; input [63:0] pc; input [31:0] raw;
       reg [8*40-1:0] lb;
       begin
          if (ps_v[sq]) begin kan_close(ps_id[sq], ps_c[sq], 1'b1); ps_v[sq] = 1'b0; end
@@ -282,6 +289,7 @@
                ix = 8'(dut.core.s_rob[pj]);
                if (pt_v[ix]) kan_close(pt_id[ix], pt_c[ix], 1'b1);
                pt_id[ix] = ps_id[dut.core.s_seq[pj]];  pt_c[ix] = ps_c[dut.core.s_seq[pj]];  pt_v[ix] = 1'b1;
+               $fdisplay(kf, "L\t%0d\t1\trob %0d seq %0d", pt_id[ix], ix, dut.core.s_seq[pj]);   // the detail: grep a row by either
             end else
                kan_close(ps_id[dut.core.s_seq[pj]], ps_c[dut.core.s_seq[pj]], 1'b1);
             ps_v[dut.core.s_seq[pj]] = 1'b0;
@@ -307,7 +315,7 @@
          if (dut.core.fe.pb_load & dut.core.fe.dq_valid) begin
             for (pj = 0; pj < PT_FW; pj = pj + 1) begin
                pbm_v[pj] = dut.core.fe.dq_sv[pj];
-               pbm_seq[pj] = dut.core.fe.dq_seq[pj*8 +: 8];
+               pbm_seq[pj] = PT_SB'((dut.core.fe.dq_seq >> (pj * dut.core.SEQW)) & ((64'd1 << dut.core.SEQW) - 64'd1));
                pbm_pc[pj]  = dut.core.fe.dq_pc[pj*64 +: 64];
                pbm_raw[pj] = dut.core.fe.dq_inst[pj*32 +: 32];
             end

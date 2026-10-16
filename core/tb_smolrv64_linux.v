@@ -957,6 +957,22 @@ module tb;
                dut.core.fe.q_cnt, dut.core.fe.q_room,
                dut.core.s_v, dut.core.s_takev, dut.core.fe.redirect);
 
+   // +mq_trace: M's fill and the load queue each cycle inside +trace_from/+trace_to -- M's op, what
+   // M takes (an arrival or a lane's bypass), the lanes' addresses, the arrivals waiting, the load
+   // queue's live and filled entries, its tail and allocation, the kill and its release, a landing.
+   reg mq_tr_on;
+   initial mq_tr_on = $test$plusargs("mq_trace");
+   always @(posedge clk) if (!reset && mq_tr_on && trace_on)
+      $display("MQ c=%0d M v=%b ld=%b seq=%0d rob=%0d lqi=%0d dead=%b adv=%b | go=%b byp=%b rwin=%b uld=%b sli=%0d pk=%b/%0d/%0d | lm=%b%b%b lqi=%0d,%0d,%0d seq=%0d,%0d,%0d rob=%0d,%0d,%0d | la_v=%b | lq v=%b av=%b tail=%0d alloc=%b@%0d seq=%0d rob=%0d kmask=%b | kd=%b rel=%b frv=%b red=%b | land=%b@%0d",
+               c, dut.core.m_valid, dut.core.m_ld_nb, dut.core.m_seq, dut.core.m_rob_idx, dut.core.m_lq_idx, dut.core.m_dead, dut.core.m_advance,
+               dut.core.s_go, dut.core.s_byp, dut.core.r_win, dut.core.u_ld, dut.core.s_li, dut.core.lq_pk_v, dut.core.lq_pk_idx, dut.core.lq_pk_seq,
+               dut.core.l_lm[0], dut.core.l_lm[1], dut.core.l_lm[2], dut.core.l_lqi[0], dut.core.l_lqi[1], dut.core.l_lqi[2],
+               dut.core.l_seq[0], dut.core.l_seq[1], dut.core.l_seq[2], dut.core.l_rob[0], dut.core.l_rob[1], dut.core.l_rob[2],
+               dut.core.la_v,
+               dut.core.u_lq.v, dut.core.u_lq.av, dut.core.u_lq.tail, dut.core.d_ld_alloc, dut.core.lq_d_idx, dut.core.gld_seq, dut.core.gld_rob, dut.core.lq_kmask,
+               dut.core.rob_kd_v, dut.core.fr_rel, dut.core.fr_v, dut.core.redirect,
+               dut.core.ld_land, dut.core.ld_land_idx);
+
    // +watch_pc=<hex pc>: follow ONE instruction -- its issue into the F stage or in a lane, its
    // retirement, and every F-stage PRF write to the physreg it was given.
    // Built for a jal whose link retired as another instruction's data (2026-09-21); a generated

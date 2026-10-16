@@ -1820,7 +1820,8 @@ module smolrv64_core
    // (lq_b_ok) before its copy has caught up -- one cycle, and M is not looking.
    always @(posedge clk)
       if (!reset && m_ld_nb && lq_b_ok && sq_ld_older && !sq_l_older[m_lq_idx])
-         $fatal(1, "smolrv64_core: the registered older-store answer (0) is less conservative than the live one (1) for load %0d", m_lq_idx);
+         $fatal(1, "smolrv64_core: the registered older-store answer (0) is less conservative than the live one (1) for load %0d (its tag %0d, the query's %0d; M rob %0d dead %b)",
+                m_lq_idx, lq_e_tag[m_lq_idx*SQ_TB +: SQ_TB], lq_q_tag, m_rob_idx, m_dead);
 
    // ONE pre-translated port, two users. The committing store wins: it is at the ROB head,
    // so it is unconditionally older than any queued load, and it frees the port immediately.
@@ -3266,10 +3267,15 @@ module smolrv64_core
    always @(posedge clk) m_head_q <= ~reset & m_valid & m_at_head & ~m_done;
    wire head_block   = m_valid & m_needs_head & ~m_at_head;   // the instret second cycle is the SYSQ's now
 
-   // One write port, one ROB completion port: when a load lands, M yields the cycle -- unless M
-   // holds a plain load or store, which only fills its queue entry and completes on neither.
-   assign m_done = m_done_raw & ~head_block & ~(port_yield & ~m_nb) & ~sy_at_head & ~m_flt_pulse;
+   // One write port, one ROB completion port: when a load lands, M yields the cycle, and M's op,
+   // younger, waits while the SYSQ's op is the ROB head -- unless M holds a plain load or store,
+   // which only fills its queue entry and completes on neither. That one goes in its fill cycle,
+   // and must: from then on the entry is the queue's (a load lands and leaves, and its slot is
+   // allocated again), so M's index into it would name another op's entry.
+   assign m_done = m_done_raw & ~head_block & ~((port_yield | sy_at_head) & ~m_nb) & ~m_flt_pulse;
    assign m_advance = ~m_valid | m_done;
+   always @(posedge clk) if (!reset && m_valid && m_nb && m_unit_done_q)
+      $fatal(1, "smolrv64_core: M holds a plain load or store after its fill (pc %h): its queue entry is no longer M's", m_pc);
 
 
    // ---- the trap shadow (C3 step 1, 2026-09-18; the system-op half became the SYSQ in step 3) ------

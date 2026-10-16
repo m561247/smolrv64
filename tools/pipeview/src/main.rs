@@ -190,7 +190,7 @@ fn load(path: &str, elf: Option<&str>) -> io::Result<Vec<Row>> {
                 by_id.insert(f[1].to_string(), rows.len());
                 rows.push(Row { label: String::new(), stages: Vec::new(), end: None, flushed: false, stall: false, fill: b' ' });
             }
-            "L" if f.len() > 3 => {
+            "L" if f.len() > 3 && f[2] == "0" => {   // the label; a detail line (type 1) is Konata's
                 let Some(&i) = by_id.get(f[1]) else { continue };
                 let r = &mut rows[i];
                 if let Some(cause) = f[3].strip_prefix("** ") {
