@@ -8,6 +8,7 @@
 #   STRESS_S=900 ...                                  # seconds of post-login userspace stress (0 = skip)
 #   STRESS_ONLY=1 tools/board-gate.sh <resultdir>        # no program/boot: run the stress on the board as it is
 #   VGA=0 ...                                         # boot without the graphics console (default VGA=1)
+#   LAT=0 ...                                         # skip the memory-latency chase after the stress
 #
 # PASS = `login:` reached with ZERO faults, AND (since 2026-09-17) a bounded USERSPACE STRESS
 # over ssh (Geekbench 5 for STRESS_S seconds) that produces no fault in dmesg or on the console:
@@ -21,7 +22,8 @@
 # is read from THIS boot's own kernel marker (`riscv: base ISA extensions`) onward: judging
 # everything past the pre-program offset produced false FAILs and one false PASS on 2026-09-17
 # (the old kernel's watchdog lines, the old kernel's login prompt). The monitor's `rtl=` line
-# is captured so the log proves WHICH RTL booted.
+# is captured so the log proves WHICH RTL booted. A PASS also prints the board's memory latency
+# (latency(), below): a record, never a verdict.
 set -u
 cd "$(dirname "$0")/.."
 REPO=$(pwd); PLAT=$REPO/platforms/rk-xcku5p-f-v1.2; UB=$REPO/workloads/ubuntu
@@ -64,15 +66,21 @@ MARK='riscv: base ISA extensions'
 # sshd comes up a few minutes after login:. Geekbench runs its subtests in order under a timeout
 # (124 = the budget ended, the expected exit); the verdict is the exit status plus every fault
 # line dmesg and the console gained during the run.
-stress() {
-   [ "${STRESS_S:-900}" -gt 0 ] || { echo "stress: skipped (STRESS_S=0)"; return 0; }
-   local i rc pre_d pre_c faults; ip=""            # ip stays visible: the integrity log is read after
+# find_ip sets ip once the board's sshd answers there (within 400 s); ip stays visible to the
+# integrity log and the latency chase, which run after the stress.
+find_ip() {
+   local i
    for i in $(seq 1 40); do
       ip=$(con_ip "${PRE:-0}")
-      [ -n "$ip" ] && timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no tommy@$ip true 2>/dev/null && break
+      [ -n "$ip" ] && timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no tommy@$ip true 2>/dev/null && return 0
       sleep 10
    done
-   [ -n "$ip" ] || { echo "BOARD: FAIL (stress: no ssh to the board within 400 s)"; return 1; }
+   ip=""; return 1
+}
+stress() {
+   [ "${STRESS_S:-900}" -gt 0 ] || { echo "stress: skipped (STRESS_S=0)"; return 0; }
+   local rc pre_d pre_c faults
+   find_ip || { echo "BOARD: FAIL (stress: no ssh to the board within 400 s)"; return 1; }
    # The board must be running THIS tree's device tree: its ISA string is what Linux enables.
    local want got
    want=$(sed -n 's/.*riscv,isa = "\(.*\)";.*/\1/p' "$UB/ubuntu-nfs.dts.in" | head -1)
@@ -106,6 +114,24 @@ errlog() {
    local out; out=$("$REPO/tools/errlog-read.sh" "$ip" 2>&1); echo "$out"
    case "$out" in "errlog: FAULT"*) echo "BOARD: FAIL (integrity log)"; return 1;; esac
    return 0
+}
+# ---- the memory latency (tools/board/membench), a record and never a verdict --------------------
+# No simulation sees the board's DRAM path (the DDR port's clock crossings, the MIG), so the gate
+# measures it: chase2 counts its own user-mode cycles over 16 KiB (D$ hits), 256 KiB (64 pages,
+# all in the dTLB's first level, most loads missing the D$) and 4 MiB (pages only the second level
+# holds), and the D$ miss and the first-level dTLB miss are solved from its counted miss rates.
+# It is built on the board in the same ssh session, and the 30 s after the build let the login's
+# systemd --user settle: its CPU, and the TLBs every context switch empties, a chase counts.
+latency() {
+   [ "${LAT:-1}" != 0 ] || return 0
+   [ -n "${ip:-}" ] || find_ip || { echo "latency: no ssh to the board"; return 0; }
+   tar -C "$REPO/tools/board/membench" -cf - Makefile chase2.c | timeout 300 ssh -o BatchMode=yes tommy@$ip \
+      'D=/var/tmp/gate-latency; rm -rf $D && mkdir -p $D && tar -C $D -xf - && make -s -C $D chase2 >/dev/null && sleep 30 && for k in 16 256 4096; do $D/chase2 $k 1 1000000; done' \
+      > "$RES/latency.txt" 2>&1
+   awk '/ KiB k=1 / { for (i = 2; i <= NF; i++) { if ($i == "cycles/step") c[$1] = $(i-1); if ($i == "DCMISS") m[$1] = $(i-1); if ($i == "DTLB_MISS") t[$1] = $(i-1) } }
+        END { if (!(16 in c) || !(256 in c) || !(4096 in c) || m[256] < 0.1 || t[4096] < 0.1) { print "latency: unavailable (latency.txt)"; exit }
+              h = c[16]; d = h + (c[256] - h) / m[256]; f = (c[4096] - h - m[4096] * (d - h)) / t[4096]
+              printf "latency: D$ hit %.1f cycles, D$ miss %.1f (256 KiB, %.2f misses a load), a first-level dTLB miss +%.1f (4 MiB, %.2f a load); chase2, user-mode cycles\n", h, d, m[256], f, t[4096] }' "$RES/latency.txt"
 }
 if [ -n "${STRESS_ONLY:-}" ]; then RES=${1:?result dir}; mkdir -p "$RES"; stress && { echo "BOARD: PASS (stress only)"; exit 0; }; exit 1; fi
 
@@ -219,6 +245,7 @@ fi
 if [ "$LOGIN" -ge 1 ] && [ "$FAULTS" -eq 0 ]; then
    if [ -n "${REPLAY:-}" ]; then echo "BOARD: PASS"; exit 0; fi
    stress || exit 1
+   latency
    echo "BOARD: PASS"; exit 0
 fi
 printf '%s' "$NEW" | grep -aE "$BAD|epc :" | head -4

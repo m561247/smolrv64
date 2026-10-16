@@ -217,3 +217,28 @@ Every step is measured or modelled first, then gated by riscv-tests, the unit be
   clock, so this needs either the stores on the read port's cycles or a different split of the
   ports.
 - **The L2's hit latency** in core cycles, through both crossings, from step 1's bench.
+
+## Deferred: what the board measures today (Tommy, 2026-10-16: important, after the core work)
+
+`tools/board/membench` on 2ed18026 (docs/SmolRV64-Spec.md §9.2 and §14 give the figures; the
+board gate prints the first two on every PASS):
+
+- **The DDR port's clock crossings: 4.5 of a D$ miss's 46.6 cycles.** `ddr_port_cdc`'s FIFOs treat
+  their clocks as unrelated, so every request and response pays `CDC_SYNC_STAGES` of
+  synchronizers (42.1 cycles with the clocks related, 258ef1fd). The clocks are related:
+  probe_clk is ui_clk / 2 from one MMCM. A synchronous 2:1 crossing -- a register on each side and
+  a two-ui_clk multicycle path, not a FIFO's pointer crossing -- would take the 4.5 back without
+  the zero-slack pointer paths that made the FIFOs unrelated. The L2 in front of the port hides
+  the same cycles on its hits; the crossing stays for its misses.
+- **The dTLB's first level: 5 to 9 cycles a load outside its 64 pages** (256 KiB) that the
+  second level holds, a replay through the walker's `L2LK` cycle. A wider first level (block RAM,
+  read a cycle early, or 128 to 256 entries of LUTRAM) or a second-level hit that answers the
+  waiting load without the replay. The future TLB plan's large 4 KiB and 2 MiB levels sit behind
+  it either way.
+- **A sequential stream keeps under two lines in flight**: eight 8-byte loads hold a line in the
+  16-entry load queue, so a DRAM read stream takes 2.4 bytes a cycle while the 8 MSHRs idle.
+  Load-queue entries that wait per line instead of per load, or the D$'s next-line stream buffer
+  (built, `PREFETCH(0)`: it corrupted memory on the board under real DMA, a mechanism still
+  unnamed, which must be named before it goes back on).
+- **One page walker**: a footprint that walks on every load keeps 2.4 loads in flight against
+  7 to 8 when the dTLB translates them. A second walker, or walks that overlap their PTE reads.
