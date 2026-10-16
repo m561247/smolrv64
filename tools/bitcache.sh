@@ -46,9 +46,12 @@ tree_id() {
 # working tree holds them. A dirty probe and the commit made of it share it; the gate's identity
 # stamp (tools/gate.sh) relies on exactly that. The list is sorted by bytes (LC_ALL=C): a locale's
 # collation orders it differently on coffee (GNU, en_US) and on M5 (BSD), and so did the id.
+# core/cosim-expected.txt is left out: no build and no bench reads it (the lockstep runner does),
+# and its rows are measured on the finished RTL, so counting it made every landing that moves a
+# row a second probe.
 content_id() {
     local list
-    local cexcl=(':(exclude)*.xpr' ':(exclude)*.log' ':(exclude)src/mem.linehex')
+    local cexcl=(':(exclude)*.xpr' ':(exclude)*.log' ':(exclude)src/mem.linehex' ':(exclude)core/cosim-expected.txt')
     list=$(cd "$here" && { git ls-files -c -- "${diff_paths[@]}" third_party "${cexcl[@]}"
                            git ls-files -o --exclude-standard -- "${diff_paths[@]}" | grep -v -E '\.(log|linehex|elf|bin|flock)$'
                          } | LC_ALL=C sort -u | while read -r f; do [ -f "$f" ] && echo "$f"; done)
