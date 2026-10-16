@@ -341,6 +341,10 @@ module smolrv64_rob
             irr  <= flush_pos;
             head <= flush_pos;
          end
+         // a column at IW and above never holds an op: its bits are constants, so no completion
+         // port decodes them and no read of a row waits on them
+         for (rj = 0; rj < DEPTH; rj = rj + 1)
+            if ((rj % NCOL) >= IW) begin v[rj] <= 1'b0;  done[rj] <= 1'b0; end
       end
    end
    // The pointer never lags the head and never passes the tail (docs/rtl-rules.md A1).
