@@ -261,7 +261,9 @@ module rv_dcache #(
    reg              wb_sent [0:NWB-1];
    reg              wb_cpl  [0:NWB-1];           // a CBO completes with this write
    reg [57:0]       wb_pl   [0:NWB-1];
-   reg [511:0]      wb_data [0:NWB-1];
+   // flops: read at one entry while written at another, distributed RAM would be 512 dual-port
+   // cells of 16 rows, two LUTs each, for 1,024 bits; the read's 2:1 select folds into cq_wdata's
+   (* ram_style = "registers" *) reg [511:0] wb_data [0:NWB-1];
    // the victim read-out: four bank reads of (ro_way, ro_set), each landing a cycle later
    reg              ro_on;  reg [1:0] ro_cnt;  reg ro_way;  reg [IB-1:0] ro_set;  reg [WBB-1:0] ro_wb;
    reg              rl_v;   reg [1:0] rl_row;  reg rl_way;  reg [WBB-1:0] rl_wb;  reg rl_last;
