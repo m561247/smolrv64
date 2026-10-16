@@ -303,14 +303,19 @@ module smolrv64_predictor
          if (mkv[pwk]) begin pw_e1 = pw_e0;  pw_e0 = pq_e8[pwk]; end
    end
    wire [PQB-1:0]  pw_p1 = pq_wp + 1'b1;
-   wire            pw_two = (nmk == 4'd2);
-   // bank b takes the entry whose position has parity b: entry 0 at pq_wp, entry 1 at pq_wp + 1
-   wire            b0_we = push & (~pq_wp[0] | pw_two);
-   wire            b1_we = push & ( pq_wp[0] | pw_two);
+   // bank b takes the entry whose position has parity b: entry 0 at pq_wp, entry 1 at pq_wp + 1.
+   // BOTH ARE WRITTEN WHENEVER THE QUEUE HAS ROOM, and push only moves the pointers: the two
+   // positions past the tail hold nothing until the pointers take them, and a push needs room
+   // (fetch advances only with pq_room), so the write enables are pq_n's alone -- not the marks,
+   // the iMMU and the I$ handshake that decide the push.
+   wire            b0_we = pq_room;
+   wire            b1_we = pq_room;
    wire [PQB-2:0]  b0_ix = pq_wp[0] ? pw_p1[PQB-1:1] : pq_wp[PQB-1:1];
    wire [PQB-2:0]  b1_ix = pq_wp[0] ? pq_wp[PQB-1:1] : pw_p1[PQB-1:1];
    wire [QEW-1:0]  b0_d  = pq_wp[0] ? pw_e1 : pw_e0;
    wire [QEW-1:0]  b1_d  = pq_wp[0] ? pw_e0 : pw_e1;
+   always @(posedge clk) if (!reset && push && !pq_room)
+      $fatal(1, "smolrv64_predictor: a push of %0d marks into a queue holding %0d of %0d", nmk, pq_n, PQD);
    always @(posedge clk) if (b0_we) pq0[b0_ix] <= b0_d;
    always @(posedge clk) if (b1_we) pq1[b1_ix] <= b1_d;
 
