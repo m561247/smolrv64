@@ -152,7 +152,7 @@ def topdown(v, width):
         print("    %-34s %6.2f%%" % ("retired", 100.0 * ins / slots))
         print("    %-34s %6.2f%%" % ("dispatched, squashed (wrong path)", 100.0 * (g("DPATCH") - ins) / slots))
     rows = [("conditional branch", "RED_BR"), ("indirect jump", "RED_JLR"), ("trap / system op", "RED_TRP"),
-            ("D$ line fills", "DCMISS"), ("I$ misses", "ICMISS"), ("dTLB walks", "DTLB_MISS")]
+            ("D$ line fills", "DCMISS"), ("I$ misses", "ICMISS"), ("dTLB first-level misses", "DTLB_MISS")]
     got = [(l, k) for l, k in rows if v.get(k) is not None]
     if got:
         print("\n  per 1000 instructions")
@@ -206,11 +206,11 @@ def main():
     for k, label in BACKEND:
         if v.get(k) is not None and g(k):
             print("    %-30s %10.3f  %5.1f%%" % ("stall: " + label, g(k)/ins, 100.0*g(k)/cyc))
-            # DT_WALK is a SUBSET of ST_MEM (a walk holds the LSU), reported underneath it, never
-            # added: the dTLB is 16 entries direct-mapped, and a layout that thrashes it costs a
-            # walk per load with no D$ miss to show for it (2026-09-05).
+            # DT_WALK is a SUBSET of ST_MEM (the dTLB's second-level lookup and its walks hold the
+            # LSU), reported underneath it, never added: a layout that thrashes the dTLB costs a
+            # lookup or a walk per load with no D$ miss to show for it.
             if k == "ST_MEM" and v.get("DT_WALK") is not None:
-                print("      %-28s %10.3f  %5.1f%%" % ("- of which dTLB walking", g("DT_WALK")/ins, 100.0*g("DT_WALK")/cyc))
+                print("      %-28s %10.3f  %5.1f%%" % ("- of which dTLB L2 and walks", g("DT_WALK")/ins, 100.0*g("DT_WALK")/cyc))
             if k == "ST_MEM" and any(v.get(kk) is not None for kk, _ in MEM_SUB):
                 for kk, ll in MEM_SUB:
                     if v.get(kk) is not None:
@@ -263,8 +263,8 @@ def main():
         mpki.append("    %-30s %10.3f   (%.1f%% of cycles: a resolved redirect waiting for the head)"
                     % ("redirect drain, cycles/insn", g("RD_WAIT")/ins, 100.0*g("RD_WAIT")/cyc))
     if v.get("DTLB_MISS") is not None:
-        per_walk = "" if not g("DTLB_MISS") or v.get("DT_WALK") is None else "     (%.1f cycles per walk)" % (g("DT_WALK")/g("DTLB_MISS"))
-        mpki.append("    %-30s %10.3f%s" % ("dTLB misses (walks)", per_k(g("DTLB_MISS")), per_walk))
+        per_walk = "" if not g("DTLB_MISS") or v.get("DT_WALK") is None else "     (%.1f cycles per first-level miss)" % (g("DT_WALK")/g("DTLB_MISS"))
+        mpki.append("    %-30s %10.3f%s" % ("dTLB first-level misses", per_k(g("DTLB_MISS")), per_walk))
     for code, label, acc in (("REDIR", "pipeline redirects", None),
                              ("DCMISS", "D$ line fills", "DCACC"),
                              ("ICMISS", "I$ misses", "ICACC")):

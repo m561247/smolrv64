@@ -34,7 +34,7 @@ case "$SET" in
   # derive.  r0305 (ROB full) and r0317 (the mispredict drain) are stack terms since
   # 2026-09-05; the set that lacked them read "issue / retire" 10 points too high.
   cpi) EV=r0300,r0301,r0302,r0303,r0304,r0305,r0311,r0312,r0313,r0314,r0317,r0005,r0102 ;;
-  # + the dTLB: walks begun (r0104) and cycles walking (r0318), a subset of ST_MEM.
+  # + the dTLB: first-level misses (r0104) and cycles in its second level or walking (r0318), a subset of ST_MEM.
   mem) EV=r0003,r0004,r0100,r0102,r0110,r0112,r0104,r0318 ;;
   # What ST_MEM is made of (2026-09-17): the door, the miss wait, the alias blocks, the reorders,
   # the wrong-path kills, the device waits and the queue occupancies, with loads and misses beside.

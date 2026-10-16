@@ -221,8 +221,8 @@ module csr_file
                       HPMEV_RED_JLR= 16'h0007,   // Redirect: indirect jump (jalr) target
                       HPMEV_RED_TRP= 16'h0008,   // Redirect: trap / exception / system op
                       HPMEV_RD_WAIT= 16'h0317,   // A mispredict's restart: from its resolve to its release or its squash at the ROB head
-                     HPMEV_DT_WALK= 16'h0318,   // Data MMU walking (cycles; inside ST_MEM)
-                     HPMEV_DTLB_MISS=16'h0104,  // dTLB miss: a data page-table walk began
+                     HPMEV_DT_WALK= 16'h0318,   // Data MMU busy: its second-level lookup or a walk (cycles; inside ST_MEM)
+                     HPMEV_DTLB_MISS=16'h0104,  // dTLB first-level miss: a second-level lookup began, and a page-table walk when that misses
                      // The memory buckets (2026-09-17): what ST_MEM is made of. Cycles unless noted.
                      HPMEV_MEM_HITSER   = 16'h0319,   // a ready load candidate the LSU door did not take
                      HPMEV_MEM_LDINFL   = 16'h031a,   // a load access in flight (hit ~3 cycles each; the rest is miss wait)

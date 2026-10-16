@@ -147,12 +147,12 @@
   {
     "EventName": "DT_WALK",
     "EventCode": "0x0318",
-    "BriefDescription": "Data MMU walking (cycles; inside ST_MEM)"
+    "BriefDescription": "Data MMU busy: its second-level lookup or a walk (cycles; inside ST_MEM)"
   },
   {
     "EventName": "DTLB_MISS",
     "EventCode": "0x0104",
-    "BriefDescription": "dTLB miss: a data page-table walk began"
+    "BriefDescription": "dTLB first-level miss: a second-level lookup began, and a page-table walk when that misses"
   },
   {
     "EventName": "MEM_HITSER",

@@ -1331,8 +1331,8 @@ Two independent `mmu` instances — **iTLB** in `smolrv64_core`, **dTLB** in `sm
 
 | | |
 |---|---|
-| TLB | **direct-mapped** on the VPN's low bits, read in the translate cycle: the dTLB **2048 entries** (LUTRAM, 8 MiB of 4 KiB pages), the iTLB 64 (one LUTRAM depth: no read mux) |
-| iTLB second level | **512 entries** (`L2N`), direct-mapped, on the miss path: read in the cycle after a first-level miss (`L2LK`) from the walker's registered VA, so the fetch path keeps the first level's one LUTRAM depth. A hit (perms checked as on the first level) answers as a one-cycle walk and refills the first level; a miss walks, and the walk installs its leaf in both. It looks up only where a walk could start (`walk_ok`) |
+| TLB | **direct-mapped** on the VPN's low bits, read in the translate cycle: **64 entries** each, the dTLB and the iTLB (LUTRAM, one depth: no read mux) |
+| Second level | the dTLB's **2048 entries** (8 MiB of 4 KiB pages, the reach GB5 Machine Learning's SGEMM column walk needs) and the iTLB's **512** (`L2N`), direct-mapped, on the miss path: one block RAM of whole entries, read in `IDLE` at the request's VA and checked in the cycle after a first-level miss (`L2LK`) against the walker's registered VA, so each first level keeps its one LUTRAM depth. A hit (perms checked as on the first level) answers as a one-cycle walk and refills the first level; a miss walks, and the walk installs its leaf in both. It looks up only where a walk could start (`walk_ok`; the dTLB always) |
 | Scheme | Sv39, 3-level hardware page-table walk |
 | PTW | reads through the D$ read port (§8); a miss fills through the D$ |
 | Superpages | 2 MiB / 1 GiB; misaligned superpage → fault |
@@ -1660,8 +1660,8 @@ Address translation, two instances (iTLB in `smolrv64_core`, dTLB in `smolrv64_l
 | array | shape | width | bits |
 |---|---|---|---|
 | iTLB `tlb_v`/`tag`/`ppn`/`lvl`/`perm`/`nc`/`n` | 64 | 1+27+44+2+8+1+1 = 84 | 5 376 |
-| iTLB second level `tlb2_*`, the same fields | 512 | 84 | 43 008 |
-| dTLB, the same fields | 2048, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 84 | 172 032 per copy |
+| dTLB, the same fields | 64, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 84 | 5 376 per copy |
+| second level `tlb2`, block RAM: {installed, 16-bit generation} and the fields but `v` | iTLB 512, dTLB 2048 | 17+27+44+2+8+1+1 = 100 | 51 200 + 204 800 |
 
 Also in `rv_soc_top`: `lmem` — the 256 KiB on-chip boot/monitor SRAM, `NLLINE × 512`; and
 `u_uart_rxq` — the UART's receive FIFO, 4096 × 8, one block RAM.
@@ -1740,7 +1740,7 @@ never a partition:
 | `ST_ROB` | r0305 | the queue head waits for ROB room (`hd_wait & ~cr_rob1`) |
 | `ST_IQ` / `ST_RN` / `ST_SQ` / `ST_LQ` / `ST_SRZ` | r0306 / r0307 / r0308 / r0309 / r030a | `ST_DSP` by cause, disjoint, in this order: the head's scheduler, or a divide's MD stage, has no credit / a rename shard is below `LOWAT` / no store-queue credit / no load-queue credit / the rest, a serializing op draining or one in flight |
 | `RD_WAIT` | r0317 | a mispredict's restart in progress: from its resolve to its release (the walk and the kill, §6) or its squash at the ROB head |
-| `DT_WALK` / `DTLB_MISS` | r0318 / r0104 | cycles the data MMU is walking (a subset of `ST_MEM`) / walks begun. The dTLB is 2048 entries direct-mapped on VPN[10:0]; two hot pages 8 MiB apart share an index and cost a walk per load and no D$ miss |
+| `DT_WALK` / `DTLB_MISS` | r0318 / r0104 | cycles the data MMU is busy, its second level's lookup included (a subset of `ST_MEM`) / first-level misses, each a second-level lookup and, when that misses, a walk. The dTLB is 64 entries direct-mapped on VPN[5:0] and its second level 2048 on VPN[10:0]; two hot pages 8 MiB apart share a second-level index and cost a walk per load and no D$ miss |
 | `ST_MUL` / `ST_DIV` | r0302 / r0301 | occupancy, not stalls: cycles a multiply is in flight in any lane (`m*_1`, `m*_2`) / the MD stage holds a divide |
 | `MEM_HITSER` | r0319 | a ready load candidate the LSU door did not take (hit serialization) |
 | `MEM_LDINFL` | r031a | a load access in flight; a hit is ~3 cycles, the rest is miss wait |

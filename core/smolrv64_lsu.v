@@ -374,10 +374,12 @@ module smolrv64_lsu
    wire [1:0]  mm_acc  = pm_q ? (is_lr ? 2'd1 : req_amo ? 2'd3 : mm_st ? 2'd2 : 2'd1)
                               : (wk_st ? 2'd2 : 2'd1);
 
-   // The dTLB: 2048 entries, direct-mapped on the VPN's low bits, 8 MiB of 4 KiB pages -- the
-   // reach GB5 Machine Learning's SGEMM needs, whose column walk touches a new page every one or
-   // two loads. Read in the translate cycle, so distributed RAM, not block RAM.
-   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(2048), .TLBI(11)) u_mmu
+   // The dTLB: 64 entries read in the translate cycle (distributed RAM), and behind them a second
+   // level of 2048 in block RAM, 8 MiB of 4 KiB pages -- the reach GB5 Machine Learning's SGEMM
+   // needs, whose column walk touches a new page every one or two loads. A first-level miss that
+   // the second level holds answers as a one-cycle walk; at 2048 entries in distributed RAM the
+   // first level alone was 8.4 K LUTs.
+   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6), .L2N(2048), .L2I(11)) u_mmu
      (.clk(clk), .reset(reset),
       .req_valid(xl_req), .req_vaddr(mm_va), .req_access(mm_acc),
       .priv(xl_priv), .sum(xl_sum), .mxr(xl_mxr), .satp(xl_satp), .flush(xl_flush), .walk_ok(1'b1),

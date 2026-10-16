@@ -82,10 +82,7 @@ tlb_tag : iTLB/dTLB
 tlb_ppn : iTLB/dTLB
 tlb_perm: iTLB/dTLB
 tlb_g   : iTLB/dTLB {installed, generation}: a flush advances the generation, so no per-entry clear
-l2.tlb2_tag : the iTLB's second level (mmu L2N), 512 deep on its miss path
-l2.tlb2_ppn : the iTLB's second level
-l2.tlb2_perm: the iTLB's second level
-l2.tlb2_g   : the iTLB's second level {installed, generation}
+l2.tlb2 : the second level (mmu L2N) on the first level's miss path, block RAM: the iTLB's 512, the dTLB's 2048
 
 # ---- the D$'s physical state: one LUTRAM per (way, colour), 64 rows, read at two rows -------
 # (32 at DC_KB=128: 2 ways x 16 colours)

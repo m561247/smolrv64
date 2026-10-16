@@ -331,32 +331,38 @@ module mmu
       tlb_n[va_q[12+:TLBI]]    <= f1_n;
    end
    generate if (L2N > 0) begin : l2
-      (* ram_style = "distributed" *) reg [GB:0] tlb2_g [0:L2N-1];   // {installed, generation}
-      reg [26:0] tlb2_tag  [0:L2N-1];
-      reg [43:0] tlb2_ppn  [0:L2N-1];
-      reg [1:0]  tlb2_lvl  [0:L2N-1];
-      reg [7:0]  tlb2_perm [0:L2N-1];
-      reg        tlb2_nc   [0:L2N-1];
-      reg        tlb2_n    [0:L2N-1];
+      // ONE BLOCK RAM, {installed, generation, tag, ppn, lvl, perm, nc, n} per entry, read port and
+      // write port. It is read in IDLE at the request's VA, so the word of the walk that starts there
+      // is out in L2LK, which checks it against va_q (the same VA, registered as the walk starts):
+      // the hit answers in the same cycle a distributed read of va_q would. A scan in the read's
+      // cycle may have cleared the entry after it was read, so that word does not hit (l2q_ok).
+      localparam integer O_PERM = 2, O_LVL = O_PERM + 8, O_PPN = O_LVL + 2, O_TAG = O_PPN + 44;
+      localparam integer L2W = O_TAG + 27 + (GB + 1);
+      (* ram_style = "block" *) reg [L2W-1:0] tlb2 [0:L2N-1];
+      reg [L2W-1:0] l2q;
+      reg           l2q_ok;
       integer t2;
-      initial for (t2 = 0; t2 < L2N; t2 = t2 + 1) begin tlb2_g[t2] = {(GB+1){1'b0}}; tlb2_n[t2] = 1'b0; end
-      wire [L2I-1:0] ri = va_q[12+:L2I];
-      assign l2_hit  = ~scan & (tlb2_g[ri] == {1'b1, cg}) & (tlb2_tag[ri] == va_q[38:12])
-                     & ~perm_fault({56'd0, tlb2_perm[ri]}, acc_q, prv_q, sum_q, mxr_q);
-      assign l2_ppn  = tlb2_ppn[ri];   assign l2_lvl = tlb2_lvl[ri];  assign l2_perm = tlb2_perm[ri];
-      assign l2_nc   = tlb2_nc[ri];    assign l2_n   = tlb2_n[ri];
-      // the walk's fill writes the second level too (one write statement each, rule I10)
+      initial begin
+         for (t2 = 0; t2 < L2N; t2 = t2 + 1) tlb2[t2] = {L2W{1'b0}};
+         l2q = {L2W{1'b0}};  l2q_ok = 1'b0;
+      end
+      always @(posedge clk) if (st == IDLE) l2q <= tlb2[req_vaddr[12+:L2I]];
+      always @(posedge clk) if (st == IDLE) l2q_ok <= ~scan;
+      wire [GB:0]  q_g    = l2q[L2W-1 -: GB+1];
+      wire [26:0]  q_tag  = l2q[O_TAG +: 27];
+      wire [7:0]   q_perm = l2q[O_PERM +: 8];
+      assign l2_hit  = ~scan & l2q_ok & (q_g == {1'b1, cg}) & (q_tag == va_q[38:12])
+                     & ~perm_fault({56'd0, q_perm}, acc_q, prv_q, sum_q, mxr_q);
+      assign l2_ppn  = l2q[O_PPN +: 44];  assign l2_lvl = l2q[O_LVL +: 2];  assign l2_perm = q_perm;
+      assign l2_nc   = l2q[1];         assign l2_n   = l2q[0];
+      // the scan clears an entry, the walk's fill installs one: one write statement (rule I10). A
+      // fill in a scan's cycle is dropped, as a fill that never happened: the next miss walks.
       wire           we2 = ~reset & (scan | fill);
       wire [L2I-1:0] wa2 = scan ? scan_i[L2I-1:0] : va_q[12+:L2I];
-      always @(posedge clk) if (we2) tlb2_g[wa2] <= scan ? {(GB+1){1'b0}} : {({1'b0, leaf_last} < TOP_PPN), cg};
-      always @(posedge clk) if (fill) begin
-         tlb2_tag[ri]  <= va_q[38:12];
-         tlb2_ppn[ri]  <= ptw_rdata[53:10];
-         tlb2_lvl[ri]  <= lvl;
-         tlb2_perm[ri] <= ptw_rdata[7:0];
-         tlb2_nc[ri]   <= ptw_rdata[62] | ptw_rdata[61];
-         tlb2_n[ri]    <= ptw_rdata[63];
-      end
+      wire [L2W-1:0] wd2 = scan ? {L2W{1'b0}}
+                         : {({1'b0, leaf_last} < TOP_PPN), cg, va_q[38:12], ptw_rdata[53:10], lvl,
+                            ptw_rdata[7:0], ptw_rdata[62] | ptw_rdata[61], ptw_rdata[63]};
+      always @(posedge clk) if (we2) tlb2[wa2] <= wd2;
    end else begin : no_l2
       assign l2_hit = 1'b0;  assign l2_ppn = 44'd0;  assign l2_lvl = 2'd0;  assign l2_perm = 8'd0;
       assign l2_nc  = 1'b0;  assign l2_n   = 1'b0;
