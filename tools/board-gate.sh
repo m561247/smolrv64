@@ -192,6 +192,7 @@ export RTL_BANNER
 # commit: `make dtbs RTL=` for the variants, ubuntu-boot.sh again for the one it boots
 ( cd "$UB" && touch ubuntu-nfs.dts.in && make dtbs RTL="$RTL_BANNER" ) > "$RES/dtbs.log" 2>&1 \
    || { echo "BOARD: FAIL (dtbs)"; tail -3 "$RES/dtbs.log"; exit 1; }
+XMODEM=""
 if [ -n "${BOARD:-}" ]; then
    # A named board boots over TFTP, as the monitor's `go` does: this tree's payload and the board's
    # device tree go to coffee's /srv/tftp/$BOARD with the boot.txt `go $BOARD` runs: 19.7 MB in a
@@ -205,10 +206,21 @@ if [ -n "${BOARD:-}" ]; then
      echo "X80000000 0 ffdff000"; } > "$T/boot.txt"
    cp "$T/boot.txt" "$RES/boot.txt"
    # a character at a time: a bitstream older than the UART's receive FIFO drops a burst
+   GO=$(wc -c < "$CON")
    go="go $BOARD"; for ((i = 0; i < ${#go}; i++)); do screen -S "$SCREEN" -X stuff "${go:$i:1}"; sleep 0.02; done
    screen -S "$SCREEN" -X stuff $'\r'
+   # The router's DHCP pool runs dry now and then and the monitor says so ("no DHCP lease"); the
+   # board then boots the same payload and device tree over XMODEM, as an unnamed board does.
+   for i in $(seq 60); do
+      NET=$(tail -c +$((GO+1)) "$CON" | tr -d '\0' | grep -aoE "from DHCP|no DHCP lease" | head -1)
+      [ -n "$NET" ] && break; sleep 1
+   done
+   [ "$NET" = "no DHCP lease" ] && { echo "go $BOARD: no DHCP lease, booting over XMODEM"; XMODEM=1; }
 else
-   # One board, unnamed: the payload and device tree over XMODEM (ubuntu-boot.sh).
+   XMODEM=1
+fi
+if [ -n "${XMODEM:-}" ]; then
+   # the payload and device tree over XMODEM (ubuntu-boot.sh)
    ( cd "$UB" && LOG="$CON" timeout 3000 ./ubuntu-boot.sh "$SCREEN" ) > "$RES/upload.log" 2>&1 \
       || { echo "BOARD: FAIL (upload)"; tail -3 "$RES/upload.log"; exit 1; }
 fi
