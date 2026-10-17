@@ -207,7 +207,8 @@
                put(pl_iq_rob[pj*PT_NI + pk], (pl_iss_v[pj] && pl_iss_ent[pj] == 8'(pk)) ? "p"
                                              : pl_iq_rdy[pj*PT_NI + pk] ? "s" : "w");
       end
-      // the FP port: its dispatch stage, its scheduler, j_*, stage F and the FPU's ops in flight
+      // the FP port: its dispatch stage, its scheduler, j_*, the lanes' handoffs, stage F and the
+      // FPU's ops in flight
       if (dut.core.stg_v_f) put(8'(dut.core.stg_rob_f), "t");
       for (pj = 0; pj < dut.core.NF; pj = pj + 1)
          if (dut.core.u_iq_f.v[pj])
@@ -215,6 +216,7 @@
                 (dut.core.u_iq_f.iss_v && 32'(dut.core.u_iq_f.iss_ent) == pj) ? "p"
                 : (&dut.core.u_iq_f.srdy[pj*3 +: 3]) ? "s" : "w");
       if (dut.core.j_v)     put(8'(dut.core.j_rob), "j");
+      for (pj = 0; pj < IW; pj = pj + 1) if (dut.core.hx_vv[pj]) put(8'(dut.core.hx_rob_l[pj]), "h");
       for (pj = 0; pj < dut.core.NFQ; pj = pj + 1) if (dut.core.fq_v[pj]) put(8'(dut.core.fq_rob[pj]), "F");
       if (dut.core.f_valid) put(8'(dut.core.f_rob), "F");
       // memory: an address waiting for M, M's fill, a load waiting to access or accessing, a store

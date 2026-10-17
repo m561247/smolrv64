@@ -6,10 +6,12 @@
 //   4. wake-at-select makes a dependent issuable the very next cycle (back to back)
 //   5. the entry held downstream is never reallocated
 //   6. full, and flush
+//   7. in order (the INORDER instance), and an entry that hands itself on (d_hx) waits while its
+//      handoff register is taken (hx_busy) while the others issue past it
 module tb;
    localparam NENT=8, IDXB=3, NSRC=2, ROBB=4, PBITS=9, NWB=3;
    reg clk=0; always #5 clk=~clk;
-   reg reset=1, flush=0, unit_busy=0, iss_take=0, hold_v=0;
+   reg reset=1, flush=0, unit_busy=0, iss_take=0, hold_v=0, d_hx=0, hx_busy=0;
    reg  [IDXB-1:0]       hold_ent=0;
    reg                   d_valid=0;
    reg  [ROBB-1:0]       d_rob=0;
@@ -29,9 +31,9 @@ module tb;
              .FIXEDL(1)) dut
      (.clk(clk),.reset(reset),
       .d_valid(d_valid),.d_ready(d_ready),.d_rob(d_rob),.d_ps(d_ps),.d_r(d_r),
-      .d_prd(d_prd),.d_long(1'b0),.d_ent(d_ent),
+      .d_prd(d_prd),.d_long(1'b0),.d_hx(d_hx),.d_ent(d_ent),
       .wb_v(wb_v),.wb_preg(wb_preg),
-      .unit_busy(unit_busy),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
+      .unit_busy(unit_busy),.hx_busy(hx_busy),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
       .iss_take(iss_take),
       .hold_v(hold_v),.hold_ent(hold_ent),
       .blk_v(blk_v),.blk_pr(blk_pr),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.occupancy(occupancy),.free_n(free_n));
@@ -48,9 +50,9 @@ module tb;
              .FIXEDL(0),.INORDER(1)) dut_io
      (.clk(clk),.reset(reset),
       .d_valid(io_d_valid),.d_ready(io_d_ready),.d_rob(io_rob),.d_ps(io_ps),.d_r(io_r),
-      .d_prd({PBITS{1'b0}}),.d_long(1'b0),.d_ent(io_d_ent),
+      .d_prd({PBITS{1'b0}}),.d_long(1'b0),.d_hx(1'b0),.d_ent(io_d_ent),
       .wb_v(io_wb_v),.wb_preg(io_wb_preg),
-      .unit_busy(1'b0),.iss_v(io_iss_v),.iss_ent(io_iss_ent),.iss_rob(io_iss_rob),
+      .unit_busy(1'b0),.hx_busy(1'b0),.iss_v(io_iss_v),.iss_ent(io_iss_ent),.iss_rob(io_iss_rob),
       .iss_take(io_take),
       .hold_v(io_hold),.hold_ent({IDXB{1'b0}}),
       .blk_v(io_blk_v),.blk_pr(io_blk_pr),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.occupancy(io_occ),.free_n(io_free_n));
@@ -173,6 +175,18 @@ module tb;
             errs=errs+1;
          end else $display("  ok  inorder: then the next in program order");
       end
+
+      // 7b. a handoff entry is no candidate while hx_busy; a plain one behind it issues
+      @(negedge clk); hx_busy=1; d_hx=1;
+      disp(4'd8, 9'd0, 1'b1, 9'd0);                // ready, hands itself on (lowest free entry)
+      d_hx=0;
+      @(negedge clk); chk("handoff entry waits while its register is taken", 1'b0, 4'd0);
+      disp(4'd9, 9'd0, 1'b1, 9'd0);                // ready, plain
+      @(negedge clk); chk("a plain entry issues past it", 1'b1, 4'd9);
+      take;
+      @(negedge clk); hx_busy=0;
+      @(negedge clk); chk("the handoff entry issues once the register is free", 1'b1, 4'd8);
+      take;
 
       $display("---- IQ-TB %s (errs=%0d)", errs==0 ? "PASS":"FAIL", errs);
       $finish;

@@ -665,6 +665,17 @@ instructions of the GB5 checkpoint slices at the 64-row ROB (tb FPORT-SIM):
   integer shard. So the FP port keeps its first operand's integer read, and its second and third
   read FP registers only (an FP op's rs2 and rs3 always are): the integer shards go 10 -> 8 at
   IW=3 (12 -> 10 at IW=4) with no handoff.
+- **Move 3 taken, 2026-10-16 (Tommy: "FP ops that need integer results should execute both in ALU
+  and FPU").** The loss above was the credit's place, not the handoff: taken at dispatch, it was
+  held while its op waited in the lane scheduler for rs1, so the dispatch head waited on it. Now
+  the op waits in its lane's scheduler like any other, the lane's own flop (`hx_busy`: its
+  one-op register taken, or such an op in its select register) keeps it from issuing into a full
+  register, and the F stage takes it straight from the lane's execute cycle, or from the register
+  when it took another. GB5 slices against 95189924: Camera -0.19%, Gaussian Blur -0.02%,
+  Structure from Motion +0.05%, SQLite +0.05%, HTML5 -0.27%, PDF Rendering -0.01%, Navigation
+  identical. (Through the register alone SQLite was +0.52%: a cycle on every int-to-FP op, in
+  be:dep-fp.) A group still holds one op for the F stage, an int-to-FP op included, so each
+  rename shard gets one register a group. The integer shards are 2 x NL + 1: 7 at IW=3, 9 at IW=4.
 - **Move 5 measured.** The FP file as two 64-entry shards by writer (SH_FL the load landing's,
   SH_FF the F stage's) instead of three slot slices of two banks and a live-value table: 24 LUTRAM
   read copies and 192 bits of table -> 8 copies. The GB5 slices in cycles: Camera -2.23%,

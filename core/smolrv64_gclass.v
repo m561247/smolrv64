@@ -23,11 +23,11 @@ module smolrv64_gclass
     input  wire        btb_hit,                // the BTB named this instruction's fetch block
     output wire [15:0] gc);                    // see the GC_* indices in smolrv64_core.v
 
-   wire fp_valid;
+   wire fp_valid, op0_int;
    decode_fp u_dfp
      (.insn(insn), .fp_valid(fp_valid), .use_fpu(), .fp_class(),
       .op(), .op_mod(), .src_fmt(), .dst_fmt(), .int_fmt(),
-      .rnd(), .op0_sel(), .op1_sel(), .op2_sel(), .op0_int(), .wr_fp());
+      .rnd(), .op0_sel(), .op1_sel(), .op2_sel(), .op0_int(op0_int), .wr_fp());
 
    // the interrupt pseudo-op (SYSTEM, funct3 0, imm 0x7F0): M's m_is_irqop one stage earlier
    wire irqop = (insn[6:2] == 5'b11100) & (insn[14:12] == 3'b000) & (insn[31:20] == 12'h7F0)
@@ -35,6 +35,9 @@ module smolrv64_gclass
    wire ord   = is_mem | is_amo | is_mul | is_fp | is_csr | is_serialize | is_fencei | is_cbo
               | is_branch | is_jump | is_jalr | illegal | fault | irqop;
    wire cls_f = fp_valid & ~is_mem & ~is_amo & ~illegal & ~fault & ~irqop;
+   // an FP op with an integer source (FCVT.fp.int, FMV.fp.X) has no other: it issues in its slot's
+   // lane, which reads rs1 and hands the op whole to the F stage
+   wire i2f   = cls_f & op0_int;
    // control flow is the slot's lane; a fetch-faulted CTI or the irqop stays ordered, so M
    // keeps the single trap site
    wire cls_c = (is_branch | is_jump | is_jalr) & ~illegal & ~fault & ~irqop;
@@ -54,8 +57,8 @@ module smolrv64_gclass
    // an AMO, LR/SC or CBO generates its address in its slot's lane too, and runs from the
    // head-op register at the ROB head
    wire cls_l  = ord & ~cls_f & ~cls_c & ~cls_m & ~cls_s & ~mul_l & ~mem_l;   // a head op (AMO, LR/SC, CBO)
-   wire cls_i  = ~ord | cls_c | mul_l | cls_m | cls_s | mem_l | cls_l;   // everything but FP: the slot's lane
-   wire cls_fc = cls_f;                                                  // the FP pipe (u_iq_f)
+   wire cls_i  = ~ord | cls_c | mul_l | cls_m | cls_s | mem_l | cls_l | i2f;   // the slot's lane
+   wire cls_fc = cls_f & ~i2f;                                                  // the FP pipe (u_iq_f)
    // a serialising op, fence.i, CBO, AMO, CSR, a trap at dispatch or the irqop goes alone
    wire plain = ~(is_serialize | is_fencei | is_cbo | is_amo | is_csr | illegal | fault | irqop);
    wire dcr   = (is_jump & ~is_jalr & mis_taken)

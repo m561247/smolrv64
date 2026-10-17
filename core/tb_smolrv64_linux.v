@@ -506,7 +506,7 @@ module tb;
    reg        meas;
    // FPORT-SIM: retired instructions by the register-file reader their integer operands take --
    // a divide's, the lane it issues in (it hands them to the MD stage); an FP op with an integer
-   // source (fcvt/fmv from x), the FP port's first read, the one that reads an integer shard; a
+   // source (fcvt/fmv from x), the lane it issues in (it hands rs1 to the F stage); a
    // CSR op reading rs1 and sfence.vma, lane A (it hands rs1 to the SYSQ) -- and the stores,
    // integer and FP, whose data the store queue takes from its own read port when it is in a
    // register file at allocation (else from a writeback), and the reads that port makes

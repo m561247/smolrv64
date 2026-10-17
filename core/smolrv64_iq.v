@@ -56,6 +56,7 @@ module smolrv64_iq
     input  wire [NSRC-1:0]       d_r,        // source already available
     input  wire [PBITS-1:0]      d_prd,      // destination, for wake-at-select
     input  wire                  d_long,     // its result comes later than the next cycle (a multiply): no wake at select
+    input  wire                  d_hx,       // it hands itself on through a one-op register (hx_busy)
     output wire [IDXB-1:0]       d_ent,      // slot taken; index the payload with it
 
     // ---- wakeup ----
@@ -64,6 +65,9 @@ module smolrv64_iq
 
     // ---- issue ----
     input  wire                  unit_busy,  // one unit per scheduler, so one bit
+    // A FLOP (or flops): the handoff register is taken, or will be by the op this scheduler issued
+    // last. An entry with d_hx is no candidate while it is set; the rest issue as before.
+    input  wire                  hx_busy,
     output wire                  iss_v,
     output wire [IDXB-1:0]       iss_ent,
     output wire [ROBB-1:0]       iss_rob,
@@ -95,7 +99,8 @@ module smolrv64_iq
    reg [NSRC-1:0]        e_r   [0:NENT-1];
    reg [PBITS-1:0]       e_prd [0:NENT-1];
    reg [NENT-1:0]        e_long;           // a later result: its dependents wake at its writeback
-   initial e_long = {NENT{1'b0}};
+   reg [NENT-1:0]        e_hx;             // hands itself on (d_hx)
+   initial begin e_long = {NENT{1'b0}}; e_hx = {NENT{1'b0}}; end
 
    integer k, q;
    initial begin
@@ -159,7 +164,9 @@ module smolrv64_iq
          // it inside every entry's ready bit made it the ROOT of the priority select. It
          // qualifies only the RESULT below: the pick is a function of readiness alone, and
          // the late signal is one AND on the issue valid instead of NENT ANDs feeding a tree.
-         assign rdy[g] = v[g] & (&srdy[g*NSRC +: NSRC])
+         // hx_busy is a flop, and e_hx and v are: the term folds into the entry's valid, off the
+         // wakeup compares.
+         assign rdy[g] = v[g] & ~(e_hx[g] & hx_busy) & (&srdy[g*NSRC +: NSRC])
                        & ((INORDER == 0) | (g[IDXB-1:0] == qhead));
       end
    endgenerate
@@ -259,6 +266,7 @@ module smolrv64_iq
             e_ps[fsel]  <= d_ps;
             e_prd[fsel] <= d_prd;
             e_long[fsel] <= d_long;
+            e_hx[fsel]   <= d_hx;
             for (q = 0; q < NSRC; q = q + 1) begin
                dep[fsel*NSRC+q] <= drow[q];               // registers only; the column clear below wins over it
                e_r[fsel][q] <= d_r[q] | hit(d_ps[q*PBITS +: PBITS])
@@ -307,6 +315,8 @@ module smolrv64_iq
          $fatal(1, "smolrv64_iq: issued entry %0d holds nothing", isel);
       if (do_iss & unit_busy)
          $fatal(1, "smolrv64_iq: issued to a busy unit");
+      if (do_iss & e_hx[isel] & hx_busy)
+         $fatal(1, "smolrv64_iq: issued entry %0d into a taken handoff register", isel);
       // isel is qhead by construction when INORDER; this is the check that the priority
       // loop agrees, i.e. that nothing but the head can ever be ready.
       if ((INORDER != 0) & do_iss & (sel != qhead))

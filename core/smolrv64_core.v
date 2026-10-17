@@ -908,6 +908,17 @@ module smolrv64_core
    wire rf_take;
    wire s_win;                         // M takes a lane's load or store this cycle
    wire f_advance;
+   // the lanes' handoffs to the F stage: an int-to-FP op with its rs1 (see the lanes)
+   wire [NL-1:0]        hx_vv, f_hx_take;
+   wire                 hx_any = |hx_vv;
+   wire [NL-1:0]        hl_vv, f_hl_take;        // ...and one executing in its lane this cycle (flops)
+   wire                 hl_any = |hl_vv;
+   wire [31:0]          hx_insn_l [0:NL-1];
+   wire [5:0]           hx_rd_l   [0:NL-1];
+   wire                 hx_rdv_l  [0:NL-1];
+   wire [RN_PBITS-1:0]  hx_prd_l  [0:NL-1];
+   wire [ROB_IDXB-1:0]  hx_rob_l  [0:NL-1];
+   wire [63:0]          hx_val_l  [0:NL-1];
 
 
    // ---- DISPATCH STAGE (cycle boundary) -------------------------------------------------
@@ -968,10 +979,13 @@ module smolrv64_core
    function automatic is_hop(input [31:0] i);       // an AMO, LR/SC or CBO: a head op
       is_hop = (i[6:2] == 5'b01011) | ((i[6:2] == 5'b00011) & (i[14:12] == 3'b010));
    endfunction
+   function automatic is_i2fop(input [31:0] i);     // FCVT.fp.int, FMV.fp.X: decode_fp's op0_int
+      is_i2fop = (i[6:0] == 7'b1010011) & ((i[31:27] == 5'b11010) | (i[31:27] == 5'b11110));
+   endfunction
    // a lane op that does not complete in its execute cycle: no write, wake or ROB completion there
-   // (a system op completes when the SYSQ fires it)
+   // (a system op completes when the SYSQ fires it, an int-to-FP op when the F stage lands it)
    function automatic lane_late(input [31:0] i, input ill, input flt);
-      lane_late = is_mulop(i) | is_divop(i) | is_lmem(i) | is_hop(i) | is_sysq(i, ill, flt);
+      lane_late = is_mulop(i) | is_divop(i) | is_lmem(i) | is_hop(i) | is_i2fop(i) | is_sysq(i, ill, flt);
    endfunction
    localparam integer PL_INSN = PLW - PCW - 32;   // the instruction's place in the payload (pl_in)
 
@@ -988,9 +1002,9 @@ module smolrv64_core
       .d_valid(mv_f),.d_ready(rf_ready),
       .d_rob(stg_rob_f),
       .d_ps(stg_ps_f),.d_r(stg_r_f | wkq_f),
-      .d_prd(stg_prd_f),.d_long(1'b0),.d_ent(rf_d_ent),
+      .d_prd(stg_prd_f),.d_long(1'b0),.d_hx(1'b0),.d_ent(rf_d_ent),
       .wb_v(wkv),.wb_preg(wkp),
-      .unit_busy(j_v & ~j_adv),           // j_* can't take: occupied and its op not draining
+      .unit_busy(j_v & ~j_adv),.hx_busy(1'b0),   // j_* can't take: occupied and its op not draining
       .iss_v(rf_iss_v),.iss_ent(rf_iss_ent),.iss_rob(rf_iss_rob),
      .iss_take(rf_take),
       .hold_v(j_v),.hold_ent(j_ent),
@@ -1066,8 +1080,9 @@ module smolrv64_core
       // allocates (*_d_ent), from the REGISTERED stage payload -- co-timed with the e_ps write.
       if (mv_f)  psmem_f[rf_d_ent]  <= stg_ps_f;
    end
-   // The FP queue feeds j_* directly (single source), and j_* drains into the F stage (f_valid).
-   wire j_adv     = ~j_v | f_advance;                    // j_* holds an FP op, for the F stage
+   // The FP queue feeds j_* directly (single source), and j_* drains into the F stage (f_valid)
+   // in a cycle no lane hands it an op (hx_any, hl_any: flops).
+   wire j_adv     = ~j_v | (f_advance & ~hx_any & ~hl_any);   // j_* holds an FP op, for the F stage
    wire j_ready   = ~j_v | j_adv;
    assign rf_take = rf_iss_v;   // rf_iss_v is already gated by unit_busy = j_v & ~j_adv
    wire iq_blk_v = rf_blk_v | l_blk_v[0];
@@ -1099,7 +1114,7 @@ module smolrv64_core
 
    // An ordered op completes when M takes it; an ALU op completes unconditionally, because
    // SH_IE has exactly one writer and it is this one. Nothing can be in the way.
-   wire   iss_f       = j_v & f_advance & ~redirect;          // j_* drains an FP op into f_valid
+   wire   iss_f       = j_v & f_advance & ~hx_any & ~hl_any & ~redirect;   // j_* drains an FP op into f_valid
 
 
    // j_* loads the FP queue's pick when it can accept (empty, or its op draining into f_valid
@@ -1294,6 +1309,7 @@ module smolrv64_core
    wire [PCW-1:0]        l_pc [0:NL-1];
    wire [PDW-1:0]        l_pdet [0:NL-1];
    wire [5:0]            l_rd [0:NL-1], l_rs1 [0:NL-1];
+   wire [31:0]           l_insn [0:NL-1];
    wire [LQ_IB-1:0]      l_lqi [0:NL-1];
    wire [SQ_IB-1:0]      l_sqt [0:NL-1];
    wire [NL*64-1:0]      l_wbv;                               // the lanes' broadcast values, packed
@@ -1316,6 +1332,8 @@ module smolrv64_core
       `PL_DECL(sg_)
       assign `PL_REC(sg_) = stg_pl;
       wire                 stg_late = lane_late(sg_insn, sg_illegal, sg_fault);
+      wire                 stg_hx   = is_i2fop(sg_insn) & ~is_sysq(sg_insn, sg_illegal, sg_fault);
+      wire                 hx_busy;
       wire [1:0]           snp = {wk_i(stg_ps[RN_PBITS +: RN_PBITS]), wk_i(stg_ps[0 +: RN_PBITS])};
       always @(posedge clk) begin
          if (reset) stg_v <= 1'b0;
@@ -1337,10 +1355,11 @@ module smolrv64_core
                 .FIXEDL(1),.INORDER(0)) u_iq
         (.clk(clk),.reset(reset),
          .d_valid(mv),.d_ready(ready),.d_rob(stg_rob),
-         .d_ps(stg_ps[2*RN_PBITS-1:0]),.d_r(stg_r),.d_prd(stg_prd),.d_long(stg_late),.d_ent(d_ent),
+         .d_ps(stg_ps[2*RN_PBITS-1:0]),.d_r(stg_r),.d_prd(stg_prd),.d_long(stg_late),.d_hx(stg_hx),.d_ent(d_ent),
          .wb_v(wkv_i),.wb_preg(wkp),
          // busy: the multiply's reserved slot, a waiting landing, and in lane 0 a system op at the ROB head
-         .unit_busy(m1 | lb_any[gl] | ((gl == 0) & sy_at_head)),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
+         .unit_busy(m1 | lb_any[gl] | ((gl == 0) & sy_at_head)),.hx_busy(hx_busy),
+         .iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
          .iss_take(iss_v),
          .hold_v(v),.hold_ent(ent),
          .blk_v(blk_v),.blk_pr(blk_pr),.flush(redirect),.kd_v(rob_kd_v),.kh(rob_kh),.kb(rob_kb),.occupancy(occ),.free_n(free));
@@ -1434,10 +1453,41 @@ module smolrv64_core
          $fatal(1, "smolrv64_core: lane %0d executes a system op (it goes alone, in lane A)", gl);
       assign l_xs1[gl] = rs1;  assign l_dprd[gl] = q_prd;  assign l_drdv[gl] = q_rd_v;
       assign l_dop[gl] = {q_insn[6:2] == 5'b01110, q_insn[14:12]};
-      always @(posedge clk) if (!reset & fr_rel & ((stg_v & dead(stg_rob)) | (v & dead(rob)) | (m1 & dead(mrob1)) | (m2 & dead(mrob2))))
+      // ---- an FP op with an integer source (FCVT.fp.int, FMV.fp.X): its one source is rs1, so the
+      // lane reads it and hands the op whole to the F stage -- into the stage itself in its execute
+      // cycle when the stage takes it (hl_vv), else into this register, which the stage takes
+      // first. hx_busy keeps every such op in the scheduler while the register is taken or about
+      // to be (its op in the select register): a lane never executes one into a full register,
+      // and nothing waits at dispatch. Flops only.
+      wire                 hx_go = iss & ~sys & is_i2fop(q_insn);
+      reg                  hx_v, hx_rdv;
+      reg  [31:0]          hx_insn;
+      reg  [5:0]           hx_rd;
+      reg  [RN_PBITS-1:0]  hx_prd;
+      reg  [ROB_IDXB-1:0]  hx_rob;
+      reg  [63:0]          hx_val;
+      initial hx_v = 1'b0;
+      always @(posedge clk) begin
+         if (f_hx_take[gl] | dead(hx_rob)) hx_v <= 1'b0;   // taken, or the kill
+         if (hx_go) begin
+            hx_v <= ~dead(rob) & ~f_hl_take[gl];
+            hx_insn <= q_insn;  hx_rd <= q_rd;  hx_rdv <= q_rd_v;  hx_prd <= q_prd;  hx_rob <= rob;  hx_val <= rs1;
+         end
+         if (reset | redirect) hx_v <= 1'b0;                // last (rule I11)
+      end
+      assign hl_vv[gl] = v & ~sys & is_i2fop(q_insn);
+      assign hx_busy = hx_v | hl_vv[gl];
+      assign hx_vv[gl] = hx_v;      assign hx_insn_l[gl] = hx_insn;  assign hx_rd_l[gl] = hx_rd;
+      assign hx_rdv_l[gl] = hx_rdv; assign hx_prd_l[gl] = hx_prd;    assign hx_rob_l[gl] = hx_rob;
+      assign hx_val_l[gl] = hx_val;
+      always @(posedge clk) if (!reset & hx_go & hx_v & ~f_hx_take[gl])
+         $fatal(1, "smolrv64_core: lane %0d hands the F stage an op (rob %0d) while its register holds rob %0d", gl, rob, hx_rob);
+      always @(posedge clk) if (!reset & fr_rel & ((stg_v & dead(stg_rob)) | (v & dead(rob)) | (m1 & dead(mrob1)) | (m2 & dead(mrob2))
+                                                    | (hx_v & dead(hx_rob))))
          $fatal(1, "smolrv64_core: the release finds a dead op in lane %0d", gl);
-      always @(posedge clk) if (!reset & kchk & (stg_v | (occ != 0) | v | m1 | m2))
-         $fatal(1, "smolrv64_core: the kill left a live op in lane %0d: stage %b scheduler %0d select %b mul %b%b", gl, stg_v, occ, v, m1, m2);
+      always @(posedge clk) if (!reset & kchk & (stg_v | (occ != 0) | v | m1 | m2 | hx_v))
+         $fatal(1, "smolrv64_core: the kill left a live op in lane %0d: stage %b scheduler %0d select %b mul %b%b handoff %b",
+                gl, stg_v, occ, v, m1, m2, hx_v);
       always @(posedge clk) if (!reset) begin
          if (m2 & v)    $fatal(1, "smolrv64_core: lane %0d executes an op in its multiply's reserved slot", gl);
          if (m2 & ~mpre) $fatal(1, "smolrv64_core: lane %0d's multiply is not at mul3's stage B in its slot", gl);
@@ -1503,7 +1553,7 @@ module smolrv64_core
       assign l_lm[gl] = v & ~sys & is_lmem(q_insn);  assign l_st[gl] = q_is_store;
       assign l_br[gl] = q_is_branch;  assign l_jmp[gl] = q_is_jump;  assign l_jalr[gl] = q_is_jalr;
       assign l_rvc[gl] = q_rvc;  assign l_rdv[gl] = q_rd_v;  assign l_seq[gl] = q_seq;  assign l_pc[gl] = q_pc;
-      assign l_pdet[gl] = q_pdet;  assign l_rd[gl] = q_rd;  assign l_rs1[gl] = q_rs1;
+      assign l_pdet[gl] = q_pdet;  assign l_rd[gl] = q_rd;  assign l_rs1[gl] = q_rs1;  assign l_insn[gl] = q_insn;
       assign l_lqi[gl] = q_lq_idx;  assign l_sqt[gl] = q_sq_tag;
       assign wkv_l[gl] = we;  assign wkp_l[gl*RN_PBITS +: RN_PBITS] = wa;  assign l_wbv[gl*64 +: 64] = wb;
    end endgenerate
@@ -2002,18 +2052,9 @@ module smolrv64_core
    // can have re-allocated before the edge after the flush, and its pending bit was
    // cleared at issue, as before.
 
-   // The FP port's operands. Its first may be an integer register (an int-to-FP op's rs1), which a
-   // lane may have written the cycle before: it is forwarded from the lanes' write registers like a
-   // lane operand (a physical register has one writer, so at most one lane matches). Its others are
-   // FP registers, which no lane writes.
-   reg  [63:0] xf_rs1;
-   wire [63:0] xf_rs2 = prf_f2, xf_rs3 = prf_f3;
-   integer xfl;
-   always @* begin
-      xf_rs1 = prf_f1;
-      for (xfl = NL - 1; xfl >= 0; xfl = xfl - 1)
-         if (l_qv[xfl] & (j_ps1 == l_qprd[xfl])) xf_rs1 = l_qval[xfl];
-   end
+   // The FP port's operands: FP registers, which no lane writes (an int-to-FP op reads its integer
+   // rs1 in its lane, which hands it to the F stage).
+   wire [63:0] xf_rs1 = prf_f1, xf_rs2 = prf_f2, xf_rs3 = prf_f3;
 
 
 
@@ -2700,13 +2741,70 @@ module smolrv64_core
          $fatal(1, "smolrv64_core: an in-core op takes the F port's result register as the FPU's integer result arrives");
    end
 
+   // THE F STAGE TAKES A LANE'S HANDOFF AHEAD OF j_*: an int-to-FP op with its rs1 already read,
+   // which has no FP source and so never waits in the FP scheduler. A register's first (hx_vv, the
+   // lowest lane's), else one executing in its lane this cycle (hl_vv), which then never enters its
+   // register. The picks are over flops; f_advance only enables the load.
+   reg  [NL-1:0] hx_pick;
+   integer       hxk;
+   always @* begin
+      hx_pick = {NL{1'b0}};
+      for (hxk = NL - 1; hxk >= 0; hxk = hxk - 1) if (hx_vv[hxk]) hx_pick = {{(NL-1){1'b0}}, 1'b1} << hxk;
+   end
+   assign f_hx_take = hx_pick & {NL{f_advance}};   // a redirect clears the registers itself (last)
+   reg  [NL-1:0] hl_pick;
+   always @* begin
+      hl_pick = {NL{1'b0}};
+      for (hxk = NL - 1; hxk >= 0; hxk = hxk - 1) if (hl_vv[hxk]) hl_pick = {{(NL-1){1'b0}}, 1'b1} << hxk;
+   end
+   assign f_hl_take = hl_pick & {NL{f_advance & ~hx_any}};
+   reg  [31:0]         hls_insn;
+   reg  [5:0]          hls_rd;
+   reg                 hls_rdv;
+   reg  [RN_PBITS-1:0] hls_prd;
+   reg  [ROB_IDXB-1:0] hls_rob;
+   reg  [63:0]         hls_val;
+   always @* begin
+      hls_insn = l_insn[0];  hls_rd = l_rd[0];  hls_rdv = l_rdv[0];
+      hls_prd = l_dprd[0];      hls_rob = l_rob[0]; hls_val = l_xs1[0];
+      for (hxk = 1; hxk < NL; hxk = hxk + 1)
+         if (hl_pick[hxk]) begin
+            hls_insn = l_insn[hxk];  hls_rd = l_rd[hxk];  hls_rdv = l_rdv[hxk];
+            hls_prd = l_dprd[hxk];      hls_rob = l_rob[hxk]; hls_val = l_xs1[hxk];
+         end
+   end
+   reg  [31:0]         hxs_insn;
+   reg  [5:0]          hxs_rd;
+   reg                 hxs_rdv;
+   reg  [RN_PBITS-1:0] hxs_prd;
+   reg  [ROB_IDXB-1:0] hxs_rob;
+   reg  [63:0]         hxs_val;
+   always @* begin
+      hxs_insn = hx_insn_l[0];  hxs_rd = hx_rd_l[0];  hxs_rdv = hx_rdv_l[0];
+      hxs_prd = hx_prd_l[0];    hxs_rob = hx_rob_l[0]; hxs_val = hx_val_l[0];
+      for (hxk = 1; hxk < NL; hxk = hxk + 1)
+         if (hx_pick[hxk]) begin
+            hxs_insn = hx_insn_l[hxk];  hxs_rd = hx_rd_l[hxk];  hxs_rdv = hx_rdv_l[hxk];
+            hxs_prd = hx_prd_l[hxk];    hxs_rob = hx_rob_l[hxk]; hxs_val = hx_val_l[hxk];
+         end
+   end
    always @(posedge clk) begin
       if (reset | redirect) f_valid <= 1'b0;
       else if (f_advance) begin
-         f_valid   <= iss_f;
-         f_insn    <= qf_insn;  f_rd    <= qf_rd;   f_rd_v <= qf_rd_v;
-         f_prd     <= qf_prd;   f_rob   <= j_rob;
-         f_rs1_val <= xf_rs1;   f_rs2_val <= xf_rs2; f_rs3_val <= xf_rs3;
+         f_valid   <= iss_f | hx_any | hl_any;
+         if (hx_any) begin
+            f_insn    <= hxs_insn;  f_rd    <= hxs_rd;   f_rd_v <= hxs_rdv;
+            f_prd     <= hxs_prd;   f_rob   <= hxs_rob;
+            f_rs1_val <= hxs_val;   f_rs2_val <= 64'd0;  f_rs3_val <= 64'd0;
+         end else if (hl_any) begin
+            f_insn    <= hls_insn;  f_rd    <= hls_rd;   f_rd_v <= hls_rdv;
+            f_prd     <= hls_prd;   f_rob   <= hls_rob;
+            f_rs1_val <= hls_val;   f_rs2_val <= 64'd0;  f_rs3_val <= 64'd0;
+         end else begin
+            f_insn    <= qf_insn;   f_rd    <= qf_rd;    f_rd_v <= qf_rd_v;
+            f_prd     <= qf_prd;    f_rob   <= j_rob;
+            f_rs1_val <= xf_rs1;    f_rs2_val <= xf_rs2; f_rs3_val <= xf_rs3;
+         end
       end
       if (f_valid & ~f_advance & dead(f_rob)) f_valid <= 1'b0;   // the kill: a stuck dead op goes
    end

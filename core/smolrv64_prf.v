@@ -57,16 +57,16 @@ module smolrv64_prf
     output wire [2*NL*64-1:0]    rd_l,
     input  wire [PBITS-1:0]      ra_sq,    // the store queue's data: an integer or an FP shard
     output wire [63:0]           rd_sq,
-    input  wire [3*PBITS-1:0]    ra_f,     // the FP port's three operands: the first either, the others FP shards only
+    input  wire [3*PBITS-1:0]    ra_f,     // the FP port's three operands: FP shards only
     output wire [3*64-1:0]       rd_f);
 
 `include "smolrv64_shards.vh"
    localparam integer AB_INT = $clog2(N_INT);
    // the read ports: the lanes' 2*NL, then the store queue's, then the FP port's three. The integer
-   // shards serve the first NRI (an FP op's rs2 and rs3 are FP registers; its rs1 is an integer
-   // register's in an int-to-FP op), the FP shards the last NF.
+   // shards serve the first NRI (an int-to-FP op reads its integer rs1 in its lane), the FP shards
+   // the last NF.
    localparam integer NR  = 2*NL + 4;
-   localparam integer NRI = 2*NL + 2;
+   localparam integer NRI = 2*NL + 1;
    localparam integer NF  = 4;
    wire [NR*PBITS-1:0] ra = {ra_f, ra_sq, ra_l};
    // every integer shard's value at the integer ports' index, and each FP shard's at the FP ports'

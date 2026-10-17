@@ -34,6 +34,7 @@ stage the instruction moved to, or what holds it. Read from the hardware's state
     p  picked (select)          a b c d  executes in lane A / B / C / D
     u  a multiply in flight (its lane's reserved slot comes two cycles on)
     v  a divide in the MD stage                    j  in the FP port's select register
+    h  an int-to-FP op in its lane's handoff register, its rs1 read, for the F stage
     F  in stage F or the FPU                       Y  a system op in the SYSQ, waiting
                                                       for the ROB head
     m  its address arrived, waiting for M's fill   M  in M (the fill: the dTLB lookup)

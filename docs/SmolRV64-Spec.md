@@ -136,7 +136,7 @@ speculation, front-end or back-end, and a cause beneath each. The stall counters
 Nothing after the decoupling queue holds. The queue head forms a dispatch group of up to three
 instructions that may go together: every member plain (a serialising op, `fence.i`, a CBO, an
 AMO, a CSR op, a trap at dispatch or the interrupt pseudo-op goes alone), at most one for the
-FP/MD/SYS pipe (`u_iq_f`), one load and one store
+F stage (an FP op, or an int-to-FP op through its lane), the MD stage or the SYSQ, one load and one store
 (the LQ's and SQ's single allocation ports), and nothing behind a CTI that redirects fetch at
 decode (`smolrv64_gclass`, read from the queue record). A load behind a store in its group
 takes the store-seqno after the store's. A member pops only with a **credit** for everything it allocates, from
@@ -470,11 +470,21 @@ lands through the FPU's own landing in any cycle the FPU is not landing; a waiti
 holds the stage. An FP op with mstatus.FS off is illegal at dispatch and traps from the SYSQ.
 **A link is its lane's ALU result**, written into the lane's
 shard at issue, so a jal/jalr never waits for a port and its squash waits for nothing (rule D13
-is satisfied by construction). **The read ports**: each integer shard has 2 x NL + 2, eight at
-three lanes -- the lanes' rs1/rs2, the store queue's data read and the FP port's first operand
-(an int-to-FP op's rs1: `fcvt.d.l`, `fmv.d.x`) -- and each FP shard has four, the store
-queue's data read and the FP port's three operands. A lane never names an f-register,
-and the FP port's second and third operands never an integer register (both asserted).
+is satisfied by construction). **The read ports**: each integer shard has 2 x NL + 1, seven at
+three lanes -- the lanes' rs1/rs2 and the store queue's data read -- and each FP shard has four,
+the store queue's data read and the FP port's three operands. A lane never names an f-register,
+and the FP port never an integer register (both asserted). **An FP op with an integer source**
+(`fcvt.d.l`, `fmv.d.x`: rs1 is its only source) issues in its slot's lane, which reads rs1 and
+hands the op whole to the F stage: into the stage in its execute cycle, or, when the stage takes
+another, into a one-op register per lane (`hx_*`). The F stage takes a waiting register first,
+then a lane's op executing that cycle (`hl_vv`), then its scheduler's pick (`j_*`), each the
+lowest lane first; an int-to-FP op reaches the F stage two cycles after its pick, as an FP op
+does. The lane's scheduler holds every such op while its lane's register is taken or about to
+be (`hx_busy`, from flops: the register, or such an op in the select register), so a lane never
+executes one into a full register and nothing waits at dispatch; the ops it holds wait in the
+scheduler, as any op does for an operand. On the GB5 slices (vs the FP port's integer read):
+Camera -0.19%, Gaussian Blur -0.02%, Structure from Motion +0.05%, SQLite +0.05%, HTML5
+-0.27%, PDF Rendering -0.01%, Navigation identical (no int-to-FP op).
 
 | shard | entries | written by | why the size |
 |---|---|---|---|
@@ -484,7 +494,7 @@ and the FP port's second and third operands never an integer register (both asse
 
 **The FP file is sharded by writer.** An FP load's f-register destination allocates from SH_FL,
 any other's from SH_FF (a trapping FP op too: it writes nothing), and a group holds at most one
-load and one FP op, so neither FP free list hands out more than one register a cycle. At reset
+load and one op for the F stage, so neither FP free list hands out more than one register a cycle. At reset
 f0–f31 map to SH_FL. Each shard is written by its writer alone, the load landing (`we_ld`) or
 the F stage (`we_fe`), through the address, data and wakeup broadcast it already had, so the
 FP file adds no wakeup port, no write ever waits, and a read never chooses between banks. It is read by the store queue's
@@ -1572,7 +1582,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 
 | array | module | shape | width | bits | storage | ports |
 |---|---|---|---|---|---|---|
-| `ish[0..IW-1].mem` | `smolrv64_prf` | 64 each | 64 | 12 288 | LUTRAM | lane k's integer shard: 1W (lane k's write register), 8R at IW=3 (2 per lane, the store queue's, the FP port's first operand) |
+| `ish[0..IW-1].mem` | `smolrv64_prf` | 64 each | 64 | 12 288 | LUTRAM | lane k's integer shard: 1W (lane k's write register), 7R at IW=3 (2 per lane, the store queue's) |
 | `lb_prd`, `lb_dat`, `lb_rob`, `lb_fe` | `smolrv64_core` | 3×4 | 10/64/5/1 | 960 | flops | the lanes' landing buffers (§8) |
 | `fp[0].mem`, `fp[1].mem` | `smolrv64_prf` | 64 each | 64 | 8 192 | LUTRAM | 4R (the store queue's, the FP port's 3), 1W each: SH_FL (the load landing) and SH_FF (the F stage) |
 | `cp[0..IW-1].smap` | `smolrv64_rename` | 64 each | 10 | 1 920 | LUTRAM | one copy per rename slot (1W each, `newer` picks), 3*IW reads |
