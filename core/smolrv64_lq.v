@@ -205,9 +205,11 @@ module smolrv64_lq
    // A tail pointer and a per-entry `sent` bit. Entries wait to go to memory in any order they
    // become ready; what is sent is outstanding or already landed. Pointers are what make flush a reset.
    reg [NENT-1:0]        v, av;              // live / address known
-   reg [PAW-1:0]         pa   [0:NENT-1];
+   // pa: M's fill and the walker's answer each write it, three ports read it -- a bank per writer
+   // (u_pa below). pc: read at one entry, but its wait-table bits at every one -- those are flops.
    reg [VAW-1:0]         va   [0:NENT-1];
-   reg [VAW-1:0]         pc   [0:NENT-1];
+   reg [VAW-1:0]         pcm  [0:NENT-1];       // the load's PC, read at the fault pick
+   reg [PCHB:1]          pch  [0:NENT-1];       // ...its wait-table bits, read at every entry
    reg [SEQW-1:0]        sqn  [0:NENT-1];
    reg [NENT-1:0]        tv, flt;             // translated / ...and the translation faulted
    reg [3:0]             fc   [0:NENT-1];
@@ -318,7 +320,7 @@ module smolrv64_lq
    assign f_rp  = rpl[fi];
    assign f_rob = rob[fi];
    assign f_fc  = fc[fi];
-   assign f_pc  = pc[fi];
+   assign f_pc  = pcm[fi];
    assign f_seq = sqn[fi];
    // M's load can start its access in its fill pass whenever the entry is live and unfilled
    assign b_ok = v[b_idx] & ~av[b_idx];
@@ -338,7 +340,7 @@ module smolrv64_lq
    assign e_av = av;
    assign e_wt = wt;
    generate for (gd = 0; gd < NENT; gd = gd + 1) begin : g_pch
-      assign e_pch[gd*PCHB +: PCHB] = pc[gd][PCHB:1];
+      assign e_pch[gd*PCHB +: PCHB] = pch[gd];
    end endgenerate
    // A forwarded load counts as having reached memory: a store older than it whose address arrives
    // and overlaps it flags it for replay. Its forwarding store does not (the store queue sets that
@@ -351,7 +353,11 @@ module smolrv64_lq
    assign x_devwait = |(cand_m & ~e_block & ~mem & ~hd) & ~x_v;   // instrumentation only
    assign x_idx   = xi;
    assign x_fwd   = e_block[xi];
-   assign x_pa    = pa[xi];
+   wire [3*PAW-1:0] pa_rd;                 // the start's entry, the landing's two candidates
+   smolrv64_mwram #(.W(PAW), .DEPTH(NENT), .NW(2), .NR(3), .AB(IDXB)) u_pa
+     (.clk(clk), .reset(reset), .wv({w_v, a_v} & {2{~reset}}), .wa({w_idx, a_idx}), .wd({w_pa, a_pa}),
+      .ra({l_alt, l_tg, xi}), .rd(pa_rd));
+   assign x_pa    = pa_rd[0 +: PAW];
    assign x_size  = sz[xi];
    assign x_signed= sgn[xi];
    assign x_fp    = isfp[xi];
@@ -362,7 +368,7 @@ module smolrv64_lq
    assign l_rd   = l_rsp ? rdn[l_tg] : rdn[l_alt];
    assign l_rd_v = l_rsp ? rdv[l_tg] : rdv[l_alt];
    assign l_rob  = l_rsp ? rob[l_tg] : rob[l_alt];
-   assign l_pa   = l_rsp ? pa[l_tg]  : pa[l_alt];
+   assign l_pa   = l_rsp ? pa_rd[PAW +: PAW] : pa_rd[2*PAW +: PAW];
 
 
    // THE KILL. The dead entries are the youngest live ones (the ring is program order), so the
@@ -418,20 +424,20 @@ module smolrv64_lq
             v[tail] <= 1'b1; av[tail] <= 1'b0; sent[tail] <= 1'b0;  lnd[tail] <= 1'b0;  rpl[tail] <= 1'b0;  wt[tail] <= d_wt;
             fwd[tail] <= 1'b0;
             rob[tail] <= d_rob; prd[tail] <= d_prd; rdn[tail] <= d_rd;
-            rdv[tail] <= d_rd_v; sqt[tail] <= d_sqtag;  pc[tail] <= d_pc;  sqn[tail] <= d_seq;
+            rdv[tail] <= d_rd_v; sqt[tail] <= d_sqtag;  pch[tail] <= d_pc[PCHB:1];  sqn[tail] <= d_seq;
             tail <= tail + 1'b1;
          end
          cnt <= cnt + {{IDXB{1'b0}}, (d_alloc & d_ready)} - gone_n;
 
          if (a_v) begin
-            pa[a_idx] <= a_pa;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;
+            va[a_idx] <= a_va;  sz[a_idx] <= a_size;
             sgn[a_idx] <= a_signed;  isfp[a_idx] <= a_fp;  unc[a_idx] <= a_unc;  mem[a_idx] <= a_mem;  av[a_idx] <= 1'b1;
             bare[a_idx] <= a_bare;
             tv[a_idx] <= a_tv;  flt[a_idx] <= a_flt;  fc[a_idx] <= a_fc;
          end
          // the walker's answer: the PA and its classes, or the fault the load traps with at the head
          if (w_v) begin
-            pa[w_idx] <= w_pa;  unc[w_idx] <= w_unc;  mem[w_idx] <= w_mem;  flt[w_idx] <= w_flt;  fc[w_idx] <= w_fc;
+            unc[w_idx] <= w_unc;  mem[w_idx] <= w_mem;  flt[w_idx] <= w_flt;  fc[w_idx] <= w_fc;
             tv[w_idx] <= 1'b1;
          end
          // Filled AND already gone. It cannot collide with x_take above: that one needs a filled
@@ -456,6 +462,8 @@ module smolrv64_lq
          end
       end
    end
+
+   always @(posedge clk) if (!reset & d_alloc & d_ready) pcm[tail] <= d_pc;
 
    // D12 (2026-09-17): the "DRAM, idempotent, may issue speculatively" bit names the entry's OWN
    // address. smolrv64_lsu derives it from the translate; here it is recomputed from the PA the

@@ -48,11 +48,14 @@ cp[*].smap x3 : speculative map, one copy per rename port; flush clears `lv`, so
 # the kill looks every entry's up each cycle it holds.
 col[*].mem x3 : ROB entries, one column per slot {pold, noret, rd, prd}
 rob_ffr : an FP op's exception flags by ROB slot: written when its result lands, read by the retire ports
-# The banked queues (smolrv64_bankq): a bank per position mod NB, one muxed write each. The
-# decoupling queue's QNB = next_pow2(FW) = 8, the fetch ring's 8, the training queue's 4.
-bank[*].mem x20 : the decoupling queue's records, the fetch ring's halfwords, the training queue's payload
-# The arrived addresses (smolrv64_mwram), a bank per writing lane: the LQ's 3, the SQ's 3.
-wb[*].mem x6 : a lane load's or store's VA by LQ/SQ entry, written by its lane, read at M's fill
+# The banked queues (smolrv64_bankq): a bank per position mod NB, one write each. The decoupling
+# queue's QNB = next_pow2(FW) = 8, the fetch ring's 8, the training queue's 4, each lane's landing
+# buffer's 2 (6 at IW=3).
+bank[*].mem x26 : the decoupling queue's records, the fetch ring's halfwords, the training queue's payload, the landing buffers' data
+# Multi-writer arrays (smolrv64_mwram), a bank per writer: the arrived addresses' (a bank per lane,
+# the LQ's 3 and the SQ's 3) and the load queue's PA (M's fill, the walker's answer: 2).
+wb[*].mem x8 : a lane load's or store's VA by LQ/SQ entry (written by its lane, read at M's fill); a load's PA (written by the fill and the walk)
+pcm : a load's PC in the load queue: written at dispatch, read at the fault pick
 ras     : return address stack
 bank[*].way[*].btb x16 : BTB, 8 halfword banks x 2 skewed ways, 128 x 53 -- read as the fetch stream moves and by training
 bank[*].way[*].bc x16  : bimodal counters, 8 halfword banks x 2 skewed ways, 128 x 2 -- read as the stream moves and by training

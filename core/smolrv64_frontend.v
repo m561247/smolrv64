@@ -250,19 +250,19 @@ module smolrv64_frontend
    // One PACKED record per slot (smolrv64_irec.vh) keeps the compaction a handful of muxes
    // instead of ~46 per field, with one field list for pack and unpack.
    localparam integer IRW = `IR_RECW;
-   wire [IRW-1:0] mh [0:FW-1];   // the bundle register's slots, decoded and packed (the queue's write data)
    wire           dq_fault = imem_fault & ~dq_valid;    // fetch-fault pseudo-op, pushed like a bundle
    wire           pb_load  = pb_ready & (dq_valid | dq_fault);   // the register takes a bundle or the fault op
    // UP TO FW ENTRIES PER CYCLE INTO A LUTRAM: QNB = next_pow2(FW) banks (smolrv64_bankq), so a
    // bundle's slots land in distinct banks. `q_room` asks for a whole bundle's room, so a bundle
    // never splits.
    localparam integer QNB = 1 << $clog2(FW);
+   localparam integer QLB = $clog2(QNB);
    localparam integer CW  = $clog2(FW + 1);             // a count of 0..FW slots
    reg  [QAW-1:0] q_rp, q_wp;
    reg  [QAW:0]   q_cnt;
    wire           q_room  = (q_cnt <= QDEPTH[QAW:0] - FW[QAW:0]);   // room for a full bundle (<=FW)
    wire           q_empty = (q_cnt == {(QAW+1){1'b0}});
-   reg  [QW-1:0]  pb_in [0:FW-1];
+   reg  [QW-1:0]  pb_in [0:QNB-1];                       // slots FW.. are never loaded: constant
    // ...and what is the bundle's, once: the predicted target (the last slot's to use), and a fetch
    // fault's cause and straddle bit (the fault pseudo-op's, slot 0)
    reg  [PCW-1:0] pb_tgt;
@@ -301,6 +301,7 @@ module smolrv64_frontend
                          last ? dq_pk : 2'd0, (gk == 0) & dq_fault};
    end endgenerate
    integer k;
+   initial for (k = 0; k < QNB; k = k + 1) pb_in[k] = {QW{1'b0}};
    always @(posedge clk) if (!reset & pb_load & dq_fault & (imem_addr != imem_ipc) & (imem_addr != imem_ipc + 2))
       $fatal(1, "smolrv64_frontend: a fetch fault at %h for the instruction at %h, neither it nor its high halfword",
              imem_addr, imem_ipc);
@@ -317,16 +318,30 @@ module smolrv64_frontend
       end
    end
    // ---- the storage: QNB banks, a slot's record at q_wp + its slot, the heads read from q_rp ----
-   wire [FW*QAW-1:0] q_wpos;
-   wire [FW*IRW-1:0] q_wd;
-   wire [IW*IRW-1:0] q_rd;
-   generate for (gk = 0; gk < FW; gk = gk + 1) begin: qw
-      localparam [QAW-1:0] K = gk;
-      assign q_wpos[gk*QAW +: QAW] = q_wp + K;
-      assign q_wd[gk*IRW +: IRW]   = mh[gk];
+   // The bundle register's slots are rotated to the banks they land in (slot j at q_wp + j, in bank
+   // (q_wp + j) % QNB) and decoded THERE, a decoder a bank: the rotation is of the raw slot (QW
+   // bits), not of the record it decodes to (IRW), and each bank writes its own decoder's record.
+   wire [QNB*QAW-1:0] q_wpos;
+   wire [QNB*IRW-1:0] q_wd;
+   wire [QNB-1:0]     q_bv;                             // the bank takes a record this cycle
+   wire [QNB-1:0]     pb_svq = {{(QNB-FW){1'b0}}, pb_sv};
+   wire [IW*IRW-1:0]  q_rd;
+   generate for (gk = 0; gk < QNB; gk = gk + 1) begin: sl
+      localparam [QLB-1:0] B = gk;
+      wire [QLB-1:0]  j = B - q_wp[QLB-1:0];             // the bundle's slot landing in this bank
+      wire [PDW-1:0]  pdet;  wire [PCW-1:0] pc;  wire [31:0] inst;  wire [SEQW-1:0] seq;
+      wire [1:0]      pk;    wire fault_op;    wire imm_wide;
+      assign {pdet, pc, inst, seq, pk, fault_op} = pb_in[j];
+      smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_ds
+        (.pdet(pdet), .pc(pc), .inst(inst), .seq_in(seq), .pk(pk), .tgt(pb_tgt), .fault_op(fault_op),
+         .cause(pb_cause), .fault_hi(pb_fhi), .fs_off(fs_off), .rec(q_wd[gk*IRW +: IRW]), .imm_wide(imm_wide));
+      assign q_bv[gk] = q_push & pb_svq[j];
+      assign q_wpos[gk*QAW +: QAW] = q_wp + {{(QAW-QLB){1'b0}}, j};
+      always @(posedge clk) if (!reset & q_bv[gk] & imm_wide)
+         $fatal(1, "smolrv64_frontend: slot %0d's immediate (insn %08x at %h) does not fit the record's 32 bits", j, inst, pc);
    end endgenerate
-   smolrv64_bankq #(.W(IRW), .DEPTH(QDEPTH), .NW(FW), .NR(IW), .NB(QNB)) u_q
-     (.clk(clk), .reset(reset), .wv(q_wr), .wp(q_wpos), .wd(q_wd), .rp(q_rp), .rd(q_rd));
+   smolrv64_bankq #(.W(IRW), .DEPTH(QDEPTH), .NW(QNB), .NR(IW), .NB(QNB), .BYBANK(1)) u_q
+     (.clk(clk), .reset(reset), .wv(q_bv), .wp(q_wpos), .wd(q_wd), .rp(q_rp), .rd(q_rd));
    // the heads: decoded records at q_rp + k, and each one's dispatch class (the record's last field)
    wire [IRW-1:0] qh [0:IW-1];
    wire [15:0]    g  [0:IW-1];
@@ -350,19 +365,6 @@ module smolrv64_frontend
    wire e_bundle = ~reset & ((|(dq_sv[FW-1:1] & ~dq_sv[FW-2:0])) | (dq_fault & dq_valid));
    always @(posedge clk)
       if (e_bundle) $fatal(1, "smolrv64_frontend: malformed bundle sv=%b fault=%b", dq_sv, dq_fault);
-
-   // ---------------------------------------------------------------- decode
-   // The bundle register's slots, decoded into the queue's records.
-   generate for (gk = 0; gk < FW; gk = gk + 1) begin: sl
-      wire [PDW-1:0]  pdet;  wire [PCW-1:0] pc;  wire [31:0] inst;  wire [SEQW-1:0] seq;
-      wire [1:0]      pk;    wire fault_op;    wire imm_wide;
-      assign {pdet, pc, inst, seq, pk, fault_op} = pb_in[gk];
-      smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_ds
-        (.pdet(pdet), .pc(pc), .inst(inst), .seq_in(seq), .pk(pk), .tgt(pb_tgt), .fault_op(fault_op),
-         .cause(pb_cause), .fault_hi(pb_fhi), .fs_off(fs_off), .rec(mh[gk]), .imm_wide(imm_wide));
-      always @(posedge clk) if (!reset & q_wr[gk] & imm_wide)
-         $fatal(1, "smolrv64_frontend: slot %0d's immediate (insn %08x at %h) does not fit the record's 32 bits", gk, inst, pc);
-   end endgenerate
 
    // ------------------------------------------------------- the IR registers: one dispatch group
    // The queue head forms the group. Up to IW heads go together when the dispatch class allows

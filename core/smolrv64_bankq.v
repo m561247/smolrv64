@@ -11,7 +11,8 @@
 // THE WRITES. Writer j writes wd[j] at position wp[j] when wv[j]; the positions of one cycle's
 // writers are distinct mod NB (consecutive positions of a push, a queue's tail plus a rank), which
 // is asserted. A bank's write is its one matching writer, chosen by an index, so the data side is
-// an NW:1 mux per bank and bit.
+// an NW:1 mux per bank and bit. BYBANK=1 is the user that rotated its writers to the banks already
+// (NW = NB, writer j's position is in bank j, asserted): no mux at all.
 //
 // THE READS. rd[k] is the entry at rp + k, combinational, the value before this cycle's writes.
 // NR <= NB, so the NR entries are in distinct banks, and bank b is read at the entry at or after
@@ -22,6 +23,7 @@ module smolrv64_bankq
     parameter NW    = 8,                  // writers a cycle
     parameter NR    = 8,                  // consecutive entries read a cycle
     parameter NB    = 8,                  // banks: a power of two, at least NW and NR
+    parameter BYBANK = 0,                 // 1: writer j is bank j's (NW = NB)
     parameter AB    = $clog2(DEPTH))
    (input  wire               clk,
     input  wire               reset,      // only the invariant checks: the array has no reset
@@ -35,9 +37,10 @@ module smolrv64_bankq
    localparam integer BD = DEPTH / NB;    // entries a bank
    localparam integer IB = (BD > 1) ? $clog2(BD) : 1;
    localparam integer JB = (NW > 1) ? $clog2(NW) : 1;
-   initial if ((1 << BB) != NB || NB < NW || NB < NR || DEPTH % NB != 0 || BD < 1 || (1 << AB) != DEPTH)
-      $fatal(1, "smolrv64_bankq: DEPTH=%0d NB=%0d NW=%0d NR=%0d AB=%0d: NB is a power of two >= NW, NR, dividing DEPTH = 2**AB",
-             DEPTH, NB, NW, NR, AB);
+   initial if ((1 << BB) != NB || NB < NW || NB < NR || DEPTH % NB != 0 || BD < 1 || (1 << AB) != DEPTH
+               || (BYBANK && NW != NB))
+      $fatal(1, "smolrv64_bankq: DEPTH=%0d NB=%0d NW=%0d NR=%0d AB=%0d BYBANK=%0d: NB is a power of two >= NW, NR, dividing DEPTH = 2**AB (= NW when BYBANK)",
+             DEPTH, NB, NW, NR, AB, BYBANK);
 
    wire [W-1:0] brd [0:NB-1];             // each bank's entry at or after rp
    genvar gb, gk;
@@ -46,15 +49,25 @@ module smolrv64_bankq
       integer i;
       initial for (i = 0; i < BD; i = i + 1) mem[i] = {W{1'b0}};
       // its writer: the one whose position is in this bank
-      reg [NW-1:0] m;
-      reg [JB-1:0] sel;
-      integer j;
-      always @* begin
-         sel = {JB{1'b0}};
-         for (j = 0; j < NW; j = j + 1) begin
-            m[j] = wv[j] & (wp[j*AB +: BB] == gb[BB-1:0]);
-            if (m[j]) sel = j[JB-1:0];
+      wire [NW-1:0] m;
+      wire [JB-1:0] sel;
+      if (BYBANK) begin: own
+         assign m   = wv & ({{(NW-1){1'b0}}, 1'b1} << gb);
+         assign sel = gb[JB-1:0];
+         always @(posedge clk) if (!reset & wv[gb] & (wp[gb*AB +: BB] != gb[BB-1:0]))
+            $fatal(1, "smolrv64_bankq: bank %0d's writer writes position %0d, of bank %0d", gb, wp[gb*AB +: AB], wp[gb*AB +: BB]);
+      end else begin: pick
+         reg [NW-1:0] mm;
+         reg [JB-1:0] ss;
+         integer j;
+         always @* begin
+            ss = {JB{1'b0}};
+            for (j = 0; j < NW; j = j + 1) begin
+               mm[j] = wv[j] & (wp[j*AB +: BB] == gb[BB-1:0]);
+               if (mm[j]) ss = j[JB-1:0];
+            end
          end
+         assign m = mm;  assign sel = ss;
       end
       wire [AB-1:0] wpos = wp[sel*AB +: AB];
       wire [IB-1:0] widx = (BD > 1) ? wpos[AB-1 -: IB] : {IB{1'b0}};

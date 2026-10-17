@@ -549,8 +549,7 @@ module smolrv64_core
    wire [NL-1:0]       lb_fe_room_n;
    initial lb_fe_room = {NL{1'b1}};
    reg  [RN_PBITS-1:0] lb_prd [0:NL*LBN-1];
-   reg  [63:0]         lb_dat [0:NL*LBN-1];
-   reg  [ROB_IDXB-1:0] lb_rob [0:NL*LBN-1];
+   reg  [ROB_IDXB-1:0] lb_rob [0:NL*LBN-1];   // (the entries' data, read at the head alone: u_lbd below)
    reg  [NL*LBN-1:0]   lb_dk;               // the entry's op is dead (the kill): it drains as a bubble
    initial lb_dk = {(NL*LBN){1'b0}};
    reg  [LBB-1:0]      lb_h [0:NL-1], lb_t [0:NL-1];
@@ -3969,7 +3968,12 @@ module smolrv64_core
          wire [LBB-1:0] hh = lb_h[glp];
          // an entry the kill marked drains as a bubble: no write, wake or completion
          wire lv_ = ~lb_dk[glp*LBN + hh];
-         assign lp[glp] = lb_any[glp] ? {lv_, lv_, lb_prd[glp*LBN + hh], lb_dat[glp*LBN + hh], lb_rob[glp*LBN + hh]}
+         // the entries' data: the LD stream's at the tail, the FE stream's after it, read at the head
+         wire [63:0] lb_hd;
+         smolrv64_bankq #(.W(64), .DEPTH(LBN), .NW(2), .NR(1), .NB(2)) u_lbd
+           (.clk(clk), .reset(reset), .wv({en2[glp], en0[glp]}), .wp({lb_t2[glp], lb_t[glp]}),
+            .wd({wb_fe, wb_ld}), .rp(hh), .rd(lb_hd));
+         assign lp[glp] = lb_any[glp] ? {lv_, lv_, lb_prd[glp*LBN + hh], lb_hd, lb_rob[glp*LBN + hh]}
                         :               {sy_wr, sy_done, sy_prd, csr_rdata, sy_rob};
          assign lb_t2[glp] = lb_t[glp] + {{(LBB-1){1'b0}}, en0[glp]};
       end
@@ -3980,12 +3984,12 @@ module smolrv64_core
       for (lbi = 0; lbi < NL*LBN; lbi = lbi + 1) if (dead(lb_rob[lbi])) lb_dk[lbi] <= 1'b1;
       for (lbi = 0; lbi < NL; lbi = lbi + 1) begin
          if (en0[lbi]) begin
-            lb_prd[lbi*LBN + lb_t[lbi]] <= wa_ld;  lb_dat[lbi*LBN + lb_t[lbi]] <= wb_ld;
+            lb_prd[lbi*LBN + lb_t[lbi]] <= wa_ld;
             lb_rob[lbi*LBN + lb_t[lbi]] <= ldw_rob;  lb_fe[lbi*LBN + lb_t[lbi]] <= 1'b0;
             lb_dk[lbi*LBN + lb_t[lbi]] <= dead(ldw_rob);
          end
          if (en2[lbi]) begin
-            lb_prd[lbi*LBN + lb_t2[lbi]] <= wa_fe;  lb_dat[lbi*LBN + lb_t2[lbi]] <= wb_fe;
+            lb_prd[lbi*LBN + lb_t2[lbi]] <= wa_fe;
             lb_rob[lbi*LBN + lb_t2[lbi]] <= few_rob;  lb_fe[lbi*LBN + lb_t2[lbi]] <= 1'b1;
             lb_dk[lbi*LBN + lb_t2[lbi]] <= dead(few_rob);
          end
