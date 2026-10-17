@@ -646,14 +646,32 @@ module smolrv64_core
    wire [15:0] fe_err_f;
    assign fe_err = {fpu_err, pend_err, fe_err_f[12:0]};
    // the queries: each slot's six map candidates (rs1..rs3 speculative, then committed), then
-   // each lane's two operands (the issue check below)
+   // each lane's two operands (the issue check below). By file: a slot's rs1 and rs2 and a lane's
+   // operands may name either; a slot's rs3 (an FMA's) and the F FIFO head's sources name an
+   // f-register or p0, and read the FP table alone.
    localparam integer NQ = 6*IW + 2*NL;
    wire [NQ-1:0] pnd_q;
    wire [6*IW*RN_PBITS-1:0] pnd_sq;              // slot k's six candidates at [6k..6k+5]
    wire [IW-1:0]            pnd_av;
    wire [3*RN_PBITS-1:0]    fpq_h1;              // the F FIFO's next head's sources, for its check (below)
    wire [2:0]               fpq_h1r;             // ...and whether the table calls each ready
-   smolrv64_pending #(.PBITS(RN_PBITS), .NS(IW), .NWB(NWB_C), .NQ(NQ + 3)) u_pend
+   wire [4*IW*RN_PBITS-1:0] pnd_qx;              // slot k's rs1/rs2 candidates at [4k..4k+3]
+   wire [2*IW*RN_PBITS-1:0] pnd_qf;              // ...its rs3 candidates at [2k..2k+1]
+   wire [4*IW-1:0]          pnd_rx;
+   wire [2*IW-1:0]          pnd_rf;
+   genvar gpq;
+   generate for (gpq = 0; gpq < IW; gpq = gpq + 1) begin: pq
+      localparam integer B = 6*gpq;
+      assign pnd_qx[4*gpq*RN_PBITS +: 4*RN_PBITS] = {pnd_sq[(B+4)*RN_PBITS +: RN_PBITS], pnd_sq[(B+3)*RN_PBITS +: RN_PBITS],
+                                                     pnd_sq[(B+1)*RN_PBITS +: RN_PBITS], pnd_sq[B*RN_PBITS +: RN_PBITS]};
+      assign pnd_qf[2*gpq*RN_PBITS +: 2*RN_PBITS] = {pnd_sq[(B+5)*RN_PBITS +: RN_PBITS], pnd_sq[(B+2)*RN_PBITS +: RN_PBITS]};
+      assign pnd_q[B +: 6] = {pnd_rf[2*gpq+1], pnd_rx[4*gpq+3], pnd_rx[4*gpq+2],
+                              pnd_rf[2*gpq],   pnd_rx[4*gpq+1], pnd_rx[4*gpq]};
+   end endgenerate
+   initial if ((RN_NFL != RN_NINT) | (RN_NFF != RN_NINT))
+      $fatal(1, "smolrv64_core: the pending table's shards are one size: FL %0d, FF %0d, integer %0d", RN_NFL, RN_NFF, RN_NINT);
+   smolrv64_pending #(.PBITS(RN_PBITS), .IDXB(RN_IDXB), .SHN(RN_NINT), .NL(NL), .NS(IW), .NWB(NWB_C), .NWBF(2),
+                      .NQ(4*IW + 2*NL), .NQF(2*IW + 3)) u_pend
      (.clk(clk), .reset(reset),
       // EVERY CANDIDATE'S PENDING BIT IS SET, TAKEN OR NOT: the set enable is the slot's own
       // valid and destination, never the dispatch take, whose
@@ -663,8 +681,8 @@ module smolrv64_core
       // and it is set again when it is taken.
       .a_v(pnd_av), .a_preg(rn_prdv),
       .w_v(wkv), .w_preg(wkp), .err(pend_err),
-      .q({fpq_h1, l_psv, pnd_sq}),
-      .r({fpq_h1r, pnd_q}),
+      .q({l_psv, pnd_qx}),   .r({pnd_q[6*IW +: 2*NL], pnd_rx}),
+      .qf({fpq_h1, pnd_qf}), .rf({fpq_h1r, pnd_rf}),
       .flush(redirect));
 
    // THE SHADOW CHECK. At the cycle an instruction is actually consumed out of X, every
