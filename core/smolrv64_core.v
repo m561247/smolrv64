@@ -62,7 +62,7 @@ module smolrv64_core
     parameter IW   = `SMOLRV64_IW,
     parameter AW   = 64,
     // smolrv64_predictor's predict-detail width: {rsp, ghr, yhit, yctr, yidx, hit, ctr}, 3+11+14+3 bits.
-    parameter PDW   = 31,
+    parameter PDW   = 32,
     parameter [PCW-1:0] RESET_PC = 0,
     parameter [63:0] LBASE    = 64'h7000_0000,   // the local SRAM, for the LSU's alignment rule
     parameter        LRAM_LG2 = 18,

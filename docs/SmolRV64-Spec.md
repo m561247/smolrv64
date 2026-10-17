@@ -319,8 +319,8 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
   predecodes a START bit per halfword as each pair arrives (a halfword begins an instruction unless
   the one before began a 32-bit op; the chain runs on from the last halfword appended and restarts
   at the PC), so the aligner places slot k at the window's k-th start, decodes every halfword in
-  parallel and selects per slot: no slot's position waits for the lengths before it. `PDW` = 31:
-  {RAS-pointer snapshot 3, history snapshot 11, yhit, yctr 2, yidx 11, hit, ctr 2}.
+  parallel and selects per slot: no slot's position waits for the lengths before it. `PDW` = 32:
+  {RAS-pointer snapshot 3, history snapshot 11, yhit, yctr 2, yidx 11, the BTB way 1, hit, ctr 2}.
 ### 4.2 Branch prediction
 
 **At the fetch stream, keyed by the last halfword** (Stage 4 increment 1b). The predictor is the
@@ -344,11 +344,15 @@ from the resolving CTI's PC and length.
 pair reads both ways of all eight banks; a halfword's entry is its first way whose tag
 matches. Every jump, call and return is allocated; a conditional is allocated only when it
 resolves taken, so a conditional the BTB misses is one never taken (or evicted) and falls
-through, with no decode redirect (`DCR_BACK`=0). Training reads the CTI's two slots (each
-way's write-side port) and rewrites the way that matches, else allocates the first way whose
-recently-trained bit is clear (set when trained; when that would set both, the other
-clears), else a rotating way. Training's own read, not the hit fetch carried, decides,
-so the in-flight instances of a loop's first-taken branch make one entry, not two.
+through, with no decode redirect (`DCR_BACK`=0). Training never reads the entries: a CTI the
+BTB hit carries the way it hit in its details, and training rewrites that way; a miss allocates
+the first way whose recently-trained bit is clear (set when trained; when that would set both,
+the other clears), else a rotating way. Each way's entries are therefore a block RAM with two
+ports, the stream's read and training's write. An instance predicted before an earlier
+instance's allocation landed allocates again, but a first miss mispredicts and drops everything
+younger, so few do: 11 to 184 duplicate allocations in about 9 M trainings on each GB5 slice
+(the lockstep's `BTB-SIM` line, which also counts entries rewritten after they changed: 0 to
+18).
 Modelled in Simmerv over GB5 single-core (690 G instructions), the BTB-coverage cost (decode
 redirects and mispredicts a BTB miss causes) is 44.8 cycles/K instructions for the 2048-entry
 direct-mapped, allocate-every-CTI BTB with backward-taken decode redirects, 1.9 for 2048 entries
@@ -356,8 +360,8 @@ direct-mapped, allocate-every-CTI BTB with backward-taken decode redirects, 1.9 
 below it alone whether the pair ends there, and each way's next row is skewed from every candidate
 address (the restart's, the ending CTI's target, this pair's, the next pair's) before the pick, so
 no find-first chain and no skew stand between the rows read and the next rows' address: out of
-context at 6.000 ns the predictor meets with +0.624 ns, as the 2048-entry direct-mapped one did
-(+0.625).
+context at 6.000 ns the predictor meets with +0.268 ns, the block RAM's clock-to-out in its loop
+(+0.624 with the entries in distributed RAM, which cost 3,392 LUTs of LUTRAM).
 
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
 banks by position parity, one write each) in order (a pair pushes up to two; the stream moves
@@ -386,7 +390,7 @@ frontend reaches 214.6 MHz (196.5 with the ring alone).
 
 | structure | size | organisation | storage |
 |---|---|---|---|
-| BTB | **2048 entries** (`BTBB`=11), 8 halfword banks x 2 skewed ways (`BTBW`=1) of 128 | 12-bit tag + 3-bit type + 38-bit target | distributed RAM (the read is in the predictor's loop), read as the stream moves and by training |
+| BTB | **2048 entries** (`BTBB`=11), 8 halfword banks x 2 skewed ways (`BTBW`=1) of 128 | 12-bit tag + 3-bit type + 38-bit target | block RAM, one RAMB36 per bank and way: the stream's read (in the predictor's loop) and training's write |
 | YAGS corrector | 2048 entries (`YBITS`=11), 8 halfword banks | 8-bit tag + 2-bit counter | distributed RAM, read as the stream moves |
 | GHR | 11 bits (`GHL`) | path history | flops |
 | RAS | 8 entries (`RASB`=3) | call/return stack | flops |
@@ -1623,7 +1627,7 @@ queue's commit, the second ALU); the only yield left is M's, to a landing load o
 
 | array | module | shape | width | bits | storage |
 |---|---|---|---|---|---|
-| `bank[b].way[w].btb` | `smolrv64_predictor` | 8 x 2 x 128 | 53 | 108 544 | distributed RAM (its read is the predictor's loop), read as the stream moves and by training |
+| `bank[b].way[w].btb` | `smolrv64_predictor` | 8 x 2 x 128 | 53 | 108 544 | block RAM, 16 RAMB36 (SDP, 128 x 53 of 512 x 72): 1R the stream's (its read is the predictor's loop), 1W training's |
 | `bank[b].yc` | `smolrv64_predictor` | 8 x 256 | 10 | 20 480 | distributed RAM, read as the stream moves |
 | `ras` | `smolrv64_predictor` | 8 | 64 | 512 | flops |
 | `bank[b].way[w].bc` | `smolrv64_predictor` | 8 x 2 x 128 | 2 | 4 096 | distributed RAM, read as the stream moves and by training |

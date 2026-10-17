@@ -24,7 +24,7 @@ module smolrv64_frontend
     parameter FW    = IW,            // fetch width: the bundle's slots, pushed into the queue in one cycle
     parameter RASB  = 3,             // log2 RAS entries (smolrv64_predictor)
     parameter GHL   = 11,            // the predictor's history length
-    parameter PDW   = 31,            // smolrv64_predictor's predict-detail width
+    parameter PDW   = 32,            // smolrv64_predictor's predict-detail width
     parameter integer DCR_HIT  = 2,  // the BTB-hit bit inside the predict details
     parameter integer DCR_BACK = 1,  // a backward conditional the BTB missed redirects at decode
     // decoupling queue depth. 2 was the MINIMUM that lets fetch push every cycle (the count just

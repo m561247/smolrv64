@@ -8,7 +8,7 @@
 module smolrv64_dslot
   #(parameter PCW  = 64,
     parameter SEQW = 8,
-    parameter PDW  = 31,
+    parameter PDW  = 32,
     parameter integer DCR_HIT  = 2,
     parameter integer DCR_BACK = 1)
    (input  wire [PDW-1:0]     pdet,       // the bundle's predict details

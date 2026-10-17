@@ -527,6 +527,36 @@ module tb;
    // MEM_REORD event's condition), the cycles a candidate load is alias-held, the queue's occupancy
    // summed per cycle, and the cycles it has no room for a store.
    reg [63:0] n_ldstart, n_ldreord, n_ldblk, n_sqocc, n_sqfull;
+   // BTB-SIM: each training's way decision (smolrv64_predictor's tm: the hit way the CTI carried)
+   // against the CTI's slots as they are now, which training does not read: an allocation of a CTI
+   // a slot already holds (a duplicate), a rewrite of a way that no longer holds it (stale). The
+   // tag is btag() at RB=7, TAGW=12; an entry's sits above {type, target[38:1]}.
+   reg [63:0] bt_n, bt_car, bt_dup, bt_stale;
+   initial begin bt_n = 0; bt_car = 0; bt_dup = 0; bt_stale = 0; end
+   wire [63:0] bt_a   = 64'(dut.core.fe.u_bp.t_last);
+   wire [11:0] bt_tag = bt_a[22:11] ^ bt_a[34:23] ^ {11'd0, bt_a[63]};
+   wire [1:0]  bt_now;
+   genvar btw;
+   generate for (btw = 0; btw < 2; btw = btw + 1) begin : btn
+      reg [52:0] e;
+      always @* case (bt_a[3:1])
+         3'd0: e = dut.core.fe.u_bp.bank[0].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+         3'd1: e = dut.core.fe.u_bp.bank[1].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+         3'd2: e = dut.core.fe.u_bp.bank[2].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+         3'd3: e = dut.core.fe.u_bp.bank[3].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+         3'd4: e = dut.core.fe.u_bp.bank[4].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+         3'd5: e = dut.core.fe.u_bp.bank[5].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+         3'd6: e = dut.core.fe.u_bp.bank[6].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+         default: e = dut.core.fe.u_bp.bank[7].way[btw].btb[dut.core.fe.u_bp.tsl[btw]];
+      endcase
+      assign bt_now[btw] = e[52:41] == bt_tag;
+   end endgenerate
+   always @(posedge clk) if (!reset && meas && dut.core.fe.u_bp.res_v) begin
+      bt_n <= bt_n + 1;
+      if (dut.core.fe.u_bp.t_hit)                           bt_car   <= bt_car + 1;
+      if (dut.core.fe.u_bp.tw_v & ~dut.core.fe.u_bp.tr_hit & (|bt_now))   bt_dup   <= bt_dup + 1;
+      if (dut.core.fe.u_bp.tr_hit & ~|(dut.core.fe.u_bp.tm & bt_now))     bt_stale <= bt_stale + 1;
+   end
    // SQ-DRAIN, the cycles a store waits between the queue and the D$: the LSU holds one at the D$
    // door, not accepted (n_stdoor); the queue's head can drain and the LSU is idle and does not
    // start it (n_sqidle); the queue holds stores and its head cannot drain (n_sqwait: uncommitted,
@@ -1184,6 +1214,8 @@ module tb;
       $display("SQ-SIM data landings=%0d left-out=%0d (fetched by the data read instead)", dut.core.u_sq.ln_n, dut.core.u_sq.ln_out);
       $display("FPORT-SIM retired instructions: divides=%0d int-to-FP=%0d csr/sfence reading rs1=%0d | stores=%0d FP stores=%0d | the store queue's data reads=%0d",
                fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd);
+      $display("BTB-SIM trainings=%0d carried-hit=%0d | against the slots now: duplicate allocations=%0d stale rewrites=%0d",
+               bt_n, bt_car, bt_dup, bt_stale);
       $write("RENAME-SIM be:rename cycles each shard is low (a cycle can count in several):");
       for (rli = 0; rli < 8; rli = rli + 1)
          if (dut.core.sh_used(3'(rli))) begin

@@ -59,7 +59,7 @@ module smolrv64_predictor
     // Carried predict details {rsp, ghr, yhit, yctr, yidx, hit, ctr}. An index or a PC-only tag
     // is recomputed at resolve from the CTI's PC and length; yidx rides because it folds the
     // predict-time history.
-    parameter PDW   = RASB + GHL + (1+2+YBITS) + (1+2))
+    parameter PDW   = RASB + GHL + (1+2+YBITS) + BTBW + (1+2))
    (input  wire                 clk,
     input  wire                 reset,
     // ---- the stream ----
@@ -96,6 +96,9 @@ module smolrv64_predictor
     output wire [2:0]           err);       // its invariants, registered (the integrity log)
 
    localparam W    = 1 << BTBW;             // BTB ways
+   initial if (PDW != RASB + GHL + (1+2+YBITS) + BTBW + (1+2))
+      $fatal(1, "smolrv64_predictor: the details are %0d bits; {rsp, ghr, yhit, yctr, yidx, way, hit, ctr} is %0d",
+             PDW, RASB + GHL + (1+2+YBITS) + BTBW + (1+2));
    localparam RB   = BTBB - 3 - BTBW;       // row bits per BTB bank and way
    localparam YB   = YBITS - 3;             // row bits per corrector bank
    localparam NB   = 1 << RB;
@@ -167,8 +170,8 @@ module smolrv64_predictor
    assign sk = sk_q;
 
    // ------------------------------------------------------------ the queue
-   // {tk, target, rsp_pre, ghr_pre, yhit, yctr, yidx, ctr}
-   localparam QEW = 1 + PCW + RASB + GHL + 1 + 2 + YBITS + 2;
+   // {tk, target, rsp_pre, ghr_pre, yhit, yctr, yidx, way, ctr}
+   localparam QEW = 1 + PCW + RASB + GHL + 1 + 2 + YBITS + BTBW + 2;
    // TWO BANKS ON THE POSITION'S PARITY: a pair pushes up to M = 2 entries a cycle, to consecutive
    // positions and so to different banks, and each bank has one muxed write (one write statement
    // per LUTRAM bank: a second write site turns the array into flops).
@@ -189,8 +192,8 @@ module smolrv64_predictor
       assign en_ghr[gj] = in ? q[QEW-1-1-PCW-RASB -: GHL] : ghr;
       assign pq_tk[gj]               = q[QEW-1];
       assign pq_tgt[gj*PCW +: PCW]   = q[QEW-2 -: PCW];
-      assign pd_mk[gj*PDW +: PDW]    = {en_rsp[gj], en_ghr[gj], q[2+YBITS+2 -: 1+2+YBITS], 1'b1, q[1:0]};
-      assign pd_no[gj*PDW +: PDW]    = {en_rsp[gj], en_ghr[gj], 1'b0, 2'b01, {YBITS{1'b0}}, 1'b0, 2'b01};
+      assign pd_mk[gj*PDW +: PDW]    = {en_rsp[gj], en_ghr[gj], q[2+BTBW+YBITS+2 -: 1+2+YBITS], q[2 +: BTBW], 1'b1, q[1:0]};
+      assign pd_no[gj*PDW +: PDW]    = {en_rsp[gj], en_ghr[gj], 1'b0, 2'b01, {YBITS{1'b0}}, {BTBW{1'b0}}, 1'b0, 2'b01};
    end endgenerate
    // the state as of the aligner: the head's pre-state, or the stream's when nothing is queued
    wire [RASB-1:0] sn_rsp  = en_rsp[0];
@@ -216,7 +219,8 @@ module smolrv64_predictor
    // order up to the first taken one, or the M-th.
    localparam integer M = 2;                 // marks per pair (the queue's pushes per cycle)
    wire [EW-1:0]   bq [0:7];                 // halfword k's entry (its first matching way)...
-   wire [7:0]      bh;                       // ...and whether any way matched
+   wire [7:0]      bh;                       // ...whether any way matched
+   wire [BTBW-1:0] bw [0:7];                 // ...and which (training's, carried in the details)
    wire [YEW-1:0]  yq [0:7];
    reg  [7:0]      hv, hy, hd1;              // per position: hit, corrector hit, direction taken
    reg  [7:0]      mkv;                      // the marks
@@ -291,7 +295,7 @@ module smolrv64_predictor
       wire [YEW-1:0] me_c = yq[gm];
       wire           me_y = ~me_e[TGTW+2] & hy[gm];
       assign pq_e8[gm] = {cut & (hk == gm) & dir, tgt, ras_ptr, ghr, me_y, me_y ? me_c[1:0] : 2'b01,
-                          sa_q[YB+3:4] ^ yh_q, gm[2:0], me_e[TGTW +: 2]};
+                          sa_q[YB+3:4] ^ yh_q, gm[2:0], bw[gm], me_e[TGTW +: 2]};
    end endgenerate
 
    // the pair's entries in mark order (nmk <= M = 2), and the bank each lands in
@@ -326,23 +330,24 @@ module smolrv64_predictor
    wire [PCW-1:0]  t_last  = res_last;
    wire            t_hit   = res_pdet[2];
    wire [1:0]      t_ctr   = res_pdet[1:0];
-   // THE CTI'S SLOTS, READ NOW. Training reads the W candidate slots in its last halfword's bank
-   // (each way's write address, so the read is the RAM's write-side port) and decides from them,
-   // not from the hit fetch carried: every in-flight instance of a loop's first-taken branch
-   // carries a miss, and only the slots as they are now keep it to one entry. A hit rewrites its
-   // way; a miss allocates the first way not recently trained (each slot's nu bit, set when
-   // trained; when that would set all W, the others clear), or the rotating way when none is.
+   // THE HIT COMES WITH THE CTI, so training never reads the entries (they are a block RAM with
+   // the stream's read port and training's write port): a CTI ending at a mark hit its pair's
+   // rows when it was predicted, in the way its details carry (t_way). A hit rewrites its way; a
+   // miss allocates the first way not recently trained (each slot's nu bit, set when trained;
+   // when that would set all W, the others clear), or the rotating way when none is. An instance
+   // predicted before an earlier one's allocation landed allocates again: a branch's first miss
+   // mispredicts and drops everything younger, so few do (the bench's BTB-SIM counts them: 11 to
+   // 184 a 9 M trainings on the GB5 slices), and a remembered allocation would go stale and evict
+   // live entries instead.
+   wire [BTBW-1:0] t_way   = res_pdet[3 +: BTBW];
    wire [RB-1:0]   tsl     [0:W-1];          // way w's slot for the CTI
-   wire [TAGW-1:0] tr_tg   [0:W-1];          // ...its tag, now
    wire [1:0]      tr_bc   [0:W-1];          // ...its bimodal counter, now
    wire [W-1:0]    tr_nu;                    // ...its recently-trained bit, now
-   wire [TAGW-1:0] t_tag   = btag(t_last);
-   wire [W-1:0]    tm;
    genvar gt;
    generate for (gt = 0; gt < W; gt = gt + 1) begin : tw
       assign tsl[gt] = bslot(t_last, gt);
-      assign tm[gt]  = tr_tg[gt] == t_tag;
    end endgenerate
+   wire [W-1:0]    tm      = t_hit ? ({{(W-1){1'b0}}, 1'b1} << t_way) : {W{1'b0}};
    reg  [BTBW-1:0] vrot;                     // the way a miss takes when every slot is recent
    initial vrot = {BTBW{1'b0}};
    wire            tr_hit  = |tm;
@@ -373,9 +378,9 @@ module smolrv64_predictor
    wire [EW-1:0]   t_ent   = {btag(t_last), t_type, res_tgt[TGTW:1]};
    // The corrector: only a CTI the BTB knew carries a corrector index, so it is allocated when
    // such a conditional's bimodal guess was wrong, and refined whenever it was consulted.
-   wire            yc_hit  = res_pdet[3+YBITS+2];
-   wire [1:0]      yc_ctr  = res_pdet[3+YBITS+1 -: 2];
-   wire [YBITS-1:0] yc_idx = res_pdet[3 +: YBITS];
+   wire            yc_hit  = res_pdet[3+BTBW+YBITS+2];
+   wire [1:0]      yc_ctr  = res_pdet[3+BTBW+YBITS+1 -: 2];
+   wire [YBITS-1:0] yc_idx = res_pdet[3+BTBW +: YBITS];
    wire            yc_cur  = yc_hit & (yc_tr[YEW-1 -: YTAGW] == ytagf(t_last));   // still this CTI's
    wire [1:0]      y_base  = yc_cur ? yc_tr[1:0] : (res_taken ? 2'b10 : 2'b01);
    wire [1:0]      y_nudge = res_taken ? ((y_base == 2'b11) ? 2'b11 : y_base + 1'b1)
@@ -411,20 +416,20 @@ module smolrv64_predictor
          $fatal(1, "smolrv64_predictor: way %0d reads row %0h for the next pair, whose row is %0h", gw, rr[gw], bslot(ra, gw));
    end endgenerate
    // every bank and way's slot for the training CTI, {bank, way}; the CTI's bank is picked below
-   wire [TAGW-1:0] tg_rd [0:8*W-1];
    wire [1:0]      bc_rd [0:8*W-1];
    wire            nu_rd [0:8*W-1];
    wire [YEW-1:0]  yc_rd [0:7];
-   // The BTB banks are distributed RAM: their read is the predictor's loop (the rows read for
-   // this pair -> the marks -> the next pair's address -> the rows read for it), and a block
-   // RAM's clock-to-out is a third of the period before the first compare.
+   // The BTB's read is the predictor's loop (the rows read for this pair -> the marks -> the next
+   // pair's address -> the rows read for it), and each way's entries are a block RAM with one read
+   // port, the stream's (q is its output latch), and one write port, training's: training reads
+   // its slots' counters and recency bits (small distributed RAMs), never the entries.
    generate for (gb = 0; gb < 8; gb = gb + 1) begin : bank
       localparam [2:0] BI = gb;
       wire [EW-1:0] wq [0:W-1];               // each way's entry for halfword gb
       wire [W-1:0]  wm;                       // ...whether its tag is the pair's
       for (gw = 0; gw < W; gw = gw + 1) begin : way
          localparam [BTBW-1:0] WI = gw;
-         (* ram_style = "distributed" *) reg [EW-1:0] btb [0:NB-1];
+         (* ram_style = "block" *) reg [EW-1:0] btb [0:NB-1];
          reg [1:0]    bc  [0:NB-1];           // a conditional's bimodal counter (the entry's
                                               // type field carries only conditional-or-not for it)
          reg          nu  [0:NB-1];           // trained recently
@@ -433,16 +438,15 @@ module smolrv64_predictor
          integer bi;
          initial for (bi = 0; bi < NB; bi = bi + 1) begin btb[bi] = {EW{1'b0}}; bc[bi] = 2'b00; nu[bi] = 1'b0; end
          initial begin q = {EW{1'b0}}; cq = 2'b00; end
-         wire [EW-1:0] te = btb[tsl[gw]];
-         assign tg_rd[{BI, WI}] = te[EW-1 -: TAGW];
          assign bc_rd[{BI, WI}] = bc[tsl[gw]];
          assign nu_rd[{BI, WI}] = nu[tsl[gw]];
          assign wq[gw] = {q[EW-1:TGTW+2], q[TGTW+2] ? q[TGTW+1:TGTW] : cq, q[TGTW-1:0]};
          assign wm[gw] = q[EW-1 -: TAGW] == stag;
          wire   tw_b = tw_v & (t_last[3:1] == BI);
+         always @(posedge clk) if (reset | mv) q <= btb[rr[gw]];
+         always @(posedge clk) if (tw_b & tsel[gw]) btb[tsl[gw]] <= t_ent;
          always @(posedge clk) begin
-            if (reset | mv) begin q <= btb[rr[gw]];  cq <= bc[rr[gw]]; end
-            if (tw_b & tsel[gw])           btb[tsl[gw]] <= t_ent;
+            if (reset | mv)                cq <= bc[rr[gw]];
             if (tw_b & tsel[gw] & res_cbr) bc[tsl[gw]]  <= t_nudge;
             if (tw_b)                      nu[tsl[gw]]  <= nu_d[gw];
          end
@@ -455,8 +459,14 @@ module smolrv64_predictor
          ws = {EW{1'b0}};
          for (wi = 0; wi < W; wi = wi + 1) if (wm1[wi]) ws = wq[wi];
       end
+      reg  [BTBW-1:0] wx;
+      always @* begin
+         wx = {BTBW{1'b0}};
+         for (wi = 0; wi < W; wi = wi + 1) if (wm1[wi]) wx = wi[BTBW-1:0];
+      end
       assign bq[gb] = ws;
       assign bh[gb] = |wm;
+      assign bw[gb] = wx;
       reg [YEW-1:0] yc  [0:NY-1];
       reg [YEW-1:0] yqr;
       integer yi;
@@ -471,7 +481,6 @@ module smolrv64_predictor
    end endgenerate
    generate for (gw = 0; gw < W; gw = gw + 1) begin : tsel_rd
       localparam [BTBW-1:0] WI = gw;
-      assign tr_tg[gw] = tg_rd[{t_last[3:1], WI}];
       assign tr_bc[gw] = bc_rd[{t_last[3:1], WI}];
       assign tr_nu[gw] = nu_rd[{t_last[3:1], WI}];
    end endgenerate
