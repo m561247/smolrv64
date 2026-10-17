@@ -56,7 +56,7 @@ module smolrv64_predictor
     parameter YTAGW = 8,
     parameter PQB   = 3,             // log2 prediction-queue entries
     parameter IW    = 3,             // entries the aligner reads, and pops, per cycle
-    // Carried predict details {rsp, ghr, yhit, yctr, yidx, hit, ctr}. An index or a PC-only tag
+    // Carried predict details {rsp, ghr, yhit, yctr, yidx, way, hit, ctr}. An index or a PC-only tag
     // is recomputed at resolve from the CTI's PC and length; yidx rides because it folds the
     // predict-time history.
     parameter PDW   = RASB + GHL + (1+2+YBITS) + BTBW + (1+2))
@@ -123,13 +123,14 @@ module smolrv64_predictor
    // conditional the BTB misses is one never taken (or evicted), and falls through.
    localparam EW = TAGW + 3 + TGTW;
 `include "smolrv64_phist.vh"
+`include "smolrv64_pc.vh"
 
    // The tag folds higher bits in, so halfwords that agree in the index but differ above still
    // miss: the kernel's pre-MMU execution at PA 0x802xxxxx aliases its VAs 0xffffffff80xxxxxx in
    // every index bit, and without the fold an early-boot entry steers the paged kernel to a bare
    // address. Its low RB bits carry hi, which the skewed row consumed (rule B9).
    function [TAGW-1:0] btag(input [PCW-1:0] a);
-      btag = a[RB+TAGW+3:RB+4] ^ a[RB+2*TAGW+3:RB+TAGW+4] ^ {{(TAGW-1){1'b0}}, a[63]};
+      btag = a[RB+TAGW+3:RB+4] ^ a[RB+2*TAGW+3:RB+TAGW+4] ^ {{(TAGW-1){1'b0}}, a[PCW-1]};
    endfunction
    function [RB-1:0] bslot(input [PCW-1:0] a, input integer w);
       reg [2*RB-1:0] hh;
@@ -151,7 +152,7 @@ module smolrv64_predictor
    // The index consumes the halfword's bits [YB+3:1], so the tag carries them (rule B9).
    function [YTAGW-1:0] ytagf(input [PCW-1:0] a);
       ytagf = a[YTAGW:1] ^ {{(2*YTAGW-YBITS){1'b0}}, a[YBITS:YTAGW+1]}
-            ^ a[YBITS+YTAGW:YBITS+1] ^ a[YBITS+2*YTAGW:YBITS+YTAGW+1] ^ {{(YTAGW-1){1'b0}}, a[63]};
+            ^ a[YBITS+YTAGW:YBITS+1] ^ a[YBITS+2*YTAGW:YBITS+YTAGW+1] ^ {{(YTAGW-1){1'b0}}, a[PCW-1]};
    endfunction
 
    // ------------------------------------------------------------ speculative state
@@ -228,7 +229,7 @@ module smolrv64_predictor
    reg  [2:0]      hk;                       // where the pair ends (7: at its own end)
    reg             cut;                      // ...at a mark
    reg  [EW-1:0]   e;                        // the ending mark's entry
-   reg  [PCW-1:0]  ek;
+   reg  [EW-1:0]   ek;
    reg  [YEW-1:0]  ck;
    integer         k;
    // The pair is 16-byte aligned (sa_q is ra), so halfword k's address is sa_q with k in bits
@@ -267,7 +268,7 @@ module smolrv64_predictor
       for (k = 0; k < 8; k = k + 1) e = e | ({EW{coh[k]}} & bq[k]);
    end
    wire [PCW-1:0]  h    = {sa_q[PCW-1:4], hk, 1'b0};               // its address (the pair's, plus the halfword)
-   wire [PCW-1:0]  sa16 = sa_q + 64'd16;                            // the next pair (an adder from a register)
+   wire [PCW-1:0]  sa16 = sa_q + PC16;                            // the next pair (an adder from a register)
    wire [2:0]      ety  = e[TGTW +: 3];
    wire [TGTW-1:0] etg  = e[TGTW-1:0];
    wire            dir  = |(coh & hd1);
@@ -540,13 +541,13 @@ module smolrv64_predictor
       bpt_cyc <= bpt_cyc + 64'd1;
       if (bpt_on & adv & (|mkv))
          $display("[BP] c=%0d PRED pair=%h skip=%0d end=%0d type=%b yhit=%b dir=%b tk=%b nx=%h ghr=%h rsp=%0d",
-                  bpt_cyc, sa_q, sk_q, p_end, ety, hy[hk], dir, tk, p_nx, ghr, ras_ptr);
+                  bpt_cyc, pc64(sa_q), sk_q, p_end, ety, hy[hk], dir, tk, pc64(p_nx), ghr, ras_ptr);
       if (bpt_on & res_v)
          $display("[BP] c=%0d RES last=%h cbr=%b call=%b ret=%b taken=%b tgt=%h | carried hit=%b ctr=%0d yhit=%b yctr=%0d yidx=%0d | ywr=%b | now hit=%b nu=%b way=%b wr=%b",
-                  bpt_cyc, res_last, res_cbr, res_call, res_ret, res_taken, res_tgt,
+                  bpt_cyc, pc64(res_last), res_cbr, res_call, res_ret, res_taken, pc64(res_tgt),
                   t_hit, t_ctr, yc_hit, yc_ctr, yc_idx, y_wr, tr_hit, tr_nu, tsel, tw_v);
       if (bpt_on & flush)
-         $display("[BP] c=%0d RESTART at=%h rollback=%b ghr<=%h ras_ptr<=%0d", bpt_cyc, rst_a, rollback, rs_ghr, rs_rsp);
+         $display("[BP] c=%0d RESTART at=%h rollback=%b ghr<=%h ras_ptr<=%0d", bpt_cyc, pc64(rst_a), rollback, rs_ghr, rs_rsp);
    end
 `endif
 endmodule

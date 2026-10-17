@@ -21,7 +21,7 @@ module tb;
    // exercise the width the board runs -- until 2026-09-13 this tb hardcoded HW=2 (a full 32-bit
    // window every cycle, no partial window, no two-wide aligner path), the biggest coverage hole
    // for a width-parameterizable front end. Override with VDEFS=-DSMOLRV64_HW=2 for the old point.
-   localparam PCW = 64, HW = `SMOLRV64_HW;
+   localparam PCW = 40, HW = `SMOLRV64_HW;   // PCW: a PC's bits (smolrv64_pc.vh)
    localparam AVW = $clog2(HW+2);
    localparam [63:0] BASE = 64'h8000_0000;
    // 4 MiB. 2 MiB is NOT enough: rv64ssvnapot-p-napot stores to PA 0x80208010 and

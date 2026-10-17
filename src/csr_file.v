@@ -29,7 +29,7 @@ module csr_file
     input  wire [11:0] raddr,
     output reg  [63:0] rdata,
     // redirect for the current system op (combinational)
-    output reg  [63:0] redir_target,
+    output reg  [39:0] redir_target,  // a PC: va_codec.vh's 40-bit form (smolrv64_pc.vh)
     output wire        redir_valid,   // this op redirects (trap / xret / illegal-CSR)
     output wire        redir_is_trap, // redirect is an exception (roll back TO this op's ckpt)
     output wire        csr_illegal,   // active CSR op is an illegal access (suppress rd)
@@ -56,7 +56,7 @@ module csr_file
     input  wire        xtrap_v,
     input  wire        xtrap_intr,    // the injected trap is an interrupt (mcause MSB, vectored)
     input  wire [3:0]  xtrap_cause,   // exception: 12/13/15 page fault; interrupt: cause number
-    input  wire [63:0] xtrap_epc,     // resume PC (faulting VA / faulting bundle start)
+    input  wire [39:0] xtrap_epc,     // resume PC (faulting VA / faulting bundle start), 40-bit form
     input  wire [63:0] xtrap_tval,    // faulting virtual address
     // ---- hardware interrupt-pending lines (from CLINT/PLIC, combinational) ----
     // The device-owned mip bits: MEIP(11)/SEIP(9)/MTIP(7)/STIP(5)/MSIP(3). OR'd into
@@ -102,7 +102,7 @@ module csr_file
     input  wire [2:0]  upd_func,     // CSR funct3 (csrrw/s/c + imm forms)
     input  wire [11:0] upd_addr,     // CSR addr (is_csr) OR system-op selector (imm[11:0])
     input  wire [63:0] upd_src,      // rs1 value or zimm
-    input  wire [63:0] upd_pc);      // the system op's PC
+    input  wire [39:0] upd_pc);      // the system op's PC, 40-bit form
 
    localparam [1:0] M=2'd3, S=2'd1, U=2'd0;
 
@@ -161,17 +161,18 @@ module csr_file
    localparam [63:0] HW_RO_MASK = 64'h0000_0000_0000_0888;
 
    reg [1:0]  priv;
-   reg [63:0] mstatus, mtvec, mcause, mscratch, mie, mip,
+   reg [63:0] mstatus, mcause, mscratch, mie, mip,
               medeleg, mideleg, mcounteren, satp, mnstatus,
               stimecmp, menvcfg,   // Sstc: supervisor timer-compare + menvcfg.STCE enable
               senvcfg,             // S-mode envcfg (FIOM + Zicbom/Zicboz U-mode CBO enables)
               mstateen0;           // Smstateen: only SE0(63)/ENVCFG(62) implemented
-   reg [63:0] stvec, scause, sscratch, scounteren;
+   reg [63:0] scause, sscratch, scounteren;
    // VA-holding CSRs stored 40-bit Sv39-compressed (low 39 + non-canonical flag):
    // mepc/sepc can capture a non-canonical fetch-fault target, mtval/stval the
    // faulting VA -- both need the flag.  Non-VA tval values (illegal-instr encoding,
    // 0) fit in 39 bits with bit38=0 so they round-trip exactly.  See va_codec.vh.
-   reg [39:0] mepc, mtval, sepc, stval;
+   // mtvec/stvec are PCs too (their MODE in bits [1:0]): the trap target is a PC's 40 bits.
+   reg [39:0] mepc, mtval, sepc, stval, mtvec, stvec;
    reg [63:0] mcycle, minstret;      // Zicntr: free-running cycles + retired instructions
    (* dont_touch = "true" *) reg [31:0] mimpid_q = `SMOLRV64_GIT_COMMIT;
    always @(posedge clk) mimpid_q <= mimpid_q;
@@ -448,7 +449,7 @@ module csr_file
    initial     stip_sstc = 1'b0;
    wire dbgt_stw  = upd_valid & upd_is_csr & (upd_addr == STIMECMP);
    wire dbgt_msw  = upd_valid & upd_is_csr & (upd_addr == MSCRATCH);
-   assign dbg_mtvec = mtvec;
+   assign dbg_mtvec = `VA_UNPACK40(mtvec);
    // 1-cycle strobe when an executing CSR op writes mtvec. Distinguishes "the restore
    // was LOST" (no strobe) from "the restore RAN but wrote the probe-handler address
    // back" (strobe, mtvec unchanged) -- the latter is what a re-executed `csrrw x12,
@@ -504,7 +505,7 @@ module csr_file
         MSTATUS:    rdata = mstatus_r;
         SSTATUS:    rdata = mstatus_r & SSTATUS_RMASK;
         MISA:       rdata = MISA_VAL;
-        MTVEC:      rdata = mtvec;
+        MTVEC:      rdata = `VA_UNPACK40(mtvec);
         MEPC:       rdata = `VA_UNPACK40(mepc);
         MCAUSE:     rdata = mcause;
         MTVAL:      rdata = `VA_UNPACK40(mtval);
@@ -517,7 +518,7 @@ module csr_file
         MIDELEG:    rdata = mideleg;
         MCOUNTEREN: rdata = mcounteren;
         SCOUNTEREN: rdata = scounteren;
-        STVEC:      rdata = stvec;
+        STVEC:      rdata = `VA_UNPACK40(stvec);
         SEPC:       rdata = `VA_UNPACK40(sepc);
         SCAUSE:     rdata = scause;
         STVAL:      rdata = `VA_UNPACK40(stval);
@@ -685,8 +686,8 @@ module csr_file
    wire        trap_v     = sysop_exc | irq_take | xtrap_v;
    wire [63:0] trap_cause = trap_is_intr ? ({1'b1, 63'd0} | {60'd0, (irq_take ? irq_cause : xtrap_cause)})
                           : xtrap_v      ? {60'd0, xtrap_cause} : exc_cause;  // mcause MSB on intr
-   wire [63:0] trap_epc   = xtrap_v ? xtrap_epc : upd_pc;   // irq_take -> upd_pc (interrupted PC)
-   wire [63:0] trap_tval  = xtrap_v ? xtrap_tval : (is_ebreak ? upd_pc : 64'd0);
+   wire [39:0] trap_epc   = xtrap_v ? xtrap_epc : upd_pc;   // irq_take -> upd_pc (interrupted PC)
+   wire [63:0] trap_tval  = xtrap_v ? xtrap_tval : (is_ebreak ? `VA_UNPACK40(upd_pc) : 64'd0);
    // delegation: interrupts use the precomputed irq_to_s (mideleg); exceptions use medeleg
    wire        trap_to_s  = trap_is_intr ? irq_to_s
                           : trap_v & (priv != M) & medeleg[trap_cause[5:0]];
@@ -762,18 +763,18 @@ module csr_file
    // An external injection (xtrap_v: page fault / interrupt) takes priority over a coincident
    // xret so backend_top's csr_redir_tgt is the trap vector. Vectored mode (tvec[0]) sends an
    // interrupt to base + 4*cause; exceptions and direct mode go to base.
-   wire [63:0] tvec_base = trap_to_s ? {stvec[63:2], 2'b0} : {mtvec[63:2], 2'b0};
+   wire [39:0] tvec_base = trap_to_s ? {stvec[39:2], 2'b0} : {mtvec[39:2], 2'b0};
    wire        tvec_vec  = trap_is_intr & (trap_to_s ? stvec[0] : mtvec[0]);
-   wire [63:0] trap_tgt  = tvec_vec ? (tvec_base + {trap_cause[5:0], 2'b00}) : tvec_base;
+   wire [39:0] trap_tgt  = tvec_vec ? (tvec_base + {32'd0, trap_cause[5:0], 2'b00}) : tvec_base;
    always @* begin
       if (xtrap_v)              redir_target = trap_tgt;
-      else if (do_mret)         redir_target = `VA_UNPACK40(mepc);
-      else if (do_sret)         redir_target = `VA_UNPACK40(sepc);
-      else if (do_sfence)       redir_target = upd_pc + 64'd4;
-      else if (do_fschg)        redir_target = upd_pc + 64'd4;   // CSR op is 4 bytes
-      else if (do_dxchg)        redir_target = upd_pc + 64'd4;   // CSR op is 4 bytes
-      else if (do_satp)         redir_target = upd_pc + 64'd4;   // refetch under the new satp
-      else if (do_ctxw)         redir_target = upd_pc + 64'd4;   // refetch under the new frm/enables
+      else if (do_mret)         redir_target = mepc;
+      else if (do_sret)         redir_target = sepc;
+      else if (do_sfence)       redir_target = upd_pc + 40'd4;
+      else if (do_fschg)        redir_target = upd_pc + 40'd4;   // CSR op is 4 bytes
+      else if (do_dxchg)        redir_target = upd_pc + 40'd4;   // CSR op is 4 bytes
+      else if (do_satp)         redir_target = upd_pc + 40'd4;   // refetch under the new satp
+      else if (do_ctxw)         redir_target = upd_pc + 40'd4;   // refetch under the new frm/enables
       else                      redir_target = trap_tgt;
    end
 
@@ -838,14 +839,14 @@ module csr_file
       end else if (trap_v) begin
          // trap (system-op exception OR external page fault); target priv per delegation
          if (trap_to_s) begin
-            sepc   <= `VA_PACK40(trap_epc);
+            sepc   <= trap_epc;
             scause <= trap_cause;
             stval  <= `VA_PACK40(trap_tval);
             mstatus[SPIE_B] <= mstatus[SIE_B]; mstatus[SIE_B] <= 1'b0;
             mstatus[SPP_B]  <= priv[0];
             priv <= S;
          end else begin
-            mepc   <= `VA_PACK40(trap_epc);
+            mepc   <= trap_epc;
             mcause <= trap_cause;
             mtval  <= `VA_PACK40(trap_tval);
             mstatus[MPIE_B] <= mstatus[MIE_B]; mstatus[MIE_B] <= 1'b0;
@@ -857,7 +858,7 @@ module csr_file
             case (upd_addr)
               MSTATUS:    mstatus <= (mstatus & ~MSTATUS_WMASK) | (newv & MSTATUS_WMASK);
               SSTATUS:    mstatus <= (mstatus & ~SSTATUS_WMASK) | (newv & SSTATUS_WMASK);
-              MTVEC:      mtvec   <= newv;
+              MTVEC:      mtvec   <= `VA_PACK40(newv);
               MEPC:       mepc    <= `VA_PACK40(newv);
               MCAUSE:     mcause  <= newv;
               MTVAL:      mtval   <= `VA_PACK40(newv);
@@ -883,7 +884,7 @@ module csr_file
               MIDELEG:    mideleg <= newv;
               MCOUNTEREN: mcounteren <= newv;
               SCOUNTEREN: scounteren <= newv;
-              STVEC:      stvec   <= newv;
+              STVEC:      stvec   <= `VA_PACK40(newv);
               SEPC:       sepc    <= `VA_PACK40(newv);
               SCAUSE:     scause  <= newv;
               STVAL:      stval   <= `VA_PACK40(newv);

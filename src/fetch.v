@@ -328,7 +328,7 @@ module fetch
    // ipc_q is pc_q except during a straddle, where the fetch address is one halfword on.
    // A pending interrupt never sees a straddle (irq_go), so no arm above reads irq_inject
    // while strad is high.
-   wire e_pc = ~reset & (pc_q != (strad ? ipc_q + 64'd2 : ipc_q));
+   wire e_pc = ~reset & (pc_q != (strad ? ipc_q + {{(PCW-2){1'b0}}, 2'd2} : ipc_q));
    // the window's first halfword is the PC, which begins an instruction (outside a straddle)
    always @(posedge clk)
      if (~reset & ~redirect & ~strad & imem_ok & ~imem_st[0])

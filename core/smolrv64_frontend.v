@@ -142,7 +142,7 @@ module smolrv64_frontend
    wire [1:0]          f_err;
    wire                pr_adv, pq_room;
    wire [7:0]          p_mk;
-   wire [63:0]         st_sa;
+   wire [PCW-1:0]      st_sa;
    wire [2:0]          st_sk, p_end;
    localparam integer  PQB = 3;
    wire [PQB:0]        pq_cnt;
@@ -150,8 +150,8 @@ module smolrv64_frontend
    // mapping change, a rejected mark). It begins at the redirect's target, else at the PC.
    wire                st_flush = reset | redirect | imem_freeze | rej_q;
    assign              imem_flush = st_flush;
-   wire [63:0]         st_rst_a = redirect ? redirect_pc : imem_addr;
-   smolrv64_fring #(.HW(HW), .PQB(PQB)) u_ring
+   wire [PCW-1:0]      st_rst_a = redirect ? redirect_pc : imem_addr;
+   smolrv64_fring #(.HW(HW), .PQB(PQB), .PCW(PCW)) u_ring
      (.clk(clk), .reset(reset), .freeze(imem_freeze | rej_q), .restart(reset | redirect),
       .adv_hw(f_adv_hw), .take(f_take), .drop(f_drop), .take_tgt(bp_tgt),
       .pc_va(imem_addr), .rst_a(st_rst_a), .pc_pa(imem_pa), .pc_lvl(imem_xlvl), .xlate_ok(imem_xlate_ok),

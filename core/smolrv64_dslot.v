@@ -23,6 +23,7 @@ module smolrv64_dslot
     input  wire               fs_off,     // mstatus.FS is Off: an FP op decodes illegal
     output wire [`IR_RECW-1:0] rec,
     output wire               imm_wide);  // the immediate is not its low 32 bits sign-extended (smolrv64_frontend asserts)
+`include "smolrv64_pc.vh"
 
    wire        s_rvc, s_rd_v, s_rs1_v, s_rs2_v, s_rs3_v, s_legal, s_has_imm;
    wire [31:0] s_exp;
@@ -52,8 +53,8 @@ module smolrv64_dslot
 
    // JALR is told from JAL here: its target is rs1+imm, not pc+imm.
    wire           s_is_jalr  = (s_exp[6:2] == 5'b11001);
-   wire [PCW-1:0] s_taken_pc = pc + s_imm;
-   wire [PCW-1:0] s_ft_pc    = pc + (s_rvc ? 64'd2 : 64'd4);
+   wire [PCW-1:0] s_taken_pc = pc + s_imm[PCW-1:0];   // pc-relative: exact at PCW (smolrv64_pc.vh)
+   wire [PCW-1:0] s_ft_pc    = pc + (s_rvc ? PC2 : PC4);
    // fetch's pred_npc, rebuilt from the queued choice and the length decoded here
    wire [PCW-1:0] pnpc       = (pk == 2'd2) ? pc : (pk == 2'd1) ? tgt : s_ft_pc;
 

@@ -26,7 +26,8 @@
 // (freeze) empties the ring while it runs.
 module smolrv64_fring
   #(parameter HW  = 8,                      // the window fetch aligns, in halfwords
-    parameter PQB = 3)                      // the predictor's queue (for the mark count check)
+    parameter PQB = 3,                      // the predictor's queue (for the mark count check)
+    parameter PCW = 40)                     // a PC's bits (smolrv64_pc.vh); the I$ ports are 64
    (input  wire                    clk,
     input  wire                    reset,
     input  wire                    freeze,  // fence.i, an I$ invalidation, a mapping change, a rejected mark
@@ -35,11 +36,11 @@ module smolrv64_fring
     input  wire [$clog2(HW+2)-1:0] adv_hw,
     input  wire                    take,       // fetch took a taken prediction...
     input  wire                    drop,    // clear the head's mark
-    input  wire [63:0]             take_tgt,   // ...to here: the head's VA jumps to it
+    input  wire [PCW-1:0]          take_tgt,   // ...to here: the head's VA jumps to it
     // the PC and its translation (the iMMU)
-    input  wire [63:0]             pc_va,
-    input  wire [63:0]             rst_a,   // where a restarted stream begins: the redirect's target, else the PC
-    input  wire [63:0]             pc_pa,
+    input  wire [PCW-1:0]          pc_va,
+    input  wire [PCW-1:0]          rst_a,   // where a restarted stream begins: the redirect's target, else the PC
+    input  wire [PCW-1:0]          pc_pa,
     input  wire [1:0]              pc_lvl,  // leaf level: 0 = 4 KiB, else >= 2 MiB
     input  wire                    xlate_ok,
     // the window: HW halfwords from the head, and their marks
@@ -50,7 +51,7 @@ module smolrv64_fring
     output wire                    ok,
     output wire [1:0]              lvl,     // page size of the bytes held
     // the predictor: the stream's pair, where it ends, and the ring taking it
-    input  wire [63:0]             sa,      // the pair's first byte
+    input  wire [PCW-1:0]          sa,      // the pair's first byte
     input  wire [2:0]              sk,      // the halfwords of it before the stream's address
     input  wire [7:0]              p_mk,       // the pair's marked halfwords...
     input  wire [2:0]              p_end,      // ...and where it ends
@@ -80,7 +81,7 @@ module smolrv64_fring
    reg  [RSB:0]    rg_cnt, rg_resv;                        // halfwords held; held + in flight
    reg  [GW-1:0]   rg_gen;
    reg  [1:0]      rg_lvl;                                 // page size of the bytes held
-   reg  [63:0]     rg_hva;                                 // the head's VA (checked, never used)
+   reg  [PCW-1:0]  rg_hva;                                 // the head's VA (checked, never used)
    reg  [2:0]      rg_infl, rg_drop;                       // requests in flight; of them, stale
    reg  [PQB:0]    rg_mfl;                                 // marks in flight (checked)
    initial begin rg_head = 0; rg_cnt = 0; rg_resv = 0; rg_gen = 0;
@@ -90,7 +91,7 @@ module smolrv64_fring
    // the request: the stream's pair, inside the PC's enclosing page (a pair never crosses 4 KiB,
    // whatever the page size: rv_icache takes both lines' physical tag from the request's frame)
    wire        big_pg  = (pc_lvl != 2'd0);
-   wire        inpg    = big_pg ? (sa[63:21] == pc_va[63:21]) : (sa[63:12] == pc_va[63:12]);
+   wire        inpg    = big_pg ? (sa[PCW-1:21] == pc_va[PCW-1:21]) : (sa[PCW-1:12] == pc_va[PCW-1:12]);
    wire [3:0]  rq_n    = {1'b0, p_end} - {1'b0, sk} + 4'd1;            // halfwords it appends
    // NOT gated by a restart: a restart comes out of the whole fetch cone (window -> aligner ->
    // fire), and the I$ door must not wait for it. A request taken in a restart's cycle belongs to
@@ -101,7 +102,7 @@ module smolrv64_fring
    initial if (RS < HW + 8) $fatal(1, "smolrv64_fring: %0d slots cannot hold a %0d-halfword window and a pair", RS, HW);
    assign ic_req = ~freeze & xlate_ok & inpg & pq_room & (rg_resv <= RS[RSB:0] - 5'd8);
    assign ic_va  = {25'b0, sa[38:0]};                      // VIRTUAL: canonical Sv39 VA (sign ext masked)
-   assign ic_pa  = big_pg ? {pc_pa[63:21], sa[20:0]} : {pc_pa[63:12], sa[11:0]};
+   assign ic_pa  = {{(64-PCW){1'b0}}, big_pg ? {pc_pa[PCW-1:21], sa[20:0]} : {pc_pa[PCW-1:12], sa[11:0]}};
    assign ic_tag = {p_mk, p_end, sk, rg_gen};
    initial if (`SMOLRV64_ICTAG_W != 8 + 3 + 3 + GW)
       $fatal(1, "smolrv64_fring: SMOLRV64_ICTAG_W is %0d, the tag's fields are %0d bits", `SMOLRV64_ICTAG_W, 8 + 3 + 3 + GW);
@@ -166,7 +167,7 @@ module smolrv64_fring
          rg_resv <= rg_resv + (rq_acc ? {{(RSB-3){1'b0}}, rq_n} : {(RSB+1){1'b0}}) - adv_w;
          rg_mfl  <= rg_mfl + (rq_acc ? {{(PQB+1-4){1'b0}}, ones8(p_mk)} : {(PQB+1){1'b0}})
                            - (rp_ok ? {{(PQB+1-4){1'b0}}, ones8(rp_mk)} : {(PQB+1){1'b0}});
-         rg_hva  <= take ? take_tgt : rg_hva + {{(63-AVW){1'b0}}, adv_hw, 1'b0};
+         rg_hva  <= take ? take_tgt : rg_hva + {{(PCW-1-AVW){1'b0}}, adv_hw, 1'b0};
          if (rq_acc) rg_lvl <= pc_lvl;
          if (drop) rmk[rg_head] <= 1'b0;
          if (rp_ok) rg_cy <= rp_cy;

@@ -533,7 +533,7 @@ module tb;
    // tag is btag() at RB=7, TAGW=12; an entry's sits above {type, target[38:1]}.
    reg [63:0] bt_n, bt_car, bt_dup, bt_stale;
    initial begin bt_n = 0; bt_car = 0; bt_dup = 0; bt_stale = 0; end
-   wire [63:0] bt_a   = 64'(dut.core.fe.u_bp.t_last);
+   wire [63:0] bt_a   = 64'($signed(dut.core.fe.u_bp.t_last));   // a PC's sign extension
    wire [11:0] bt_tag = bt_a[22:11] ^ bt_a[34:23] ^ {11'd0, bt_a[63]};
    wire [1:0]  bt_now;
    genvar btw;
@@ -1050,18 +1050,18 @@ module tb;
    initial begin watch_on = $value$plusargs("watch_pc=%h", watch_pc); watch_prd_v = 1'b0; watch_prd = 16'd0; end
    integer ww;
    always @(posedge clk) if (!reset && watch_on) begin
-      if (dut.core.iss_f && dut.core.qf_pc == watch_pc) begin
+      if (dut.core.iss_f && dut.core.qf_pc == watch_pc[39:0]) begin   // a PC's 40 bits (smolrv64_pc.vh)
          $display("[c=%0d] watch F-issue pc=%h rob=%0d rd=x%0d rd_v=%b prd=%0d",
                   c, dut.core.qf_pc, dut.core.j_rob, dut.core.qf_rd, dut.core.qf_rd_v, dut.core.qf_prd);
          watch_prd <= dut.core.qf_prd;  watch_prd_v <= dut.core.qf_rd_v;
       end
       // a control-flow op resolving in its lane
       for (ww = 0; ww < dut.core.NL; ww = ww + 1)
-         if (dut.core.l_iss[ww] && dut.core.l_pc[ww] == watch_pc)
+         if (dut.core.l_iss[ww] && dut.core.l_pc[ww] == watch_pc[39:0])
             $display("[c=%0d] watch lane-issue lane=%0d cti=%b mis=%b fr_v=%b head=%0d", c,
                      ww, dut.core.l_cti[ww], dut.core.l_mis[ww], dut.core.fr_v, dut.core.rob_head_idx);
       // the watched op retires: the value the cosim REPORTS beside the physreg's REAL contents
-      if (retire[0] && dut.core.cs_pc[dut.core.rob_head_idx] == watch_pc)
+      if (retire[0] && dut.core.cs_pc[dut.core.rob_head_idx] == watch_pc[39:0])
          $display("[c=%0d] watch RETIRE   pc=%h head=%0d reported=%h cs_val[head]=%h",
                   c, watch_pc, dut.core.rob_head_idx, dut.core.cs_val_h[0],
                   dut.core.cs_val[dut.core.rob_head_idx]);
@@ -1071,7 +1071,7 @@ module tb;
       if (dut.core.redirect && watch_prd_v) $display("[c=%0d] watch redirect (prd %0d still watched)", c, watch_prd);
       // retirement on any commit port
       for (ww = 0; ww < dut.core.IW; ww = ww + 1)
-         if (dut.core.rc_v[ww] && dut.core.cs_pc[dut.core.rc_idx[ww]] == watch_pc)
+         if (dut.core.rc_v[ww] && dut.core.cs_pc[dut.core.rc_idx[ww]] == watch_pc[39:0])
             $display("[c=%0d] watch COMMIT port=%0d", c, ww);
    end
    initial begin

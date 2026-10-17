@@ -44,7 +44,7 @@
  `define SMOLRV64_IW 3                 // pipeline width (must match smolrv64_core.v)
 `endif
 module rv_soc_top #(
-   parameter HW=`SMOLRV64_HW, IW=`SMOLRV64_IW, PCW=64,   // fetch window halfwords / pipeline width
+   parameter HW=`SMOLRV64_HW, IW=`SMOLRV64_IW, PCW=40,   // fetch window halfwords / pipeline width / a PC's bits
    parameter [63:0] BASE     = 64'h8000_0000,   // DDR
    parameter        RAM_LG2  = 21,              // 2 MiB DDR
    parameter [63:0] LBASE    = 64'h7000_0000,   // on-chip local SRAM (boot/monitor) -- MEM_BASEADDR on the FPGA

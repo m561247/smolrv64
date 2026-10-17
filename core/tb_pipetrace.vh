@@ -322,7 +322,7 @@
             for (pj = 0; pj < PT_FW; pj = pj + 1) begin
                pbm_v[pj] = dut.core.fe.dq_sv[pj];
                pbm_seq[pj] = PT_SB'((dut.core.fe.dq_seq >> (pj * dut.core.SEQW)) & ((64'd1 << dut.core.SEQW) - 64'd1));
-               pbm_pc[pj]  = dut.core.fe.dq_pc[pj*64 +: 64];
+               pbm_pc[pj]  = 64'($signed(dut.core.fe.dq_pc[pj*dut.core.PCW +: dut.core.PCW]));   // a PC's sign extension
                pbm_raw[pj] = dut.core.fe.dq_inst[pj*32 +: 32];
             end
          end

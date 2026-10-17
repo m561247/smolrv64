@@ -61,13 +61,13 @@
  `define SMOLRV64_ROB_ROWS 64          // the ROB's rows of IW entries (a power of two)
 `endif
 module smolrv64_core
-  #(parameter PCW  = 64,
+  #(parameter PCW  = 40,                 // a PC's bits (smolrv64_pc.vh): Sv39's 39 and the non-canonical flag
     parameter HW   = `SMOLRV64_HW,
     parameter IW   = `SMOLRV64_IW,
     parameter AW   = 64,
-    // smolrv64_predictor's predict-detail width: {rsp, ghr, yhit, yctr, yidx, hit, ctr}, 3+11+14+3 bits.
+    // smolrv64_predictor's predict-detail width: {rsp, ghr, yhit, yctr, yidx, way, hit, ctr}, 3+11+14+1+3 bits.
     parameter PDW   = 32,
-    parameter [PCW-1:0] RESET_PC = 0,
+    parameter [63:0] RESET_PC = 0,
     parameter [63:0] LBASE    = 64'h7000_0000,   // the local SRAM, for the LSU's alignment rule
     parameter        LRAM_LG2 = 18,
     parameter        PABITS   = 36,              // the architectural physical-address width
@@ -143,6 +143,9 @@ module smolrv64_core
     output wire [15:0]             lsu_err,
     output wire [15:0]             fe_err,         // the frontend's invariants (smolrv64_frontend)
     output wire [127:0]            core_dbg);      // why nothing retires: the board's wedge ILA (ILA_MEM)
+`include "smolrv64_pc.vh"
+   initial if ((PCW != 40) | (pc64(RESET_PC[PCW-1:0]) != RESET_PC))
+      $fatal(1, "smolrv64_core: a PC is 40 bits (csr_file's), and the reset PC %h is not one", RESET_PC);
 
    // THE SEQNO WIDTH. older() orders two seqnos by the sign of their difference, which is right
    // while no two live ones are 2^(SEQW-1) or more apart. An op is live from the bundle register
@@ -290,7 +293,7 @@ module smolrv64_core
    localparam DCR_HIT = 2;   // BIMW-1: the BTB-hit bit inside the carried predict details
    localparam integer DCR_BACK = 0;   // a conditional the BTB misses falls through: the BTB holds every branch once taken
    smolrv64_frontend #(.PCW(PCW), .SEQW(SEQW), .HW(HW), .IW(IW), .FW(`SMOLRV64_FW), .PDW(PDW), .RASB(RASB), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK),
-                  .QDEPTH(`SMOLRV64_QD), .QAW($clog2(`SMOLRV64_QD)), .RESET_PC(RESET_PC)) fe
+                  .QDEPTH(`SMOLRV64_QD), .QAW($clog2(`SMOLRV64_QD)), .RESET_PC(RESET_PC[PCW-1:0])) fe
      (.clk(clk), .reset(reset), .accept(accept), .consume(fe_consume),
       .d_valid(fe_dv), .d_rec(fe_rec),
       .fs_off(fs_off), .crd(crd), .hd_v(fe_hd_v), .hd_take(fe_hd_take), .hd_gc(fe_hd_gc),
@@ -368,7 +371,7 @@ module smolrv64_core
 
    mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6), .L2N(512), .L2I(9)) u_immu
      (.clk(clk), .reset(reset),
-      .req_valid(1'b1), .req_vaddr(imem_va), .req_access(2'd0),
+      .req_valid(1'b1), .req_vaddr(pc64(imem_va)), .req_access(2'd0),
       .priv(mmu_priv), .sum(mmu_sum), .mxr(mmu_mxr), .satp(satp_fetch), .flush(mmu_flush_q),
       .ptw_addr(ptw_addr), .ptw_read(ptw_read),
       .ptw_rdata(ptw_rdata), .ptw_rvalid(ptw_rvalid),
@@ -376,7 +379,10 @@ module smolrv64_core
       .t_cause(immu_cause), .t_lvl(immu_lvl), .t_uncached(), .t_ok(), .t_fault_raw(),
       .walk_ok(~walk_hold),
       .s_vaddr(64'd0), .s_access(2'd1), .s_ok(), .s_flt(), .s_cause(), .s_paddr(), .s_nc());   // the second lookup is the dTLB's
-   assign imem_addr = {8'd0, immu_pa};
+   // a PA the iMMU delivers is below DRAM_TOP (Bare faults one above it), so it is a PC
+   assign imem_addr = immu_pa[PCW-1:0];
+   always @(posedge clk) if (!reset & immu_ready & ~immu_fault & (immu_pa[55:PCW-1] != 0))
+      $fatal(1, "smolrv64_core: the iMMU delivers PA %h, wider than a PC", immu_pa);
 
    // ---- a mapping change ------------------------------------------------------------
    // What a VA maps to changes with a satp write, an sfence.vma, or a switch to or from M-mode's
@@ -893,7 +899,7 @@ module smolrv64_core
       assign s_prs2[gs] = prs2;    assign s_r2rdy[gs] = pr2 | ~q_rs2_v;
       assign s_ps_in[gs] = {prs3, prs2, prs1};
       assign s_rob[gs] = rob_d_idxv[gs*ROB_IDXB +: ROB_IDXB];
-      assign s_pc[gs] = q_pc;  assign s_tgt[gs] = q_pc + q_imm;  assign s_seq[gs] = q_seq;  assign s_insn[gs] = q_insn;
+      assign s_pc[gs] = q_pc;  assign s_tgt[gs] = q_pc + q_imm[PCW-1:0];  assign s_seq[gs] = q_seq;  assign s_insn[gs] = q_insn;
       assign s_pdet[gs] = q_pdet;  assign s_rd[gs] = q_rd;  assign s_is_branch[gs] = q_is_branch;
       assign s_fault[gs] = q_fault;  assign s_illegal[gs] = q_illegal;
       assign s_fault_cause[gs] = q_fault_cause;  assign s_fault_tval[gs] = q_fault_tval;
@@ -1429,8 +1435,8 @@ module smolrv64_core
         (.alu_op(q_alu_op), .alu_w(q_alu_w), .alu_uw(q_alu_uw), .op1_sel(q_op1_sel),
          .op2_imm(q_op2_imm), .res_link(q_res_link), .is_rvc(q_rvc),
          .is_branch(q_is_branch), .is_jump(q_is_jump), .is_jalr(q_is_jalr), .br_func(q_br_func),
-         .rs1_val(rs1), .rs2_val(rs2), .imm(q_imm), .pc(q_pc),
-         .pred_npc(q_pred_npc), .mis_taken(q_mis_taken), .mis_nt(q_mis_nt),
+         .rs1_val(rs1), .rs2_val(rs2), .imm(q_imm), .pc(pc64(q_pc)),
+         .pred_npc(pc64(q_pred_npc)), .mis_taken(q_mis_taken), .mis_nt(q_mis_nt),
          .result(result), .addr(addr), .redirect(red), .target(target),
          .taken(taken), .taken_tgt(taken_tgt));
       // THE ISSUE CHECK: nothing executes with a source still pending (the scheduler enforces it
@@ -2524,7 +2530,7 @@ module smolrv64_core
          sy_fn <= ~ya_trap & (ya_insn[6:2] == 5'b00011);
          sy_fi <= ~ya_trap & (ya_insn[6:2] == 5'b00011) & ya_insn[12];
          sy_xcause <= ya_fault ? ya_fault_cause : 4'd2;
-         sy_xtval  <= ya_fault ? {{(64-PCW){1'b0}}, ya_fault_tval} : 64'd0;
+         sy_xtval  <= ya_fault ? pc64(ya_fault_tval) : 64'd0;
          sy_qf     <= 1'b0;
       end
       if (qf_in) begin
@@ -2891,8 +2897,8 @@ module smolrv64_core
          lr_br[lrk] <= l_br[lrk];  lr_jmp[lrk] <= l_jmp[lrk];  lr_jalr[lrk] <= l_jalr[lrk];
          lr_taken[lrk] <= l_taken[lrk];  lr_rvc[lrk] <= l_rvc[lrk];  lr_rdv[lrk] <= l_rdv[lrk];
          lr_seq[lrk] <= l_seq[lrk];   lr_rob[lrk] <= l_rob[lrk];
-         lr_pc[lrk]  <= l_pc[lrk];    lr_tgt[lrk] <= l_tgt[lrk][PCW-1:0];
-         lr_ttgt[lrk] <= l_ttgt[lrk][PCW-1:0];  lr_pdet[lrk] <= l_pdet[lrk];
+         lr_pc[lrk]  <= l_pc[lrk];    lr_tgt[lrk] <= pcpack(l_tgt[lrk]);
+         lr_ttgt[lrk] <= pcpack(l_ttgt[lrk]);  lr_pdet[lrk] <= l_pdet[lrk];
          lr_rd[lrk]  <= l_rd[lrk];    lr_rs1[lrk] <= l_rs1[lrk];
       end
    function older(input [SEQW-1:0] a, input [SEQW-1:0] b);   // wrap-safe: a is older than b
@@ -2932,7 +2938,8 @@ module smolrv64_core
 
    // ---- CSR file ----
    wire        m_is_sys  = m_valid & (m_insn[6:2] == 5'b11100);
-   wire [63:0] csr_rdata, csr_redir_tgt;
+   wire [63:0] csr_rdata;
+   wire [PCW-1:0] csr_redir_tgt;
    wire        csr_redir_v, csr_redir_trap, csr_illegal;
    wire        csr_irq_v;
    wire [3:0]  csr_irq_cause;
@@ -3440,7 +3447,7 @@ module smolrv64_core
          if (s_takev[xsk]) begin
             xtq_kind[s_rob[xsk]]  <= (s_fault[xsk] | s_illegal[xsk]) ? SYK_XTRAP : SYK_NONE;
             xtq_cause[s_rob[xsk]] <= s_fault[xsk] ? s_fault_cause[xsk] : 4'd2;
-            xtq_tval[s_rob[xsk]]  <= s_fault[xsk] ? {{(64-PCW){1'b0}}, s_fault_tval[xsk]} : 64'd0;
+            xtq_tval[s_rob[xsk]]  <= s_fault[xsk] ? pc64(s_fault_tval[xsk]) : 64'd0;
             xtq_pc[s_rob[xsk]]    <= s_pc[xsk];
          end
       // (c) a queue entry's translation fault loads the SYSQ (its PC was recorded at dispatch, so
@@ -3634,9 +3641,9 @@ module smolrv64_core
    assign fe_red_tgt   = (m_red_fire | sy_red) ? redirect_target : fr_set ? cf_target     : dec_red_tgt;
    assign fe_red_seq   = (m_red_fire | sy_red) ? redirect_seq    : fr_set ? (cf_seq + 1'b1) : dec_red_seq;
    assign redirect_target  = (sy_fire & sy_rp) ? sy_pc                      // a replay: the load again
-                           : (sy_fire & sy_fi) ? (sy_pc + 64'd4)           // fence.i: refetch after it
+                           : (sy_fire & sy_fi) ? (sy_pc + PC4)             // fence.i: refetch after it
                            : (csr_red | sy_red) ? csr_redir_tgt
-                           :           (m_pc + (m_rvc ? 64'd2 : 64'd4));
+                           :           (m_pc + (m_rvc ? PC2 : PC4));
    assign redirect_is_trap = (m_red_fire & m_trap) | sy_trap;
    assign redirect_seq     = sy_red ? (sy_trap ? sy_seq : (sy_seq + 1'b1)) : m_trap ? m_seq : (m_seq + 1'b1);
    assign ifence           = sy_fire & sy_fi;
@@ -4319,7 +4326,7 @@ module smolrv64_core
       if (!reset) begin
          if (cot_take) begin                     // M's trap, or the SYSQ's (C3 step 3)
             e_v[0] <= 1'b1;  e_trap <= 1'b1;
-            e_pc[0] <= sy_fire ? sy_pc : m_pc;
+            e_pc[0] <= pc64(sy_fire ? sy_pc : m_pc);
             // a queue entry's fault reaches the SYSQ without its instruction: it is the ROB head's
             e_insn[0] <= (cot_intr | cot_ifault) ? 32'd0 : (sy_fire & sy_qf) ? cs_insn[sy_rob]
                        : sy_fire ? sy_insn : m_insn;
@@ -4338,7 +4345,7 @@ module smolrv64_core
             for (ek = 0; ek < IW; ek = ek + 1)
                if (retire[ek]) begin
                   e_v[ek] <= 1'b1;
-                  e_pc[ek] <= cs_pc[rc_idx[ek]];  e_insn[ek] <= cs_insn[rc_idx[ek]];
+                  e_pc[ek] <= pc64(cs_pc[rc_idx[ek]]);  e_insn[ek] <= cs_insn[rc_idx[ek]];
                   e_rk[ek] <= ~rc_rdv[ek] ? 2'd0 : rc_rd[ek*6+5] ? 2'd2 : 2'd1;
                   e_ri[ek] <= rc_rd[ek*6 +: 5];  e_val[ek] <= cs_val_h[ek];
                   e_mkind[ek] <= cs_mkind_h[ek];  e_mpa[ek] <= cs_mpa_h[ek];
@@ -4613,8 +4620,8 @@ module smolrv64_core
 `include "smolrv64_phist.vh"
    wire [GHL-1:0] cf_ghr  = cf_pdet[PD_GHR +: GHL];
    wire           cf_tk   = cf_is_jump | cf_is_jalr | (cf_is_branch & cf_taken);
-   wire [PCW-1:0] cf_last = lr_pc[wl] + (lr_rvc[wl] ? 64'd0 : 64'd2);
-   wire [PCW-1:0] dr_last = dr_pc + (dr_rvc ? 64'd0 : 64'd2);
+   wire [PCW-1:0] cf_last = lr_pc[wl] + (lr_rvc[wl] ? {PCW{1'b0}} : PC2);
+   wire [PCW-1:0] dr_last = dr_pc + (dr_rvc ? {PCW{1'b0}} : PC2);
    wire [GHL-1:0] fr_ghr  = cf_tk ? phist_step(cf_ghr, cf_last) : cf_ghr;
    wire [GHL-1:0] dec_ghr = phist_step(dr_pdet[PD_GHR +: GHL], dr_last);
    wire [GHL-1:0] fe_red_ghr = (m_red_fire | sy_red) ? {GHL{1'b0}} : fr_set ? fr_ghr : dec_ghr;
