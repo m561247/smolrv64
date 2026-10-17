@@ -19,9 +19,10 @@ module smolrv64_dslot
     input  wire [PCW-1:0]     tgt,        // ...the predicted target
     input  wire               fault_op,   // the fetch-fault pseudo-op
     input  wire [3:0]         cause,
-    input  wire [PCW-1:0]     tval,       // the faulting VA
+    input  wire               fault_hi,   // the fault is the straddler's high halfword's (its VA is pc+2)
     input  wire               fs_off,     // mstatus.FS is Off: an FP op decodes illegal
-    output wire [`IR_RECW-1:0] rec);
+    output wire [`IR_RECW-1:0] rec,
+    output wire               imm_wide);  // the immediate is not its low 32 bits sign-extended (smolrv64_frontend asserts)
 
    wire        s_rvc, s_rd_v, s_rs1_v, s_rs2_v, s_rs3_v, s_legal, s_has_imm;
    wire [31:0] s_exp;
@@ -59,7 +60,7 @@ module smolrv64_dslot
    // the record's fields, fault-masked
    wire [PDW-1:0]  m_pdet = pdet;
    wire [PCW-1:0]  m_pc = pc;
-   wire [PCW-1:0]  m_fault_tval = tval;     // faulting VA (straddle: pc+2)
+   wire            m_fault_hi = fault_hi;
    wire            m_is_fp = fault_op ? 1'b0 : ((s_exp[6:2] == 5'b10100) | (s_exp[6:2] == 5'b10000) | (s_exp[6:2] == 5'b10001) | (s_exp[6:2] == 5'b10010) | (s_exp[6:2] == 5'b10011) | (s_exp[6:2] == 5'b00001) | (s_exp[6:2] == 5'b01001));
    wire [SEQW-1:0] m_seq = seq_in;
    wire [PCW-1:0]  m_pred_npc = pnpc;
@@ -76,6 +77,8 @@ module smolrv64_dslot
    wire [5:0]      m_rs3 = fault_op ? 6'd0 : s_rs3;
    wire            m_rs3_v = fault_op ? 1'b0 : s_rs3_v;
    wire [63:0]     m_imm = fault_op ? 64'd0 : s_imm;
+   wire [31:0]     m_imm32 = m_imm[31:0];
+   assign imm_wide = m_imm[63:32] != {32{m_imm[31]}};
    wire [5:0]      m_alu_op = s_alu_op;
    wire            m_alu_w = fault_op ? 1'b0 : s_alu_w;
    wire            m_alu_uw = fault_op ? 1'b0 : s_alu_uw;

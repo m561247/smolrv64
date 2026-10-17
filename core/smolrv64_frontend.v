@@ -246,7 +246,7 @@ module smolrv64_frontend
    // selector and the predictor's target instead, and f_pnpc is rebuilt at the head with
    // one mux. Same value on every bundle, including the straddle (+4 is its 32-bit
    // length) and the interrupt pseudo-op (which holds its PC).
-   localparam QW = PDW + PCW + 32 + SEQW + 2 + PCW + 1 + 4 + PCW;
+   localparam QW = PDW + PCW + 32 + SEQW + 2 + 1;
    // One PACKED record per slot (smolrv64_irec.vh) keeps the compaction a handful of muxes
    // instead of ~46 per field, with one field list for pack and unpack.
    localparam integer IRW = `IR_RECW;
@@ -266,6 +266,11 @@ module smolrv64_frontend
    wire           q_room  = (q_cnt <= QDEPTH[QAW:0] - FW[QAW:0]);   // room for a full bundle (<=FW)
    wire           q_empty = (q_cnt == {(QAW+1){1'b0}});
    reg  [QW-1:0]  pb_in [0:FW-1];
+   // ...and what is the bundle's, once: the predicted target (the last slot's to use), and a fetch
+   // fault's cause and straddle bit (the fault pseudo-op's, slot 0)
+   reg  [PCW-1:0] pb_tgt;
+   reg  [3:0]     pb_cause;
+   reg            pb_fhi;
    reg  [FW-1:0]  pb_sv;                                 // the bundle's slots (slot 0: whenever pb_v)
    wire           q_push  = q_room & pb_v;
    wire [FW-1:0]  q_wr    = {FW{q_push}} & pb_sv;        // the slots pushed this cycle: 0..n-1
@@ -296,15 +301,21 @@ module smolrv64_frontend
       wire [PDW-1:0] pd_slot = f_smk[gk] ? pd_mk[m*PDW +: PDW] : pd_no[m*PDW +: PDW];
       assign q_in[gk] = {pd_slot, ((gk == 0) & dq_fault) ? imem_ipc : dq_pc[gk*PCW +: PCW],
                          dq_inst[gk*32 +: 32], dq_seq[gk*SEQW +: SEQW],
-                         last ? dq_pk : 2'd0, bp_tgt, (gk == 0) & dq_fault, imem_cause, imem_addr};
+                         last ? dq_pk : 2'd0, (gk == 0) & dq_fault};
    end endgenerate
    integer k;
+   always @(posedge clk) if (!reset & pb_load & dq_fault & (imem_addr != imem_ipc) & (imem_addr != imem_ipc + 2))
+      $fatal(1, "smolrv64_frontend: a fetch fault at %h for the instruction at %h, neither it nor its high halfword",
+             imem_addr, imem_ipc);
    always @(posedge clk) begin
       if (reset | redirect)  pb_v <= 1'b0;
       else if (pb_load)       pb_v <= 1'b1;
       else if (q_push)       pb_v <= 1'b0;
       if (pb_load) begin
          for (k = 0; k < FW; k = k + 1) pb_in[k] <= q_in[k];
+         // a fetch fault's address is its instruction's pc, or pc+2 for a straddler's high halfword
+         // (src/fetch.v: imem_addr is pc_q, which is ipc_q but while it fetches that halfword)
+         pb_tgt <= bp_tgt;  pb_cause <= imem_cause;  pb_fhi <= imem_addr != imem_ipc;
          pb_sv <= {dq_sv[FW-1:1] & {(FW-1){dq_valid}}, 1'b1};
       end
    end
@@ -362,11 +373,13 @@ module smolrv64_frontend
    // The bundle register's slots, decoded into the queue's records.
    generate for (gk = 0; gk < FW; gk = gk + 1) begin: sl
       wire [PDW-1:0]  pdet;  wire [PCW-1:0] pc;  wire [31:0] inst;  wire [SEQW-1:0] seq;
-      wire [1:0]      pk;    wire [PCW-1:0] tgt; wire fault_op;    wire [3:0] cause;  wire [PCW-1:0] tval;
-      assign {pdet, pc, inst, seq, pk, tgt, fault_op, cause, tval} = pb_in[gk];
+      wire [1:0]      pk;    wire fault_op;    wire imm_wide;
+      assign {pdet, pc, inst, seq, pk, fault_op} = pb_in[gk];
       smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_ds
-        (.pdet(pdet), .pc(pc), .inst(inst), .seq_in(seq), .pk(pk), .tgt(tgt), .fault_op(fault_op),
-         .cause(cause), .tval(tval), .fs_off(fs_off), .rec(mh[gk]));
+        (.pdet(pdet), .pc(pc), .inst(inst), .seq_in(seq), .pk(pk), .tgt(pb_tgt), .fault_op(fault_op),
+         .cause(pb_cause), .fault_hi(pb_fhi), .fs_off(fs_off), .rec(mh[gk]), .imm_wide(imm_wide));
+      always @(posedge clk) if (!reset & q_wr[gk] & imm_wide)
+         $fatal(1, "smolrv64_frontend: slot %0d's immediate (insn %08x at %h) does not fit the record's 32 bits", gk, inst, pc);
    end endgenerate
 
    // ------------------------------------------------------- the IR registers: one dispatch group

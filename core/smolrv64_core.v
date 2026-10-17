@@ -2,22 +2,26 @@
 `include "va_codec.vh"
 `include "smolrv64_irec.vh"
 // An issued op's payload, as dispatch packs it (pl_in) and an issue port unpacks it.
-// PL_DECL(P) declares the fields under prefix P; PL_REC(P) is their order in the payload.
-`define PL_DECL(P) wire [PCW-1:0] P``pc, P``pred_npc, P``fault_tval; wire [31:0] P``insn; \
+// PL_DECL(P) declares the fields under prefix P; PL_REC(P) is their order in the payload. As in the
+// decoded record (smolrv64_irec.vh), the immediate is stored as 32 bits sign-extended and a fetch
+// fault's address as the straddle bit, and imm and fault_tval are rebuilt from them.
+`define PL_DECL(P) wire [PCW-1:0] P``pc, P``pred_npc; wire P``fault_hi; wire [31:0] P``insn; \
+   wire [31:0] P``imm32; wire [63:0] P``imm = {{32{P``imm32[31]}}, P``imm32}; \
+   wire [PCW-1:0] P``fault_tval = P``pc + {{(PCW-2){1'b0}}, P``fault_hi, 1'b0}; \
    wire [SQ_IB-1:0] P``sq_tag; wire [LQ_IB-1:0] P``lq_idx; \
    wire P``rvc, P``rd_v, P``mem_signed, P``is_mem, P``is_store, P``is_amo; \
    wire [SEQW-1:0] P``seq; wire [PDW-1:0] P``pdet; wire [5:0] P``rd, P``rs1; \
-   wire [RN_PBITS-1:0] P``prd; wire [2:0] P``shard; wire [1:0] P``mem_size; wire [63:0] P``imm; \
+   wire [RN_PBITS-1:0] P``prd; wire [2:0] P``shard; wire [1:0] P``mem_size; \
    wire [4:0] P``amo_func; wire P``is_branch, P``is_jump, P``is_jalr, P``is_mul, P``is_csr; \
    wire [2:0] P``csr_func; wire P``is_serialize, P``is_fp, P``is_fencei, P``is_cbo, P``cbo_zero; \
    wire P``cbo_keep, P``illegal, P``fault; wire [3:0] P``fault_cause; wire [5:0] P``alu_op; \
    wire P``alu_w, P``alu_uw, P``op2_imm, P``res_link, P``mis_taken, P``mis_nt; \
    wire [1:0] P``op1_sel; wire [2:0] P``br_func; wire P``rs1_v, P``rs2_v, P``rs3_v, P``ord;
 `define PL_REC(P) {P``pc, P``insn, P``rvc, P``seq, P``pdet, P``pred_npc, P``rd, P``rd_v, P``prd, P``shard, \
-   P``rs1, P``imm, P``mem_size, P``mem_signed, P``is_mem, P``is_store, P``is_amo, \
+   P``rs1, P``imm32, P``mem_size, P``mem_signed, P``is_mem, P``is_store, P``is_amo, \
    P``amo_func, P``is_branch, P``is_jump, P``is_jalr, P``is_mul, P``is_csr, P``csr_func, \
    P``is_serialize, P``is_fp, P``is_fencei, P``is_cbo, P``cbo_zero, P``cbo_keep, \
-   P``illegal, P``fault, P``fault_cause, P``fault_tval, \
+   P``illegal, P``fault, P``fault_cause, P``fault_hi, \
    P``alu_op, P``alu_w, P``alu_uw, P``op1_sel, P``op2_imm, P``res_link, \
    P``br_func, P``mis_taken, P``mis_nt, \
    P``rs1_v, P``rs2_v, P``rs3_v, P``ord, P``sq_tag, P``lq_idx}
@@ -150,12 +154,13 @@ module smolrv64_core
 
    // =========================================================== stage F
    wire                     d_valid, d_rvc, d_rd_v, d_rs1_v, d_rs2_v, d_rs3_v;
-   wire [PCW-1:0]           d_pc, d_pred_npc, d_fault_tval;
+   wire [PCW-1:0]           d_pc, d_pred_npc;
+   wire                     d_fault_hi;
    wire [31:0]              d_insn;
    wire [SEQW-1:0]          d_seq;
    wire [PDW-1:0]           d_pdet;
    wire [5:0]               d_rd, d_rs1, d_rs2, d_rs3;
-   wire [63:0]              d_imm;
+   wire [31:0]              d_imm32;
    wire [5:0]               d_alu_op;
    wire                     d_alu_w, d_alu_uw, d_op2_imm, d_res_link;
    wire [1:0]               d_op1_sel, d_mem_size;
@@ -862,12 +867,12 @@ module smolrv64_core
       // not-taken resolve must redirect back to fall-through (mis_nt=1)
       wire dcr = dcr_arm & q_gc[GC_DCR];
       assign s_pl_in[gs] = {q_pc, q_insn, q_rvc, q_seq, q_pdet, q_pred_npc, q_rd, q_rd_v,
-                            prd_g, shard, q_rs1, q_imm,
+                            prd_g, shard, q_rs1, q_imm32,
                             q_mem_size, q_mem_signed, q_is_mem, q_is_store, q_is_amo,
                             q_amo_func, q_is_branch, q_is_jump, q_is_jalr, q_is_mul,
                             q_is_csr, q_csr_func, q_is_serialize, q_is_fp, q_is_fencei,
                             q_is_cbo, q_cbo_zero, q_cbo_keep, q_illegal, q_fault,
-                            q_fault_cause, q_fault_tval,
+                            q_fault_cause, q_fault_hi,
                             q_alu_op, q_alu_w, q_alu_uw, q_op1_sel, q_op2_imm, q_res_link,
                             q_br_func, (dcr ? 1'b0 : q_mis_taken), (dcr ? 1'b1 : q_mis_nt),
                             q_rs1_v, q_rs2_v, q_rs3_v, q_gc[GC_ORD], sq_d_idx, lq_d_idx};
@@ -1154,8 +1159,8 @@ module smolrv64_core
    // Payload: packed at dispatch, unpacked at issue with the SAME concatenation, so a
    // width or ordering mistake is a lint error rather than a wrong instruction.
    localparam integer PLW = PCW + 32 + 1 + SEQW + PDW + PCW + 6 + 1 + RN_PBITS + 3 + 6   // shard is 3 bits
-                          + 64 + 2 + 1 + 1 + 1 + 1 + 5 + 1 + 1 + 1 + 1 + 1 + 3 + 1 + 1
-                          + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 64
+                          + 32 + 2 + 1 + 1 + 1 + 1 + 5 + 1 + 1 + 1 + 1 + 1 + 3 + 1 + 1   // imm32
+                          + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 1                               // fault_hi
                           + 6 + 1 + 1 + 2 + 1 + 1 + 3 + 1 + 1   // execute controls
                           + 1 + 1 + 1                           // source-valid bits
                           + 1                                   // ordered

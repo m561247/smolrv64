@@ -1599,16 +1599,16 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `irr` | `smolrv64_rob` | 1 | 5 | 5 | flops | the irrevocable pointer (§6) |
 | `u_iq_i` entry | `smolrv64_iq` | 10 | 2+2×9 = 20 | 200 | flops | integer, slot A's, `NSRC`=2 (§6.1) |
 | `u_iq_i2`, `u_iq_i3` entry | `smolrv64_iq` | 10 each | 2+2×10 = 22 | 220 each | flops | integer, slot B's and slot C's, `NSRC`=2 (§6.1) |
-| `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/418/1 | 547 | flops | the head-op register (§8) |
+| `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/330/1 | 459 | flops | the head-op register (§8) |
 | `mdw` | `smolrv64_core` | 256 | 2 | 512 | flops | the memory-dependence wait table: read at dispatch by the load's PC, written by a replay and by one training event a cycle (§8) |
-| `spl_ld`, `spl_st` | `smolrv64_core` | 16, 8 | 5+413 = 418 | 10 032 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at M's pick (§8) |
+| `spl_ld`, `spl_st` | `smolrv64_core` | 16, 32 | 8+322 = 330 | 15 840 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at M's pick (§8) |
 | `la_va`, `sa_va`, `la_v`, `sa_v` | `smolrv64_core` | 16, 8 | 64/64/1/1 | 1 560 | flops | the lanes' arrivals: 3W (one per lane), read at M's pick (§8) |
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
-| `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 413 | 15 694 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each |
+| `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 322 | 12 236 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each; the immediate is stored as its low 32 bits, which it sign-extends (the queue's write asserts it), and a fetch fault's address as one bit, set for a straddler's pc+2 (`imm` and `fault_tval` are rebuilt from them) |
 | `ipend`, `fpend` | `smolrv64_pending` | 192, 128 | 1 | 320 | flops | readiness, a table per file indexed by {shard, index}: 18R that read both and let the number's file pick (the slots' rs1/rs2 candidates, 12; the lanes' operands, 6), 9R of the FP table alone (the slots' rs3 candidates, 6; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 3 sets, 5 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
 | `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the drain's head, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
 | `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the drain's head; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
-| `qbank[*].mem` | `smolrv64_frontend` | 8 | 416 | 3 328 | LUTRAM | the decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 3*PCW+PDW+SEQW+185`), its dispatch class (`gc`) included; decode reads the bundle register's slots, so the queue head feeds the IR with no logic but the record |
+| `qbank[*].mem` | `smolrv64_frontend` | 8 x 2 | 327 | 5 232 | LUTRAM | the decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 2*PCW+PDW+SEQW+158`, the immediate and a fault's address stored as the payload stores them), its dispatch class (`gc`) included; decode reads the bundle register's slots, so the queue head feeds the IR with no logic but the record |
 
 Each PRF shard now has **its own write address** (`wa_ie`/`wa_ld`/`wa_fe`), which is §7 of
 `Area-Efficient-Scalar-OoO.md`'s "give each file its own port and a single writer and the
