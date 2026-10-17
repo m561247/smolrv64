@@ -38,7 +38,7 @@ Three architected stages plus a commit point. `F` is itself pipelined internally
 
 ```
   F  ── PC → I$ (VHPR: virtual hit) → fetch ring → aligner → RVC expand → decode ──────┐
-       (the iMMU runs alongside: its PA is the I$ miss-path physical tag, not on the hit) │  decoupling queue (8)
+       (the iMMU runs alongside: its PA is the I$ miss-path physical tag, not on the hit) │  decoupling queue (16)
   X  ── rename → PRF read / M→X bypass → ALU, branch resolve ──────────────────────────────┘
   M  ── LSU / mul / div / FPU / CSR ── trap, redirect, BTB train
   C  ── ROB head: architectural commit, minstret (delayed one cycle; a CSR op waits a second cycle at head), free-list release
@@ -47,7 +47,7 @@ Three architected stages plus a commit point. `F` is itself pipelined internally
 | stage | holds | can stall | can stall others | can restart the pipe |
 |---|---|---|---|---|
 | F | the stream and its predictor, fetch ring window, aligner | yes | no | no |
-| decoupling queue | up to 8 decoded instructions, each with its dispatch class (`smolrv64_gclass`, evaluated once at decode: scheduler, plain, decode-redirect; FS Off is sampled there, exact since a write to FS refetches) | — | back-pressures F when full | no |
+| decoupling queue | up to 16 decoded instructions (`SMOLRV64_QD`), each with its dispatch class (`smolrv64_gclass`, evaluated once at decode: scheduler, plain, decode-redirect; FS Off is sampled there, exact since a write to FS refetches) | — | back-pressures F when full | no |
 | X | one decoded+renamed instruction | yes (`d_hold`) | holds F via `accept` | no |
 | M | one instruction | yes (`m_done` low) | holds X via `m_advance` | **yes** (`redirect`) |
 | C | ROB head | — | `head_block` holds M | no (the redirect fires from M) |
@@ -417,7 +417,9 @@ order on its own pipe, and a wrong-path call or return resolves before its squas
 NON-SPECULATIVE: when the ROB's irrevocable point (§6) has reached it, so everything older is done
 and nothing can squash it, or it has retired. Up to three resolve per cycle; each enters a
 16-entry queue in age order from its lane's resolve register (`lr_*`), carrying a copy of all
-training reads (rule D16), and the queue's head trains one per cycle once non-speculative. A CTI
+training reads (rule D16; the copy is a banked distributed RAM read only at the head, the
+fields every entry is compared on are flops), and the queue's head trains one per cycle once
+non-speculative. A CTI
 arriving at a full queue is dropped (training is a hint). A CTI younger than a pending restart
 queues nothing; an entry the kill marks dead, or one past the pending restart, is discarded at
 the head. A redirect discards every entry that has not retired, except the restart's own CTI at
@@ -805,8 +807,9 @@ and no scheduler is in-order.
 ### Out-of-order FP: why the flags are safe and the rounding mode is not
 
 Reordering FP is safe for the exception FLAGS because they **wait for commit**: a result's
-flags land in its op's ROB slot (`rob_ff`, cleared when the slot is allocated), and the flags
-of the ops retiring in a cycle are ORed into `fcsr[4:0]`. The order results land in cannot
+flags land by its op's ROB slot (`rob_ffr`, a distributed RAM the landing result writes, with
+`rob_ffv`, a bit per slot cleared when the slot is allocated and set when the result lands), and
+the flags of the ops retiring in a cycle are ORed into `fcsr[4:0]`. The order results land in cannot
 change the answer (the OR accumulates), and a squashed op's flags never reach `fcsr` (its
 slot never commits). Completion and commit may fall in one cycle, so the landing result
 bypasses the slot.
@@ -1607,15 +1610,20 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `u_iq_i` entry | `smolrv64_iq` | 10 | 2+2×9 = 20 | 200 | flops | integer, slot A's, `NSRC`=2 (§6.1) |
 | `u_iq_i2`, `u_iq_i3` entry | `smolrv64_iq` | 10 each | 2+2×10 = 22 | 220 each | flops | integer, slot B's and slot C's, `NSRC`=2 (§6.1) |
 | `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/282/1 | 411 | flops | the head-op register (§8) |
+| `u_tq` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_core`) | 4 x 4 | 117 | 1 872 | LUTRAM | the training queue's payload (a CTI's PC, RVC bit, taken-target, predict details, kind and outcome): one write a bank (a lane's CTI at the tail plus its rank), read at the head into `res_*_q` (§4.2) |
+| `tq_seq`, `tq_rob`, `tq_dk`, `tq_rt` | `smolrv64_core` | 16 | 9/8/1/1 | 304 | flops | the training queue's entries as every one is compared: the redirect's seq, the retire ports' and the kill's ROB index |
+| `rob_ffr` | `smolrv64_core` | 256 (192 used) | 5 | 960 | LUTRAM | an FP op's exception flags by ROB slot: 1W (the landing result), 1R per retire port |
+| `rob_ffv` | `smolrv64_core` | 256 (192 used) | 1 | 192 | flops | the slot's FP result landed: cleared by its allocation, set by the landing |
 | `mdw` | `smolrv64_core` | 256 | 2 | 512 | flops | the memory-dependence wait table: read at dispatch by the load's PC, written by a replay and by one training event a cycle (§8) |
 | `spl_ld`, `spl_st` | `smolrv64_core` | 16, 32 | 8+274 = 282 | 13 536 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at M's pick (§8) |
-| `la_va`, `sa_va`, `la_v`, `sa_v` | `smolrv64_core` | 16, 8 | 64/64/1/1 | 1 560 | flops | the lanes' arrivals: 3W (one per lane), read at M's pick (§8) |
+| `u_la`, `u_sa` `wb[0..IW-1].mem` | `smolrv64_mwram` (in `smolrv64_core`) | 16, 32 a bank | 64 | 9 216 | LUTRAM | the lanes' arrived VAs, a bank per lane (1W, its lane), 1R at M's pick; `lvt` (2 bits an entry, flops) names the bank that wrote the entry last (§8) |
+| `la_v`, `sa_v` | `smolrv64_core` | 16, 32 | 1 | 48 | flops | an entry's address has arrived and M has not taken it |
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 274 | 10 412 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each; the immediate is stored as its low 32 bits, which it sign-extends (the queue's write asserts it), and a fetch fault's address as one bit, set for a straddler's pc+2 (`imm` and `fault_tval` are rebuilt from them) |
 | `ipend`, `fpend` | `smolrv64_pending` | 192, 128 | 1 | 320 | flops | readiness, a table per file indexed by {shard, index}: 18R that read both and let the number's file pick (the slots' rs1/rs2 candidates, 12; the lanes' operands, 6), 9R of the FP table alone (the slots' rs3 candidates, 6; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 3 sets, 5 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
 | `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the drain's head, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
 | `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the drain's head; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
-| `qbank[*].mem` | `smolrv64_frontend` | 8 x 2 | 279 | 4 464 | LUTRAM | the decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 2*PCW+PDW+SEQW+158`, the immediate and a fault's address stored as the payload stores them), its dispatch class (`gc`) included; decode reads the bundle register's slots, so the queue head feeds the IR with no logic but the record |
+| `u_q` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_frontend`) | 8 x 2 | 279 | 4 464 | LUTRAM | one write a bank (the bundle slot landing there), the three heads read; the decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 2*PCW+PDW+SEQW+158`, the immediate and a fault's address stored as the payload stores them), its dispatch class (`gc`) included; decode reads the bundle register's slots, so the queue head feeds the IR with no logic but the record |
 
 Each PRF shard now has **its own write address** (`wa_ie`/`wa_ld`/`wa_fe`), which is §7 of
 `Area-Efficient-Scalar-OoO.md`'s "give each file its own port and a single writer and the
@@ -1640,7 +1648,8 @@ queue's commit, the second ALU); the only yield left is M's, to a landing load o
 | `bank[b].way[w].bc` | `smolrv64_predictor` | 8 x 2 x 128 | 2 | 4 096 | distributed RAM, read as the stream moves and by training |
 | `bank[b].way[w].nu` | `smolrv64_predictor` | 8 x 2 x 128 | 1 | 2 048 | distributed RAM, the recently-trained bit, read and written by training |
 | `pq0`, `pq1` | `smolrv64_predictor` | 2 x 4 | 72 | 576 | the prediction queue: even and odd positions, one write each |
-| `ring`, `rmk`, `rst` | `smolrv64_fring` | 32 | 18 | 576 | flops (the halfword, its mark, its start bit) |
+| `u_rg` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_fring`) | 8 x 4 | 17 | 544 | LUTRAM (the halfword, its start bit): one write a bank (an answer's halfword landing there), the window's eight read |
+| `rmk` | `smolrv64_fring` | 32 | 1 | 32 | flops (the halfword ends a pair at a known CTI; fetch clears the head's) |
 
 Neither BTB nor corrector bank has a valid bit — validity is the tag match (§4.2).
 

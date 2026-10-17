@@ -73,9 +73,9 @@ module smolrv64_fring
    localparam integer RSB = $clog2(RS);
    localparam integer GW  = 3;                             // stream generation
    localparam integer AVW = $clog2(HW+2);
-   reg  [15:0]     ring [0:RS-1];
+   // the halfwords and their start bits: a banked distributed RAM (u_rg below), one bank per halfword
+   // of a pair; the marks are flops, since fetch clears the head's (drop) as answers land
    reg  [RS-1:0]   rmk;                                    // the slot ends a pair at a known CTI
-   reg  [RS-1:0]   rst;                                    // the slot begins an instruction
    reg             rg_cy;                                  // the last halfword appended began a 32-bit op
    reg  [RSB-1:0]  rg_head;
    reg  [RSB:0]    rg_cnt, rg_resv;                        // halfwords held; held + in flight
@@ -85,7 +85,7 @@ module smolrv64_fring
    reg  [2:0]      rg_infl, rg_drop;                       // requests in flight; of them, stale
    reg  [PQB:0]    rg_mfl;                                 // marks in flight (checked)
    initial begin rg_head = 0; rg_cnt = 0; rg_resv = 0; rg_gen = 0;
-                 rg_lvl = 2'd0; rg_infl = 0; rg_drop = 0; rg_mfl = 0; rmk = 0; rst = 0; rg_cy = 1'b0; end
+                 rg_lvl = 2'd0; rg_infl = 0; rg_drop = 0; rg_mfl = 0; rmk = 0; rg_cy = 1'b0; end
    wire            flush  = restart | freeze;
 
    // the request: the stream's pair, inside the PC's enclosing page (a pair never crosses 4 KiB,
@@ -114,8 +114,8 @@ module smolrv64_fring
    assign pr_adv = rq_acc;
 
    // the answer: its halfwords from the skip to the end, appended at the tail, each marked as the
-   // pair's prediction marked it. An answer landing in a restart's cycle is written and then
-   // emptied by the flush's reset of the count: the write enable does not wait for the restart.
+   // pair's prediction marked it. An answer landing in a restart's cycle belongs to the old stream
+   // and is not written.
    wire         rp_ok   = ic_valid & (rg_drop == 3'd0);
    wire [7:0]   rp_mk   = ic_rtag[GW+6 +: 8];              // the answer's marked halfwords
    wire [2:0]   rp_end  = ic_rtag[GW+3 +: 3];
@@ -125,12 +125,13 @@ module smolrv64_fring
    wire [RSB:0]   adv_w = {{(RSB+1-AVW){1'b0}}, adv_hw};
 
    // the window: the ring from its head; a mark counts only on a halfword held
+   wire [HW*17-1:0] rg_rd;
    genvar gw;
    generate for (gw = 0; gw < HW; gw = gw + 1) begin : wn
       wire [RSB-1:0] ix = rg_head + gw[RSB-1:0];
-      assign win[gw*16 +: 16] = ring[ix];
+      assign win[gw*16 +: 16] = rg_rd[gw*17 + 1 +: 16];
       assign mk[gw]           = rmk[ix] & (rg_cnt > gw);
-      assign st[gw]           = rst[ix];
+      assign st[gw]           = rg_rd[gw*17];
    end endgenerate
    assign avail = (rg_cnt >= HW[RSB:0]) ? HW[AVW-1:0] : rg_cnt[AVW-1:0];
    assign ok    = ~freeze & (rg_cnt != {(RSB+1){1'b0}});
@@ -172,13 +173,21 @@ module smolrv64_fring
          if (drop) rmk[rg_head] <= 1'b0;
          if (rp_ok) rg_cy <= rp_cy;
          for (j = 0; j < 8; j = j + 1)
-            if (rp_ok && j >= rp_skip && j <= rp_end) begin
-               ring[tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= ic_data[j*16 +: 16];
-               rmk [tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= rp_mk[j];
-               rst [tail + j[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip}] <= rp_st[j];
-            end
+            if (rp_wv[j]) rmk[rp_wp[j*RSB +: RSB]] <= rp_mk[j];
       end
    end
+   // the answer's halfwords from the skip to the end, at the tail on: one per bank
+   wire [7:0]     rp_wv;
+   wire [8*RSB-1:0] rp_wp;
+   wire [8*17-1:0]  rp_wd;
+   genvar ga;
+   generate for (ga = 0; ga < 8; ga = ga + 1) begin : an
+      assign rp_wv[ga] = ~reset & ~flush & rp_ok & (ga >= rp_skip) & (ga <= rp_end);
+      assign rp_wp[ga*RSB +: RSB] = tail + ga[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip};
+      assign rp_wd[ga*17 +: 17] = {ic_data[ga*16 +: 16], rp_st[ga]};
+   end endgenerate
+   smolrv64_bankq #(.W(17), .DEPTH(RS), .NW(8), .NR(HW), .NB(8)) u_rg
+     (.clk(clk), .reset(reset), .wv(rp_wv), .wp(rp_wp), .wd(rp_wd), .rp(rg_head), .rd(rg_rd));
    // The ring's head is the PC, what it holds and has in flight fits, and every mark held or in
    // flight has its prediction queued.
    integer k;

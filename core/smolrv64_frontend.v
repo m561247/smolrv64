@@ -253,14 +253,11 @@ module smolrv64_frontend
    wire [IRW-1:0] mh [0:FW-1];   // the bundle register's slots, decoded and packed (the queue's write data)
    wire           dq_fault = imem_fault & ~dq_valid;    // fetch-fault pseudo-op, pushed like a bundle
    wire           pb_load  = pb_ready & (dq_valid | dq_fault);   // the register takes a bundle or the fault op
-   // UP TO FW ENTRIES PER CYCLE INTO A LUTRAM: QNB = next_pow2(FW) consecutive-write banks,
-   // bank = pos[QLB-1:0], index = pos>>QLB, ONE muxed write per bank (one write statement per
-   // LUTRAM bank). `q_room` asks for a whole bundle's room, so a bundle never splits.
+   // UP TO FW ENTRIES PER CYCLE INTO A LUTRAM: QNB = next_pow2(FW) banks (smolrv64_bankq), so a
+   // bundle's slots land in distinct banks. `q_room` asks for a whole bundle's room, so a bundle
+   // never splits.
    localparam integer QNB = 1 << $clog2(FW);
-   localparam integer QLB = $clog2(QNB);
-   localparam integer QBD = QDEPTH / QNB;
    localparam integer CW  = $clog2(FW + 1);             // a count of 0..FW slots
-   wire [IRW-1:0] q_bank_rd [0:QNB-1];
    reg  [QAW-1:0] q_rp, q_wp;
    reg  [QAW:0]   q_cnt;
    wire           q_room  = (q_cnt <= QDEPTH[QAW:0] - FW[QAW:0]);   // room for a full bundle (<=FW)
@@ -319,37 +316,22 @@ module smolrv64_frontend
          pb_sv <= {dq_sv[FW-1:1] & {(FW-1){dq_valid}}, 1'b1};
       end
    end
-   // ---- N-bank queue storage: one muxed write per bank, one read per bank ----
-   genvar qgb;
-   generate for (qgb = 0; qgb < QNB; qgb = qgb + 1) begin: qbank
-      reg [IRW-1:0] mem [0:QBD-1];
-      integer qbi; initial for (qbi = 0; qbi < QBD; qbi = qbi + 1) mem[qbi] = {IRW{1'b0}};
-      // slot j writes position q_wp + j; FW <= QNB, so at most one slot lands in this bank
-      reg              wen;
-      reg  [QAW-1:0]   wpos;
-      reg  [IRW-1:0]   wd;
-      integer j;
-      always @* begin
-         wen = 1'b0;  wpos = q_wp;  wd = mh[0];
-         for (j = FW - 1; j >= 0; j = j - 1)
-            if (q_wr[j] & ((q_wp[QLB-1:0] + j[QLB-1:0]) == qgb[QLB-1:0])) begin
-               wen = 1'b1;  wpos = q_wp + j[QAW-1:0];  wd = mh[j];
-            end
-      end
-      always @(posedge clk)
-         if (wen) mem[wpos[QAW-1:QLB]] <= wd;
-      // read: the position in this bank at or after the head
-      wire [QLB-1:0] roff = qgb[QLB-1:0] - q_rp[QLB-1:0];
-      wire [QAW-1:0] rpos = q_rp + {{(QAW-QLB){1'b0}}, roff};
-      assign q_bank_rd[qgb] = mem[rpos[QAW-1:QLB]];
+   // ---- the storage: QNB banks, a slot's record at q_wp + its slot, the heads read from q_rp ----
+   wire [FW*QAW-1:0] q_wpos;
+   wire [FW*IRW-1:0] q_wd;
+   wire [IW*IRW-1:0] q_rd;
+   generate for (gk = 0; gk < FW; gk = gk + 1) begin: qw
+      localparam [QAW-1:0] K = gk;
+      assign q_wpos[gk*QAW +: QAW] = q_wp + K;
+      assign q_wd[gk*IRW +: IRW]   = mh[gk];
    end endgenerate
+   smolrv64_bankq #(.W(IRW), .DEPTH(QDEPTH), .NW(FW), .NR(IW), .NB(QNB)) u_q
+     (.clk(clk), .reset(reset), .wv(q_wr), .wp(q_wpos), .wd(q_wd), .rp(q_rp), .rd(q_rd));
    // the heads: decoded records at q_rp + k, and each one's dispatch class (the record's last field)
    wire [IRW-1:0] qh [0:IW-1];
    wire [15:0]    g  [0:IW-1];
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: hd
-      localparam [QAW-1:0] K = gk;
-      wire [QAW-1:0] pos = q_rp + K;
-      assign qh[gk] = q_bank_rd[pos[QLB-1:0]];
+      assign qh[gk] = q_rd[gk*IRW +: IRW];
       assign g[gk]  = qh[gk][15:0];
    end endgenerate
    wire [CW-1:0]  q_pop;                          // entries leaving this cycle (the group's take)

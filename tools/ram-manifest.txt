@@ -47,9 +47,12 @@ cp[*].smap x3 : speculative map, one copy per rename port; flush clears `lv`, so
 # port k and by the walk (lanes 5.4d/e). The load and store queues' ROB indexes (`rob`) are flops:
 # the kill looks every entry's up each cycle it holds.
 col[*].mem x3 : ROB entries, one column per slot {pold, noret, rd, prd}
-# The decoupling queue keeps QNB = next_pow2(FW) banks. As flops they cost the same LUTs (the read
-# and write muxes) and 5.9 K registers more.
-qbank[*].mem x8 : the decoupling queue's records, a bank per position mod QNB, one muxed write each
+rob_ffr : an FP op's exception flags by ROB slot: written when its result lands, read by the retire ports
+# The banked queues (smolrv64_bankq): a bank per position mod NB, one muxed write each. The
+# decoupling queue's QNB = next_pow2(FW) = 8, the fetch ring's 8, the training queue's 4.
+bank[*].mem x20 : the decoupling queue's records, the fetch ring's halfwords, the training queue's payload
+# The arrived addresses (smolrv64_mwram), a bank per writing lane: the LQ's 3, the SQ's 3.
+wb[*].mem x6 : a lane load's or store's VA by LQ/SQ entry, written by its lane, read at M's fill
 ras     : return address stack
 bank[*].way[*].btb x16 : BTB, 8 halfword banks x 2 skewed ways, 128 x 53 -- read as the fetch stream moves and by training
 bank[*].way[*].bc x16  : bimodal counters, 8 halfword banks x 2 skewed ways, 128 x 2 -- read as the stream moves and by training

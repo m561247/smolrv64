@@ -240,7 +240,7 @@ module smolrv64_core
    reg [PDW-1:0]            res_pdet_q;
    reg [PCW-1:0]            res_tgt_q;
    reg [PCW-1:0]            res_last_q;   // the resolving CTI's last halfword's address: u_bp's
-                                          // BTB key and its PC-only tags, computed at enqueue
+                                          // BTB key and its PC-only tags
    initial res_v_q = 1'b0;
    always @(posedge clk) begin
       res_v_q     <= ~reset & res_v;
@@ -2106,9 +2106,24 @@ module smolrv64_core
       if (d_ld_alloc) spl_ld[lq_d_idx] <= {gld_rob, gld_pl};
       if (d_st_alloc) spl_st[sq_d_idx] <= {gst_rob, gst_pl};
    end
-   reg  [63:0]     la_va [0:LQ_N-1];
-   reg  [63:0]     sa_va [0:SQ_N-1];
    initial begin la_v = {LQ_N{1'b0}}; sa_v = {SQ_N{1'b0}}; end
+   // the arrived addresses: each lane writes its op's own entry, M reads the one it takes (a bank
+   // per lane, smolrv64_mwram)
+   wire [NL-1:0]       la_wv, sa_wv;
+   wire [NL*LQ_IB-1:0] la_wa;
+   wire [NL*SQ_IB-1:0] sa_wa;
+   wire [NL*64-1:0]    a_wd;
+   wire [63:0]         la_rd, sa_rd;
+   genvar ag;
+   generate for (ag = 0; ag < NL; ag = ag + 1) begin: arw
+      assign la_wv[ag] = l_lm[ag] & ~l_st[ag];  assign la_wa[ag*LQ_IB +: LQ_IB] = l_lqi[ag];
+      assign sa_wv[ag] = l_lm[ag] &  l_st[ag];  assign sa_wa[ag*SQ_IB +: SQ_IB] = l_sqt[ag];
+      assign a_wd[ag*64 +: 64] = l_addr[ag];
+   end endgenerate
+   smolrv64_mwram #(.W(64), .DEPTH(LQ_N), .NW(NL), .NR(1), .AB(LQ_IB)) u_la
+     (.clk(clk), .reset(reset), .wv(la_wv), .wa(la_wa), .wd(a_wd), .ra(lq_pk_idx), .rd(la_rd));
+   smolrv64_mwram #(.W(64), .DEPTH(SQ_N), .NW(NL), .NR(1), .AB(SQ_IB)) u_sa
+     (.clk(clk), .reset(reset), .wv(sa_wv), .wa(sa_wa), .wd(a_wd), .ra(sq_pk_idx), .rd(sa_rd));
    // M FILLS IN THE ORDER ADDRESSES ARRIVE, oldest first among those waiting: a load or store whose
    // address is ready is not held up by an older one whose address is not. An address already
    // waiting (la_v / sa_v, held for M) goes first; with none waiting, the lowest lane delivering
@@ -2153,13 +2168,13 @@ module smolrv64_core
    wire [PLW-1:0]    pl_m  = s_win ? s_rec[PLW-1:0] : ho_rec[PLW-1:0];   // the op M takes
    wire [ROB_IDXB-1:0] m_go_rob = s_win ? s_rec[PLW +: ROB_IDXB] : ho_rec[PLW +: ROB_IDXB];
    wire              m_go = s_go | h_go;               // M takes an op (the pipe view's M stage)
-   wire [63:0]       s_va  = s_byp ? by_va : u_ld ? la_va[lq_pk_idx] : sa_va[sq_pk_idx];
+   wire [63:0]       s_va  = s_byp ? by_va : u_ld ? la_rd : sa_rd;
    integer           ak, aj;
    always @(posedge clk) begin
       for (ak = 0; ak < NL; ak = ak + 1)
-         if (l_lm[ak] & ~l_st[ak]) begin la_v[l_lqi[ak]] <= 1'b1; la_va[l_lqi[ak]] <= l_addr[ak]; end
+         if (la_wv[ak]) la_v[l_lqi[ak]] <= 1'b1;
       for (ak = 0; ak < NL; ak = ak + 1)
-         if (l_lm[ak] &  l_st[ak]) begin sa_v[l_sqt[ak]] <= 1'b1; sa_va[l_sqt[ak]] <= l_addr[ak]; end
+         if (sa_wv[ak]) sa_v[l_sqt[ak]] <= 1'b1;
       if (s_go & ~s_st) la_v[s_li] <= 1'b0;   // after the arrival: a bypassed one is not left set
       if (s_go &  s_st) sa_v[s_si] <= 1'b0;
       for (ak = 0; ak < LQ_N; ak = ak + 1) if (lq_kmask[ak]) la_v[ak] <= 1'b0;   // the kill's entries,
@@ -3677,12 +3692,10 @@ module smolrv64_core
    end
    reg  [TQB-1:0] tq_h, tq_t;
    reg  [TQB:0]   tq_n;
-   reg  [PCW-1:0] tq_last [0:TQN-1];   // the CTI's last halfword's address (its PC, + 2 unless RVC)
-   reg  [PCW-1:0] tq_tgt [0:TQN-1];
-   reg  [PDW-1:0] tq_pdet [0:TQN-1];
+   // what training reads is read at the head alone, so it is a banked distributed RAM (u_tq below);
+   // what every entry is compared on stays in flops
    reg  [SEQW-1:0] tq_seq [0:TQN-1];
    reg  [ROB_IDXB-1:0] tq_rob [0:TQN-1];
-   reg  [TQN-1:0] tq_cbr, tq_call, tq_ret, tq_taken;
    reg  [TQN-1:0] tq_dk;          // the kill marked the entry's CTI dead: it is discarded, never trained
    reg  [TQN-1:0] tq_rt;          // the entry's CTI has retired: it may train
    initial tq_dk = {TQN{1'b0}};
@@ -3744,11 +3757,7 @@ module smolrv64_core
          for (tk = 0; tk < NL; tk = tk + 1) if (tq_w[tk]) begin : enq
             reg [TQB-1:0] a;
             a = tq_t + {{(TQB-RKB){1'b0}}, rk[tk]};
-            tq_last[a] <= lr_pc[tk] + (lr_rvc[tk] ? {PCW{1'b0}} : {{(PCW-2){1'b0}}, 2'd2});
-            tq_tgt[a] <= lr_ttgt[tk];  tq_pdet[a] <= lr_pdet[tk];
             tq_seq[a] <= lr_seq[tk];  tq_rob[a] <= lr_rob[tk];
-            tq_cbr[a] <= lr_br[tk];  tq_call[a] <= l_call[tk];  tq_ret[a] <= l_ret[tk];
-            tq_taken[a] <= lr_taken[tk];
             tq_dk[a] <= redirect;              // a redirect's: younger than it (never an enable, rule I11)
             tq_rt[a] <= 1'b0;
          end
@@ -3761,13 +3770,25 @@ module smolrv64_core
    wire [RKB:0] tr_drop = tq_dn[RKB:0];
    assign tr_seq = tq_seq[tq_h];
    assign res_v     = tq_out & ~tq_dead;
-   assign res_cbr   = tq_cbr[tq_h];
-   assign res_call  = tq_call[tq_h];
-   assign res_ret   = tq_ret[tq_h];
-   assign res_taken = tq_taken[tq_h];
-   assign res_tgt   = tq_tgt[tq_h];
-   wire [PCW-1:0] tr_last = tq_last[tq_h];
-   wire [PDW-1:0] tr_pdet = tq_pdet[tq_h];
+   // the entries' training payload: a lane's CTI at the queue's tail plus its rank, one bank per
+   // rank, read at the head into res_*_q (a register, so no RAM output reaches the predictor's
+   // address pins, rule I7)
+   localparam integer TQW = PCW + 1 + PCW + PDW + 4;
+   wire [NL*TQB-1:0] tq_wp;
+   wire [NL*TQW-1:0] tq_wd;
+   wire [TQW-1:0]    tq_hd;
+   generate for (tqg = 0; tqg < NL; tqg = tqg + 1) begin: tqw
+      assign tq_wp[tqg*TQB +: TQB] = tq_t + {{(TQB-RKB){1'b0}}, rk[tqg]};
+      assign tq_wd[tqg*TQW +: TQW] = {lr_pc[tqg], lr_rvc[tqg], lr_ttgt[tqg], lr_pdet[tqg],
+                                      lr_br[tqg], l_call[tqg], l_ret[tqg], lr_taken[tqg]};
+   end endgenerate
+   smolrv64_bankq #(.W(TQW), .DEPTH(TQN), .NW(NL), .NR(1), .NB(1 << RKB)) u_tq
+     (.clk(clk), .reset(reset), .wv(tq_w & {NL{~reset}}), .wp(tq_wp), .wd(tq_wd), .rp(tq_h), .rd(tq_hd));
+   wire [PCW-1:0] tq_hpc;
+   wire           tq_hrvc;
+   wire [PDW-1:0] tr_pdet;
+   assign {tq_hpc, tq_hrvc, res_tgt, tr_pdet, res_cbr, res_call, res_ret, res_taken} = tq_hd;
+   wire [PCW-1:0] tr_last = tq_hpc + (tq_hrvc ? {PCW{1'b0}} : {{(PCW-2){1'b0}}, 2'd2});   // its last halfword
    always @(posedge clk) if (!reset & !redirect) begin
       if (tq_n > TQN[TQB:0]) $fatal(1, "smolrv64_core: the training queue holds %0d of %0d", tq_n, TQN);
    end
@@ -4016,23 +4037,32 @@ module smolrv64_core
    assign retire = rc_v & ~rc_noret;
 
    // FP EXCEPTION FLAGS COMMIT WITH THEIR OP. An FP op completes out of order, possibly on a path
-   // that a mispredicted branch older than it squashes later, so its flags wait in its ROB slot
-   // -- cleared when the slot is allocated, written when the result lands -- and reach fcsr only
-   // when the op retires. Completion and commit can be the same cycle (the ROB's w_hits), hence
-   // the bypass from the landing result.
-   reg  [4:0] rob_ff [0:ROB_DEPTH-1];
+   // that a mispredicted branch older than it squashes later, so its flags wait by its ROB slot
+   // and reach fcsr only when the op retires: a distributed RAM written when the result lands (its
+   // one write), and a bit per slot saying it did -- cleared when the slot is allocated, set when the
+   // result lands -- so a slot whose op is not the F stage's commits none. Completion and commit
+   // can be the same cycle (the ROB's w_hits), hence the bypass from the landing result.
+   reg  [4:0]           rob_ffr [0:ROB_DEPTH-1];
+   reg  [ROB_DEPTH-1:0] rob_ffv;
    integer    ffk;
+   initial begin rob_ffv = {ROB_DEPTH{1'b0}}; for (ffk = 0; ffk < ROB_DEPTH; ffk = ffk + 1) rob_ffr[ffk] = 5'd0; end
    always @(posedge clk) begin
-      for (ffk = 0; ffk < IW; ffk = ffk + 1) if (s_takev[ffk]) rob_ff[s_rob[ffk]] <= 5'd0;
-      if (fp_complete) rob_ff[ft_rob]     <= fl_fflags;
+      for (ffk = 0; ffk < IW; ffk = ffk + 1) if (s_takev[ffk]) rob_ffv[s_rob[ffk]] <= 1'b0;
+      if (fp_complete) rob_ffv[ft_rob] <= 1'b1;
    end
+   always @(posedge clk) if (fp_complete) rob_ffr[ft_rob] <= fl_fflags;
+   wire [4:0] rt_ff [0:IW-1];             // retire port k's slot's flags (a read port each)
+   genvar     gff;
+   generate for (gff = 0; gff < IW; gff = gff + 1) begin: rff
+      assign rt_ff[gff] = rob_ffv[rc_idx[gff]] ? rob_ffr[rc_idx[gff]] : 5'd0;
+   end endgenerate
    reg  [4:0] ret_fflags;
    integer    ffh;
    always @* begin
       ret_fflags = 5'd0;
       for (ffh = 0; ffh < IW; ffh = ffh + 1)
          if (rc_v[ffh])
-            ret_fflags = ret_fflags | ((fp_complete & (ft_rob == rc_idx[ffh])) ? fl_fflags : rob_ff[rc_idx[ffh]]);
+            ret_fflags = ret_fflags | ((fp_complete & (ft_rob == rc_idx[ffh])) ? fl_fflags : rt_ff[ffh]);
    end
 
    // retire_pc/retire_insn are verification payload -- tb_smolrv64_riscv traces them and
