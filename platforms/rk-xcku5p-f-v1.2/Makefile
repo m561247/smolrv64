@@ -145,6 +145,12 @@ util:
 place-report:
 	$(VIVADO) $(VFLAGS) -source report_place.tcl
 
+# The same, drawn: every placed cell coloured by its block (blocks in tools/floorplan.py).
+#   make floorplan [DCP=<checkpoint>] [OUT=<dir>]   ->  <dir>/floorplan.png
+floorplan:
+	$(VIVADO) $(VFLAGS) -source report_floorplan.tcl -tclargs '$(DCP)' '$(or $(OUT),floorplan)'
+	python3 ../../tools/floorplan.py '$(or $(OUT),floorplan)'
+
 # Synthesise ONE module alone and report its intrinsic Fmax and logic depth.
 #   make ooc MODULE=smolrv64_iq [PERIOD=6.0] [GENERICS="P=V ..."] [REPORT=/path/to/write] [HIER=1]
 #   HIER=1 is the weight census: synthesis only, each submodule's LUTs/LUTRAM/flops (ooc.tcl).
