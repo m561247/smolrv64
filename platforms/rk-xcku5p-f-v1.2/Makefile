@@ -146,7 +146,8 @@ place-report:
 	$(VIVADO) $(VFLAGS) -source report_place.tcl
 
 # Synthesise ONE module alone and report its intrinsic Fmax and logic depth.
-#   make ooc MODULE=smolrv64_iq [PERIOD=6.0] [GENERICS="P=V ..."] [REPORT=/path/to/write]
+#   make ooc MODULE=smolrv64_iq [PERIOD=6.0] [GENERICS="P=V ..."] [REPORT=/path/to/write] [HIER=1]
+#   HIER=1 is the weight census: synthesis only, each submodule's LUTs/LUTRAM/flops (ooc.tcl).
 #   GENERICS is the INSTANCE's parameters -- without it the module DEFAULTS are measured,
 #   which for rv_cache is a 128 KB / PAW=34 cache nothing instantiates (see ooc.tcl).
 # The flat design is 65-83% route and placement-dominated (rules I2/I7), so it cannot judge a
@@ -154,8 +155,14 @@ place-report:
 # first, then confirm in the full build.
 ooc:
 	@test -n "$(MODULE)" || { echo "usage: make ooc MODULE=<module> [PERIOD=6.0]"; exit 2; }
-	OOC_MODULE=$(MODULE) OOC_PERIOD=$(PERIOD) OOC_GENERICS="$(GENERICS)" OOC_REPORT="$(REPORT)" \
+	OOC_MODULE=$(MODULE) OOC_PERIOD=$(PERIOD) OOC_GENERICS="$(GENERICS)" OOC_REPORT="$(REPORT)" OOC_HIER="$(HIER)" \
 	  $(VIVADO) $(VFLAGS) -source ooc.tcl
+
+# What an instance's LUTs and flops ARE: every cell grouped by the signal it drives (report_weigh.tcl).
+#   make weigh INST=probe_core/core/fe [DCP=<checkpoint>] [OUT=<file>] [TOP=40]
+weigh:
+	@test -n "$(INST)" || { echo "usage: make weigh INST=<hier path> [DCP=...] [OUT=...] [TOP=40]"; exit 2; }
+	$(VIVADO) $(VFLAGS) -source report_weigh.tcl -tclargs '$(INST)' '$(DCP)' '$(OUT)' '$(TOP)'
 
 # The near-critical CENSUS of a routed checkpoint: every endpoint under SLACK ns grouped
 # into families, the startpoint/endpoint module histograms and the slack histogram. WNS is

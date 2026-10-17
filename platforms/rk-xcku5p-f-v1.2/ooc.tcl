@@ -31,8 +31,8 @@ if {[info exists ::env(OOC_GENERICS)] && $::env(OOC_GENERICS) ne ""} {
 } else {
     puts "OOC generics: NONE -- module defaults (for rv_cache that is NOT the shipped shape)"
 }
-set report [expr {[info exists ::env(OOC_REPORT)] ? $::env(OOC_REPORT) : ""}]
 
+set report [expr {[info exists ::env(OOC_REPORT)] ? $::env(OOC_REPORT) : ""}]
 set files {}
 foreach d [list [file join $root core] [file join $root src]] {
     foreach f [glob -nocomplain [file join $d *.v]] {
@@ -42,8 +42,34 @@ foreach d [list [file join $root core] [file join $root src]] {
 }
 set incdirs [list [file join $root core] [file join $root src] [file join $root src generated]]
 read_verilog -quiet $files
-synth_design -top $mod -part $part -mode out_of_context -flatten_hierarchy rebuilt \
+# The SystemVerilog side: the vendored cvfpu its manifest lists (packages first), then fp_unit.
+set svfiles {}
+set fh [open [file join $root src cvfpu_sources.f] r]
+while {[gets $fh line] >= 0} {
+    set line [string trim $line]
+    if {$line eq "" || [string match "#*" $line]} continue
+    set p [file normalize [file join $root src [regsub {^\+incdir\+} $line ""]]]
+    if {[string match "+incdir+*" $line]} { lappend incdirs $p } elseif {[string match *.sv $p]} { lappend svfiles $p } else { read_verilog -quiet $p }
+}
+close $fh
+foreach f [glob -nocomplain [file join $root src *.sv]] {
+    if {[string match *tb_* [file tail $f]] || [string match *_stub* [file tail $f]]} continue
+    lappend svfiles $f
+}
+read_verilog -quiet -sv $svfiles
+# OOC_HIER=1: a weight census instead of a timing one. Synthesis keeps every submodule as its own
+# hierarchy (no cross-boundary optimisation, so the figures run a little high) and the report is
+# each instance's LUTs, LUTRAM and flops, eight levels down; no place or route.
+set hier [expr {[info exists ::env(OOC_HIER)] && $::env(OOC_HIER) eq "1"}]
+synth_design -top $mod -part $part -mode out_of_context -flatten_hierarchy [expr {$hier ? "none" : "rebuilt"}] \
     -include_dirs $incdirs {*}$generics
+if {$hier} {
+    set out [expr {$report ne "" ? $report : "ooc-$mod-hier.rpt"}]
+    report_utilization -hierarchical -hierarchical_depth 8 -file $out
+    puts "OOC hierarchy: $out"
+    puts "OOC-DONE"
+    return
+}
 create_clock -name clk -period $per [get_ports -quiet clk]
 opt_design -quiet
 place_design -quiet

@@ -37,13 +37,19 @@ def inferred_rams(logpath):
     two false 'this is flops' conclusions.  Block RAMs are reported in a third form again.
     """
     names = set()
+    final = set()        # (scope, path) of every array in the FINAL mapping reports: once each
+    in_final = False
     with open(logpath, errors="ignore") as fh:
         for line in fh:
+            if re.match(r"(Distributed|Block) RAM: (Final|Preliminary) Mapping Report", line):
+                in_final = "Final" in line
             # 1. utilization table: |module | path/name_reg | Implied | D x W | RAM32M16 x n |
             if line.startswith("|"):
                 f = [x.strip() for x in line.split("|")]
                 if len(f) >= 6 and re.search(r"RAM\d|RAMB|BRAM", f[5]):
                     names.add(_base(f[2]))
+                    if in_final:
+                        final.add((f[1], _path(f[2])))
             # 2. INFO: ... The RAM "scope/name_reg" ... (incomplete, but free to include)
             m = re.search(r'The RAM "([^"]+)"', line)
             if m:
@@ -52,7 +58,13 @@ def inferred_rams(logpath):
             m = re.search(r"instance (\S+) \(implemented as a Block RAM\)", line)
             if m:
                 names.add(_base(re.sub(r"_bram_\d+$", "", m.group(1))))
-    return names
+    return names, final
+
+
+def _path(qualified):
+    """The array's path inside its report row's scope, its _reg and cascade index stripped."""
+    n = re.sub(r"_\d+$", "", qualified.strip())
+    return n[:-4] if n.endswith("_reg") else n
 
 
 def _base(qualified):
@@ -77,13 +89,20 @@ def load_manifest(path):
     return req
 
 
-def required_present(entry, have):
-    """An entry names one array, or `block[*].array xN`: N generate instances, every one a RAM."""
+def required_present(entry, have, final):
+    """An entry names one array, or `block[*].array xN`: N generate instances, every one a RAM.
+    The N are counted in the final mapping reports, where a row is one array in its scope, so a
+    module instantiated more than once (smolrv64_bankq, smolrv64_mwram) counts each instance's
+    banks; an array those reports do not name (a block RAM reported only by instance) is counted
+    by its name, as before."""
     m = re.fullmatch(r"(.+)\s+x(\d+)", entry)
     if not m:
         return entry in have
-    pat = re.compile(re.escape(m.group(1).strip()).replace(r"\[\*\]", r"\[\d+\]") + "$")
-    return sum(1 for n in have if pat.match(n)) == int(m.group(2))
+    pat = re.compile(r"(^|/)" + re.escape(m.group(1).strip()).replace(r"\[\*\]", r"\[\d+\]") + "$")
+    n = sum(1 for _, p in final if pat.search(p))
+    if n == 0:
+        n = sum(1 for p in have if pat.search(p))
+    return n == int(m.group(2))
 
 
 def main():
@@ -95,13 +114,13 @@ def main():
     if not os.path.exists(log):
         print("ram-check: no synth log at %s -- SKIPPED" % log)
         return 0
-    have = inferred_rams(log)
+    have, final = inferred_rams(log)
     if not have:
         print("ram-check: parsed NO rams out of %s." % log)
         print("           That is not a pass -- the log format changed or synthesis did not")
         print("           run. A check that cannot fail must not report success.")
         return 1
-    missing = [(n, w) for n, w in load_manifest(manifest) if not required_present(n, have)]
+    missing = [(n, w) for n, w in load_manifest(manifest) if not required_present(n, have, final)]
     if missing:
         print("\n*** RAM INFERENCE REGRESSED ***")
         for n, why in missing:
