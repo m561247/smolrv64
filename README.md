@@ -16,11 +16,12 @@ login prompt on the board with zero faults before it lands.
 
 | | |
 |---|---|
-| Geekbench 5.4.1, board, 2026-10-15 | **15** single-core (Integer 18, Crypto 2, Floating Point 12), **15** multi-core ([result 24725076](https://browser.geekbench.com/v5/cpu/24725076), [every subtest](workloads/gb5/result-2026-10-15.md)); the whole suite in 1 h 53 min at IPC 1.13 |
-| Geekbench 6.7.1, board, 2026-09-21 to 23 | 4 single-core, 4 multi-core ([result 19246188](https://browser.geekbench.com/v6/cpu/19246188)) |
+| Geekbench 5.4.1, board, 2026-10-16 | **15** single-core (Integer 18, Crypto 2, Floating Point 12), **15** multi-core ([result 24726510](https://browser.geekbench.com/v5/cpu/24726510), [every subtest](workloads/gb5/result-2026-10-16.md)); the whole suite in 1 h 53 min at IPC 1.13 |
+| Geekbench 6.7.1, board (4 GiB), 2026-10-15 to 16 | **10** single-core, **10** multi-core ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041), [every subtest](workloads/gb6/result-2026-10-16.md)); the whole suite in 17 h 48 min at IPC 1.00 |
+| Dhrystone 2.1, the RTL (95189924) in lockstep simulation, 2026-10-16 | **2.08** DMIPS/MHz: 273.7 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
+| CoreMark 1.0, the RTL (95189924) in lockstep simulation, 2026-10-16 | **4.14** CoreMark/MHz: 241,395 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; 3.96 at `-O3 -funroll-all-loops`; `make run B=coremark`) |
 | `sha256sum` of a 30 MB file, board, 2026-09-25 | IPC 1.56 to 1.63 over three runs, 43 cycles per byte |
 | Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed three-wide; DDR4 at 333 MHz |
-| Area | 114,092 LUTs (53% of the part), 53,029 flip-flops, 169.5 of 480 block RAM tiles, 28 DSPs, no UltraRAM |
 | Software | OpenSBI and mainline Linux; Ubuntu 25.04 boots over an NFS root through the core's own virtio-net |
 
 **Why three bars are so short.** Gaussian Blur, Structure from Motion and Machine Learning
@@ -216,17 +217,15 @@ words. Ubuntu's NFS root runs through it.
 ## Performance
 
 Geekbench 5 on the board is the target metric: the scores above, with every subtest's rate
-in [workloads/gb5/result-2026-10-15.md](workloads/gb5/result-2026-10-15.md). The whole-run
+in [workloads/gb5/result-2026-10-16.md](workloads/gb5/result-2026-10-16.md). The whole-run
 IPC from `perf stat` is the number comparable across builds, and the subtest rates are what
 the scores follow.
 
-Geekbench 6.7.1 on 27f03a7f, three-wide ([result 19246188](https://browser.geekbench.com/v6/cpu/19246188),
-2026-09-21 to 23): 4 single-core, 4 multi-core. Geekbench 6 is more load-bound than
-Geekbench 5 and multiplies far more.
-
-In lockstep simulation the tiny128 Linux boot retires 45,193,259 instructions in its first
-60 million cycles and 223,070,997 in 300 million. Those counts are the reference in
-`core/cosim-expected.txt`, and a change that moves them names the delta in its commit.
+Geekbench 6.7.1 on 2ed18026 ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041),
+2026-10-15 to 16, the 4 GiB board): 10 single-core, 10 multi-core, from Navigation's 48 down to
+Object Detection's 1. Its machine-learning and vector-image subtests (Object Detection, Background
+Blur, Photo Library, Photo Filter, Structure from Motion, Ray Tracer) score 1 to 7 and take 63% of
+the single-core pass's time.
 
 The plans behind the design, with every item justified by a measurement on this core,
 are [docs/PLAN-2026-09-05-ipc.md](docs/PLAN-2026-09-05-ipc.md) and

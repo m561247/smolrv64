@@ -7,6 +7,9 @@
 #   make runall                   all of them, serially (one Verilator job at a time)
 #   make run B=<name>             also a program of your own, local/<name>.c: main(0, 0) is called
 #                                 and its return value is the tohost exit
+#   make run B=coremark           CoreMark (github.com/eembc/coremark, checked out at COREMARK),
+#                                 the performance run's seeds, COREMARK_ITERS iterations; its
+#                                 port is coremark/core_portme.[ch], ticks = mcycle
 #
 # Sources stay upstream (RVT); only syscall() is swapped for the UART (uart-syscalls.py).
 # Left out: mt-* (multi-hart), pmp (no PMP), vec-* (no V).
@@ -29,6 +32,11 @@ LDFLAGS = -static -nostdlib -nostartfiles -lm -lgcc -T $(RVT)/common/test.ld
 VDEFS  ?= -DSMOLRV64_IW=3
 CYC    ?= 400000000
 B      ?= dhrystone
+COREMARK ?= $(HOME)/projects/coremark
+# CoreMark's own rule wants ten seconds of run; in lockstep that is out of reach, so the run is
+# short and its CRCs (the standard 2K performance run's) are the check. Ticks are mcycle and
+# EE_TICKS_PER_SEC is 10^6, so its Iterations/Sec reads as CoreMark/MHz (1e6 / cycles an iteration).
+COREMARK_ITERS ?= 30
 PLUSARGS ?=
 LOG    ?= $(B).run.log
 
@@ -54,6 +62,13 @@ dhrystone.elf: syscalls-uart.c $(RVT)/common/crt.S dhry-src/dhrystone.h
 	$(RV)gcc $(CFLAGS) -Idhry-src -o $@ dhry-src/*.c syscalls-uart.c $(RVT)/common/crt.S $(LDFLAGS)
 	$(RV)objdump -d $@ > dhrystone.dump
 
+coremark.elf: syscalls-uart.c $(RVT)/common/crt.S coremark/core_portme.c coremark/core_portme.h
+	$(RV)gcc $(CFLAGS) -Icoremark -I$(COREMARK) -DPERFORMANCE_RUN=1 -DITERATIONS=$(COREMARK_ITERS) \
+	   '-DFLAGS_STR="$(OPT) -march=$(MARCH)"' -o $@ $(addprefix $(COREMARK)/,core_list_join.c \
+	   core_main.c core_matrix.c core_state.c core_util.c) coremark/core_portme.c syscalls-uart.c \
+	   $(RVT)/common/crt.S $(LDFLAGS)
+	$(RV)objdump -d $@ > coremark.dump
+
 %.bin: %.elf
 	$(RV)objcopy -O binary $< $@
 
@@ -62,8 +77,8 @@ run: $(B).bin
 	@th=$$($(RV)nm $(B).elf | awk '$$3=="tohost"{print $$1}'); out=$(CURDIR)/$(LOG); \
 	 FW=$(CURDIR)/$(B).bin INITRD= CYC=$(CYC) VDEFS="$(VDEFS)" PLUSARGS="+tohost=$$th $(PLUSARGS)" \
 	   ../../core/run-cosim-linux.sh > $$out 2>&1; \
-	 grep -a -E 'building|Diverging|STORE DATA|fatal|TOHOST exit|TIMEOUT after|mcycle|minstret|Dhrystones|Microseconds' $$out; \
-	 if grep -aq 'TOHOST exit=0 ' $$out && ! grep -aqE 'Diverging retire|STORE DATA MISMATCH' $$out; then echo "RVBENCH $(B): PASS"; \
+	 grep -a -E 'building|Diverging|STORE DATA|fatal|TOHOST exit|TIMEOUT after|mcycle|minstret|Dhrystones|Microseconds|Total ticks|Iterations  |crc[a-z]+ +:|ERROR! [a-z]+ crc' $$out; \
+	 if grep -aq 'TOHOST exit=0 ' $$out && ! grep -aqE 'Diverging retire|STORE DATA MISMATCH|ERROR! [a-z]+ crc' $$out; then echo "RVBENCH $(B): PASS"; \
 	 else echo "RVBENCH $(B): FAIL (log: $$out)"; exit 1; fi
 
 runall:
