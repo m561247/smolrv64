@@ -20,6 +20,11 @@ REPO=$(pwd)
 PLAT=$REPO/platforms/rk-xcku5p-f-v1.2
 UB=$REPO/workloads/ubuntu
 BOOT_WAIT=${BOOT_WAIT:-1800}      # seconds to wait for login:
+# Two boards hang off coffee, so the board under test is named (tools/board-gate.sh) before the
+# gate spends its netlist boot and stamp on a bitstream it cannot then program.
+if [ "${NO_BOARD:-0}" = 0 ] && [ "${BOARD:-}" != 2g ] && [ "${BOARD:-}" != 4g ]; then
+   echo "GATE: BOARD=2g|4g names the board under test (NO_BOARD=1 stops before the board)"; exit 2
+fi
 
 if [ $# -ge 1 ]; then
    git checkout -q --detach "$1" || { echo "GATE: cannot check out $1"; exit 2; }
