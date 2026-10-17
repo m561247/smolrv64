@@ -24,9 +24,10 @@ plat_default=$here/platforms/rk-xcku5p-f-v1.2
 
 diff_paths=(src core platforms/rk-xcku5p-f-v1.2 workloads/monitor)
 excl=(':(exclude)*.xpr' ':(exclude)third_party' ':(exclude)*.log' ':(exclude)src/mem.linehex')
-# Untracked files no build reads: logs, images, lock files, and the clockInfo.txt a Vivado run
-# (an out-of-context build, a report) writes into its working directory.
-junk='\.(log|linehex|elf|bin|flock)$|(^|/)clockInfo\.txt$'
+# Untracked files no build reads: logs, images, lock files, and what a Vivado run (an
+# out-of-context build, a report) writes into its working directory: clockInfo.txt, and the
+# placer's congestion estimates under cong/.
+junk='\.(log|linehex|elf|bin|flock)$|(^|/)clockInfo\.txt$|(^|/)cong/'
 
 # A define the last build used: the project file's Verilog_Define block records them (build.tcl).
 define() {
