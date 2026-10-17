@@ -126,9 +126,12 @@ latency() {
    [ "${LAT:-1}" != 0 ] || return 0
    [ -n "${ip:-}" ] || find_ip || { echo "latency: no ssh to the board"; return 0; }
    tar -C "$REPO/tools/board/membench" -cf - Makefile chase2.c | timeout 300 ssh -o BatchMode=yes tommy@$ip \
-      'D=/var/tmp/gate-latency; rm -rf $D && mkdir -p $D && tar -C $D -xf - && make -s -C $D chase2 >/dev/null && sleep 30 && for k in 16 256 4096; do $D/chase2 $k 1 1000000; done' \
+      'D=/var/tmp/gate-latency; rm -rf $D && mkdir -p $D && tar -C $D -xf - && make -s -C $D chase2 >/dev/null && sleep 30 && for k in 16 256 4096; do for r in 1 2 3; do $D/chase2 $k 1 1000000; done; done' \
       > "$RES/latency.txt" 2>&1
-   awk '/ KiB k=1 / { for (i = 2; i <= NF; i++) { if ($i == "cycles/step") c[$1] = $(i-1); if ($i == "DCMISS") m[$1] = $(i-1); if ($i == "DTLB_MISS") t[$1] = $(i-1) } }
+   # Three runs a size, the fastest kept with its own miss rates: a background process that runs
+   # during one of them evicts lines a 16 KiB chase never loses by itself.
+   awk '/ KiB k=1 / { for (i = 2; i <= NF; i++) { if ($i == "cycles/step") x = $(i-1); if ($i == "DCMISS") y = $(i-1); if ($i == "DTLB_MISS") z = $(i-1) }
+                     if (!($1 in c) || x < c[$1]) { c[$1] = x; m[$1] = y; t[$1] = z } }
         END { if (!(16 in c) || !(256 in c) || !(4096 in c) || m[256] < 0.1 || t[4096] < 0.1) { print "latency: unavailable (latency.txt)"; exit }
               h = c[16]; d = h + (c[256] - h) / m[256]; f = (c[4096] - h - m[4096] * (d - h)) / t[4096]
               printf "latency: D$ hit %.1f cycles, D$ miss %.1f (256 KiB, %.2f misses a load), a first-level dTLB miss +%.1f (4 MiB, %.2f a load); chase2, user-mode cycles\n", h, d, m[256], f, t[4096] }' "$RES/latency.txt"
