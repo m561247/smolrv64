@@ -305,6 +305,9 @@
                kan_close(ps_id[dut.core.s_seq[pj]], ps_c[dut.core.s_seq[pj]], 1'b1);
             ps_v[dut.core.s_seq[pj]] = 1'b0;
          end
+      // the queue's mirror holds what the queue holds this cycle, before the edge below moves both
+      if (qm_n != 32'(dut.core.fe.q_cnt) && trace_on)
+         $display("pipetrace: the queue mirror holds %0d, the queue %0d (cycle %0d)", qm_n, dut.core.fe.q_cnt, c);
       // the mirrors follow the hardware's edges: a redirect empties the bundle register and the
       // queue; else the queue pops the head group, takes the bundle register's slots on a push, and
       // the bundle register loads a bundle from fetch
@@ -332,8 +335,6 @@
             end
          end
       end
-      if (qm_n != 32'(dut.core.fe.q_cnt) && !dut.core.fe.redirect && trace_on)
-         $display("pipetrace: the queue mirror holds %0d, the queue %0d (cycle %0d)", qm_n, dut.core.fe.q_cnt, c);
 
       // 4. the fetch row: one per run of cycles the bundle register could take a bundle and fetch
       // offers none, named by the reason
