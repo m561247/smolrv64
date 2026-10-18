@@ -131,8 +131,10 @@ stampable)
     # A met entry built from these sources at the shipping configuration: the default knobs and no
     # define but the build's own (the identity, the monitor's path), so its netlist is the gate's
     # but for the identity's INIT bits. It must hold the routed checkpoint the stamp starts from.
+    # Placed with the directive the gate's own build would use (PLACE_DIRECTIVE, as build.tcl reads
+    # it): a directive moves placement, not the netlist, and a met build is met.
     cid=${1:?content id}
-    for d in $(ls -td "$BITCACHE"/*-iw3-div48-AltSpreadLogic_medium* 2>/dev/null); do
+    for d in $(ls -td "$BITCACHE"/*-iw3-div48-"${PLACE_DIRECTIVE:-AltSpreadLogic_medium}" 2>/dev/null); do
         grep -q "^cid: *$cid\$" "$d/meta.txt" 2>/dev/null || continue
         grep -q '^met: *yes' "$d/meta.txt" && [ -f "$d/routed.dcp" ] || continue
         extra=$(sed 's/=.*//' "$d/defines.txt" | grep -v -x -E 'MEM_BASEADDR|SOC_BOOT_HEX|PROBE_CLK_DIV8|SMOLRV64_HW|SMOLRV64_IW|SMOLRV64_GIT_COMMIT|SMOLRV64_GIT_DIRTY|SMOLRV64_BUILD_STAMP' || true)
