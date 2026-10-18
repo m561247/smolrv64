@@ -1770,8 +1770,7 @@ exactly one of bad speculation, front-end, back-end or dispatching; its events c
 `TD_BS + TD_FE + TD_BE` plus the dispatching cycles is the cycle count by construction, and the
 simulator's `TOPDOWN-SIM` prints the same classifier. A cycle whose IR group dispatches is a
 dispatching cycle whatever waits behind it (the queue head's credit is the next group's), so the
-dispatching cycles' instructions are exactly `DPATCH`. `tools/perf-smol.sh td CMD 2>&1 |
-tools/perf-cpi-stack.py` is the report: level 1, the depth under each parent, and the slots; the
+dispatching cycles' instructions are exactly `DPATCH`. `perf-smol td CMD` prints the report: level 1, the depth under each parent, and the slots; the
 `tdbe` and `tdfe` sets add level 3, `td_k` itself.
 
 | event | id | meaning |
@@ -1837,15 +1836,18 @@ result counts in both, and only `td_k` ranks them (dep-load before dep-fp). The 
 the schedulers reported the cycle before; each scheduler reports its lowest-slot waiting entry
 (it compares no age).
 
-**Reading the report.** On the board (once, `tools/perf-smol-setup.sh` lowers
-`perf_event_paranoid` so no `sudo` is needed; copy `docs/smolrv64-perf-events.json` beside
-the script):
+**Reading the report.** On coffee, `tools/perf-smol-install.sh` installs `perf-smol`
+(`tools/perf-smol.sh`), `perf-cpi-stack.py` and the event table together into the boards' shared
+home (`~/bin`, on PATH at login); `perf-cpi-stack.py` refuses a table older than itself. On the
+board (once, `tools/perf-smol-setup.sh` lowers `perf_event_paranoid` so no `sudo` is needed),
+each run prints its report on stderr when the command ends and keeps the counts in
+`perf-smol.<set>.txt`:
 
-    tools/perf-smol.sh td     CMD 2>&1 | tools/perf-cpi-stack.py    # where the cycles go
-    tools/perf-smol.sh tdbe   CMD 2>&1 | tools/perf-cpi-stack.py    # the back-end's causes
-    tools/perf-smol.sh tdfe   CMD 2>&1 | tools/perf-cpi-stack.py    # bad speculation, front-end, width
-    tools/perf-smol.sh cpi    CMD 2>&1 | tools/perf-cpi-stack.py    # the wait events, in depth
-    tools/perf-smol.sh memcpi CMD 2>&1 | tools/perf-cpi-stack.py    # the memory events, fast-load latency
+    perf-smol td     CMD > /dev/null    # where the cycles go
+    perf-smol tdbe   CMD > /dev/null    # the back-end's causes
+    perf-smol tdfe   CMD > /dev/null    # bad speculation, front-end, width
+    perf-smol cpi    CMD > /dev/null    # the wait events, in depth
+    perf-smol memcpi CMD > /dev/null    # the memory events, fast-load latency
 
 Each set is one run of 13 counters; never ask for more (`all`), which multiplexes. `perf stat`
 counts the whole command, so the answer is about the whole command: run the region of interest

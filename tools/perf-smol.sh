@@ -1,30 +1,34 @@
 #!/usr/bin/env bash
-# Run a command under perf with a smolrv64 event set that FITS IN THE COUNTERS.
+# Run a command under perf with a smolrv64 event set that FITS IN THE COUNTERS, and print the
+# report (tools/perf-cpi-stack.py) on stderr when it ends. The raw counts stay in
+# perf-smol.<set>.txt (PERF_OUT=<file> to choose), which perf-cpi-stack.py re-reads.
+#
+# On the board: tools/perf-smol-install.sh (on coffee) installs this as ~/bin/perf-smol, with the
+# report script and the event table beside it, into the boards' shared home. Then
+#   perf-smol td pi 100000 > /dev/null        # the program's output dropped, the report shown
 #
 # The DTB exposes 13 programmable counters (riscv,raw-event-to-mhpmcounters ... 0x0000fff8
 # = mhpmcounter3..15).  cycles and instructions ride the dedicated mcycle/minstret and are
 # free.  Ask for more than 13 raw events and perf MULTIPLEXES: every count becomes a scaled
 # estimate and the CPI-stack identity stops closing.  Hence sets, not one giant list.
 #
-#   ./perf-smol.sh td   ./prog      TOP-DOWN: level 1 closes to 100% of cycles, depth under each
-#                                   parent, slots, redirects and misses per 1k          (13)
-#   ./perf-smol.sh tdbe ./prog      TOP-DOWN level 3: the back-end's ten causes (td_k), which
-#                                   sum to TD_BE                                        (13)
-#   ./perf-smol.sh tdfe ./prog      TOP-DOWN level 3: bad speculation's and the front-end's
-#                                   causes and the dispatch width                       (13)
-#   ./perf-smol.sh cpi  ./prog      the wait events (overlapping): every ST_* cause, the frontend
-#                                   breakdown, ROB-full, the redirect drain, D$ misses  (13)
-#   ./perf-smol.sh mem  ./prog      D$/I$ traffic, loads/stores, the dMMU walker        ( 8)
-#   ./perf-smol.sh memcpi ./prog    the memory events, queue occupancies, fast-load latency (13)
-#   ./perf-smol.sh br   ./prog      redirect causes + the drain                         ( 5)
-#   ./perf-smol.sh all  ./prog      24 of the events -- MULTIPLEXED, estimates only     (24)
+#   perf-smol td   ./prog      TOP-DOWN: level 1 closes to 100% of cycles, depth under each
+#                              parent, slots, redirects and misses per 1k                  (13)
+#   perf-smol tdbe ./prog      TOP-DOWN level 3: the back-end's ten causes (td_k), which
+#                              sum to TD_BE                                                (13)
+#   perf-smol tdfe ./prog      TOP-DOWN level 3: bad speculation's and the front-end's
+#                              causes and the dispatch width                               (13)
+#   perf-smol cpi  ./prog      the wait events (overlapping): every ST_* cause, the frontend
+#                              breakdown, ROB-full, the redirect drain, D$ misses          (13)
+#   perf-smol mem  ./prog      D$/I$ traffic, loads/stores, the dMMU walker                ( 8)
+#   perf-smol memcpi ./prog    the memory events, queue occupancies, fast-load latency     (13)
+#   perf-smol br   ./prog      redirect causes + the drain                                 ( 5)
+#   perf-smol all  ./prog      24 of the events -- MULTIPLEXED, estimates only             (24)
 #
 # Running only the FE_* events (r0310-r0314) names no back-end wait: every one lands in
 # "unattributed".  Use 'cpi', or the td sets.
 #
-# Pipe the output through tools/perf-cpi-stack.py.
-#
-# PERF_TIMEOUT_MS=10800000 ./perf-smol.sh cpi ./long-workload   # 3 h slice, counters printed
+# PERF_TIMEOUT_MS=10800000 perf-smol cpi ./long-workload   # 3 h slice, counters printed
 set -u
 SET=${1:-td}; shift || true
 
@@ -68,4 +72,9 @@ SUDO=""
 # ignored while it waits on the workload -- a three-hour Geekbench slice was lost to exactly
 # that, and the log looks merely truncated rather than failed.  The only other reliable
 # lever is killing the WORKLOAD, which makes perf print normally.
-exec $SUDO perf stat ${PERF_TIMEOUT_MS:+--timeout "$PERF_TIMEOUT_MS"} -e "cycles,instructions,$EV" "$@"
+OUT=${PERF_OUT:-perf-smol.$SET.txt}
+$SUDO perf stat ${PERF_TIMEOUT_MS:+--timeout "$PERF_TIMEOUT_MS"} -o "$OUT" -e "cycles,instructions,$EV" "$@"
+rc=$?
+HERE=$(dirname "$(readlink -f "$0")")
+"$HERE/perf-cpi-stack.py" "$OUT" >&2 && echo "  (counts in $OUT)" >&2
+exit $rc

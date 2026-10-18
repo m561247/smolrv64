@@ -9,9 +9,12 @@ their parent. DPATCH (instructions dispatched) gives the slot view against IW x 
 events are td_k itself, one per TOPDOWN-SIM bucket: the tdbe set counts the back-end's ten causes
 (they sum to TD_BE), the tdfe set bad speculation's and the front-end's and the dispatch width.
 
-    tools/perf-smol.sh td   CMD 2>&1 | tools/perf-cpi-stack.py    # levels 1 and 2
-    tools/perf-smol.sh tdbe CMD 2>&1 | tools/perf-cpi-stack.py    # the back-end's causes
-    tools/perf-smol.sh tdfe CMD 2>&1 | tools/perf-cpi-stack.py    # bad speculation, front-end, width
+    perf-smol td   CMD > /dev/null      # levels 1 and 2 (tools/perf-smol.sh, installed on the board)
+    perf-smol tdbe CMD > /dev/null      # the back-end's causes
+    perf-smol tdfe CMD > /dev/null      # bad speculation, front-end, width
+
+perf-smol runs this script on its counts when the command ends; run it by hand to re-read a
+saved file (perf-smol.<set>.txt).
 
 The wait-cycle view below reads the ST_* events: they overlap (a cycle waits on several things
 at once) and are depth, never a partition.
@@ -27,11 +30,10 @@ generates from src/csr_file.v and src/lint.sh verifies -- so this cannot drift f
 RTL.  Do not hardcode codes here.
 
 Usage (13 programmable counters -- one set per run, never the union, see perf-smol.sh):
-    tools/perf-smol.sh cpi CMD 2>&1 | tools/perf-cpi-stack.py     # the stack + ROB-full,
-                                                                  # drain, redirects, D$ misses
-    tools/perf-smol.sh br  CMD 2>&1 | tools/perf-cpi-stack.py     # redirects by cause
-    tools/perf-smol.sh mem CMD 2>&1 | tools/perf-cpi-stack.py     # D$/I$ traffic, loads/stores
-    tools/perf-cpi-stack.py saved-perf-output.txt
+    perf-smol cpi CMD                   # the stack + ROB-full, drain, redirects, D$ misses
+    perf-smol br  CMD                   # redirects by cause
+    perf-smol mem CMD                   # D$/I$ traffic, loads/stores
+    tools/perf-cpi-stack.py perf-smol.cpi.txt     # re-read a run's counts
     tools/perf-cpi-stack.py --width 2 ...        # a narrower build than the shipping IW=3
 
 The wait-cycle view's arithmetic: dispatch is WIDTH instructions per cycle (3, the shipping IW), so
@@ -89,6 +91,13 @@ TDK = {"bad speculation": [("TDK_REDIRECT", "a redirect"), ("TDK_DRAIN", "a reso
                     ("TDK_BE_SER", "serialising / CSR / CBO"), ("TDK_BE_HELD", "the IR held after a redirect or resteer")],
        "dispatching": [("TDK_OK1", "1 instruction"), ("TDK_OK2", "2"), ("TDK_OK3", "3"), ("TDK_OK4", "4")]}
 
+# Every event name the reports read: the table must name them all (see main).
+USED = ({k for k, _ in BACKEND + OCCUPANCY + DSP_SUB + MEM_SUB + MEM_CNT + FE_SUB + REDIR_SUB}
+        | {k for rows in TDK.values() for k, _ in rows}
+        | {"TD_BS", "TD_FE", "TD_BE", "TD_FE_LAT", "TD_BE_MEM", "TD_BE_ROB", "TD_BE_IQ", "DPATCH",
+           "RD_WAIT", "REDIR", "DCMISS", "ICMISS", "DTLB_MISS", "MEM_LDINFL", "MEM_LDSENT",
+           "MEM_LQOCC", "MEM_SQOCC", "FE_BUB"})
+
 def load_names():
     path = next((p for p in CANDIDATES if p and os.path.exists(p)), None)
     if path is None:
@@ -98,7 +107,7 @@ def load_names():
     with open(path) as f:
         cat = json.load(f)
     # "0x0300" -> "r0300", matching how perf echoes a raw event back
-    return {"r%04x" % int(e["EventCode"], 16): e["EventName"] for e in cat}
+    return {"r%04x" % int(e["EventCode"], 16): e["EventName"] for e in cat}, path
 
 def parse(text, names):
     """Pull counts out of perf's columnar output, and each event's trailing multiplex
@@ -125,7 +134,30 @@ def parse(text, names):
         vals[key] = n
     return vals, unknown, mux
 
-def topdown(v, width):
+class Report:
+    """Rows collected, then printed numbers first -- right-aligned in a column as wide as the
+    block's widest -- and the label after, indented by its depth, so a long cause never pushes
+    its numbers out of line and the report stays narrow."""
+    def __init__(self):
+        self.items = []
+    def text(self, s=""):
+        self.items.append(s)
+    def row(self, depth, label, num, note=""):
+        self.items.append((depth, label, num, note))
+    def show(self):
+        i = 0
+        while i < len(self.items):
+            if isinstance(self.items[i], str):
+                print(self.items[i]); i += 1; continue
+            j = i
+            while j < len(self.items) and not isinstance(self.items[j], str):
+                j += 1
+            w = max(len(n) for _, _, n, _ in self.items[i:j])
+            for d, l, n, note in self.items[i:j]:
+                print("    " + n.rjust(w) + "   " + "  " * d + l + ("   " + note if note else ""))
+            i = j
+
+def topdown(v, width, R):
     """The closing top-down report. Returns False if the run has no TD_* events."""
     if v.get("TD_BE") is None or v.get("TD_FE") is None or v.get("TD_BS") is None:
         return False
@@ -133,84 +165,102 @@ def topdown(v, width):
     cyc, ins = g("CYCLES"), g("INSTRET")
     bs, fe, be = g("TD_BS"), g("TD_FE"), g("TD_BE")
     disp = cyc - bs - fe - be
-    pc = lambda n: 100.0 * n / cyc
-    print("  cycles %-16d instructions %-16d IPC %.3f   (%d-wide)" % (cyc, ins, ins / cyc, width))
-    print("\n  TOP-DOWN, level 1 (every cycle charged to exactly one; SmolRV64-Spec 11.2)")
+    pc = lambda n: "%6.2f%%" % (100.0 * n / cyc)
+    R.text("  cycles %-16d instructions %-16d IPC %.3f   (%d-wide)" % (cyc, ins, ins / cyc, width))
+    R.text("\n  TOP-DOWN, level 1 (every cycle charged to exactly one; SmolRV64-Spec 11.2)")
     for name, n in (("dispatching", disp), ("bad speculation", bs), ("front-end", fe), ("back-end", be)):
-        print("    %-34s %6.2f%%" % (name, pc(n)))
+        R.row(0, name, pc(n))
     if disp < 0 or min(bs, fe, be) < 0:
         sys.exit("error: the level-1 buckets exceed the cycles -- the event map is wrong (docs/smolrv64-perf-events.json)")
     def sub(parent, rows):
         rest = parent
         for label, k in rows:
             if v.get(k) is not None:
-                print("      %-32s %6.2f%%" % ("- " + label, pc(g(k))))
+                R.row(1, "- " + label, pc(g(k)))
                 rest -= g(k)
         if any(v.get(k) is not None for _, k in rows):
-            print("      %-32s %6.2f%%" % ("- the rest", pc(rest)))
-    tdk(v, {"bad speculation": bs, "front-end": fe, "back-end": be, "dispatching": disp}, pc)
-    print("\n  level 2")
-    print("    %-34s %6.2f%%" % ("bad speculation", pc(bs)))
+            R.row(1, "- the rest", pc(rest))
+    have3 = tdk(v, {"bad speculation": bs, "front-end": fe, "back-end": be, "dispatching": disp}, pc, R)
+    R.text("\n  level 2")
+    R.row(0, "bad speculation", pc(bs))
     if v.get("RD_WAIT") is not None:
         drain = min(g("RD_WAIT"), bs)
-        print("      %-32s %6.2f%%" % ("- a resolved restart waiting (drain)", pc(drain)))
-        print("      %-32s %6.2f%%" % ("- the redirect itself", pc(bs - drain)))
-    print("    %-34s %6.2f%%" % ("front-end", pc(fe)))
+        R.row(1, "- a resolved restart waiting (drain)", pc(drain))
+        R.row(1, "- the redirect itself", pc(bs - drain))
+    R.row(0, "front-end", pc(fe))
     sub(fe, [("latency: iMMU walk / no fetch bytes", "TD_FE_LAT")])
-    print("    %-34s %6.2f%%" % ("back-end", pc(be)))
+    R.row(0, "back-end", pc(be))
     sub(be, [("memory: a head op in M / an integer-load wait", "TD_BE_MEM"),
              ("no ROB room", "TD_BE_ROB"),
              ("no scheduler / load / store queue room", "TD_BE_IQ")])
     if v.get("DPATCH") is not None:
         slots = width * cyc
-        print("\n  slots (%d x cycles)" % width)
-        print("    %-34s %6.2f%%" % ("dispatched", 100.0 * g("DPATCH") / slots))
-        print("    %-34s %6.2f%%" % ("retired", 100.0 * ins / slots))
-        print("    %-34s %6.2f%%" % ("dispatched, squashed (wrong path)", 100.0 * (g("DPATCH") - ins) / slots))
+        R.text("\n  slots (%d x cycles)" % width)
+        R.row(0, "dispatched", "%6.2f%%" % (100.0 * g("DPATCH") / slots))
+        R.row(0, "retired", "%6.2f%%" % (100.0 * ins / slots))
+        R.row(0, "dispatched, squashed (wrong path)", "%6.2f%%" % (100.0 * (g("DPATCH") - ins) / slots))
     rows = [("conditional branch", "RED_BR"), ("indirect jump", "RED_JLR"), ("exception / interrupt / fault / replay", "RED_TRP"),
             ("D$ line fills", "DCMISS"), ("I$ misses", "ICMISS"), ("dMMU walker starts", "DTLB_MISS")]
     got = [(l, k) for l, k in rows if v.get(k) is not None]
     if got:
-        print("\n  per 1000 instructions")
+        R.text("\n  per 1000 instructions")
         for l, k in got:
-            print("    %-34s %10.3f" % (l, 1000.0 * g(k) / ins))
+            R.row(0, l, "%.3f" % (1000.0 * g(k) / ins))
+    if not have3:
+        R.text("\n  level 3: perf-smol tdbe (the back-end's causes) and perf-smol tdfe (bad speculation's,"
+               "\n  the front-end's, and the dispatch width), each a run of its own")
     return True
 
-def tdk(v, parents, pc):
+def tdk(v, parents, pc, R):
     """td_k's causes under their level-1 parent, as far as the run counted them; a parent whose
-    every cause was counted is checked to close (td_k is one cause per cycle)."""
+    every cause was counted is checked to close (td_k is one cause per cycle). Returns whether
+    the run counted any."""
     if not any(v.get(k) is not None for rows in TDK.values() for k, _ in rows):
-        return
-    print("\n  level 3 (td_k, the TOPDOWN-SIM buckets)")
+        return False
+    R.text("\n  level 3 (td_k, the TOPDOWN-SIM buckets)")
     for parent, rows in TDK.items():
         got = [(k, l) for k, l in rows if v.get(k) is not None]
         if not got:
             continue
-        print("    %-34s %6.2f%%" % (parent, pc(parents[parent])))
+        R.row(0, parent, pc(parents[parent]))
         for k, l in got:
-            print("      %-32s %6.2f%%" % ("- " + l, pc(v[k])))
+            R.row(1, "- " + l, pc(v[k]))
         if len(got) == len(rows):
             tot = sum(v[k] for k, _ in rows)
             if abs(tot - parents[parent]) > 0.001 * max(parents[parent], 1):
-                print("      %-32s %6.2f%%   <-- does not close: %d counted, %d the parent"
-                      % ("- the causes' sum", pc(tot), tot, parents[parent]))
+                R.row(1, "- the causes' sum", pc(tot), "<-- does not close: %d counted, %d the parent"
+                      % (tot, parents[parent]))
+    return True
 
 def main():
     args, width = sys.argv[1:], 3
     if "--width" in args:
         i = args.index("--width"); width = int(args[i + 1]); del args[i:i + 2]
     text = open(args[0]).read() if args else sys.stdin.read()
-    names = load_names()
+    names, table = load_names()
     v, unknown, mux = parse(text, names)
+    # A table that lacks a name this script reads, or a raw event it does not name, is older than
+    # the RTL's event map: its counts would be dropped or misnamed and the report would quietly
+    # fall back to a view without them (a September table beside current scripts turned a
+    # Top-Down run into a wait-cycle view, and named r0304 ST_SER). The three files travel together.
+    lacks = sorted(USED - set(names.values()))
+    stale = sorted(set(e for e in unknown if re.fullmatch(r"r[0-9a-fA-F]{4}", e)))
+    if lacks or stale:
+        miss = lacks + stale
+        sys.exit("error: %s is older than this script: it lacks %d of the events it reads (%s%s).\n"
+                 "       Install the three files together from the tree: tools/perf-smol-install.sh, or\n"
+                 "       copy docs/smolrv64-perf-events.json beside this script."
+                 % (table, len(miss), ", ".join(miss[:6]), ", ..." if len(miss) > 6 else ""))
     g = lambda k: (v.get(k) or 0)
+    R = Report()
     # The events of one set fit the PMU (cycle, instret and 13 counters), so a share under 100%
     # means another perf session held counters: the counts are scaled estimates and the
     # rotation's SBI calls slowed the run (a loop beside `perf stat -a`: -19%, instructions +9%).
     shared = [p for p in mux.values() if p < 98.0]
     if shared:
-        print("  WARNING: %d events multiplexed (counted %.0f-%.0f%% of the run): every count is perf's\n"
-              "  scaled estimate, and the run shared the PMU with another perf session -- not\n"
-              "  comparable with an unshared run.\n" % (len(shared), min(shared), max(shared)))
+        R.text("  WARNING: %d events multiplexed (counted %.0f-%.0f%% of the run): every count is perf's\n"
+               "  scaled estimate, and the run shared the PMU with another perf session -- not\n"
+               "  comparable with an unshared run.\n" % (len(shared), min(shared), max(shared)))
 
     # FE_BUB is the sum of the FE_* causes.  perf-smol.sh's "cpi" set omits it to stay
     # inside 13 counters, so reconstruct it rather than reporting a hole.
@@ -221,9 +271,10 @@ def main():
     cyc, ins = g("CYCLES"), g("INSTRET")
     if not cyc or not ins:
         sys.exit("error: need both cycles and instructions; got %s" % sorted(v))
-    if topdown(v, width):
+    if topdown(v, width, R):
         if unknown:
-            print("\n  ignored unrecognised events: %s" % ", ".join(sorted(set(unknown))))
+            R.text("\n  ignored unrecognised events: %s" % ", ".join(sorted(set(unknown))))
+        R.show()
         return
 
     cpi, per_k = cyc / ins, lambda n: 1000.0 * n / ins
@@ -232,91 +283,93 @@ def main():
     floor  = ins / width                  # the dispatch floor: every cycle full
     unattr = cyc - floor - named          # cycles beyond the floor that nothing names
     no_backend = not any(v.get(k) is not None for k, _ in BACKEND)
+    share = lambda n: "%7.3f  %5.1f%%" % (n / ins, 100.0 * n / cyc)    # cycles per insn, share of cycles
 
-    print("  cycles %-16d instructions %-16d IPC %.3f   CPI %.3f" % (cyc, ins, ins/cyc, cpi))
-    print("  (the wait-cycle view: its events overlap, so it is depth, not a partition -- the td sets close)")
-    print("\n  wait cycles per instruction (dispatch is %d per cycle, so %.3f is the floor)"
-          % (width, 1.0 / width))
-    print("    %-30s %10.3f  %5.1f%%" % ("dispatch floor (%d per cycle)" % width, 1.0 / width, 100.0*floor/cyc))
+    R.text("  cycles %-16d instructions %-16d IPC %.3f   CPI %.3f" % (cyc, ins, ins/cyc, cpi))
+    R.text("  (the wait-cycle view: its events overlap, so it is depth, not a partition -- the td sets close)")
+    R.text("\n  wait cycles per instruction (dispatch is %d per cycle, so %.3f is the floor)"
+           % (width, 1.0 / width))
+    R.row(0, "dispatch floor (%d per cycle)" % width, "%7.3f  %5.1f%%" % (1.0 / width, 100.0*floor/cyc))
     for k, label in BACKEND:
         if v.get(k) is not None and g(k):
-            print("    %-30s %10.3f  %5.1f%%" % ("stall: " + label, g(k)/ins, 100.0*g(k)/cyc))
+            R.row(0, "stall: " + label, share(g(k)))
             # the memory events sit beside ST_MEM, not inside it: each is its own condition
             if k == "ST_MEM" and any(v.get(kk) is not None for kk, _ in MEM_SUB + MEM_CNT + [("MEM_LDINFL", "")]):
                 for kk, ll in MEM_SUB:
                     if v.get(kk) is not None:
-                        print("      %-28s %10.3f  %5.1f%%" % ("~ " + ll, g(kk)/ins, 100.0*g(kk)/cyc))
+                        R.row(1, "~ " + ll, share(g(kk)))
                 if v.get("MEM_LDINFL") is not None:
-                    print("      %-28s %10.2f loads" % ("~ mean fast loads in flight", g("MEM_LDINFL")/cyc))
+                    R.row(1, "~ mean fast loads in flight", "%.2f" % (g("MEM_LDINFL")/cyc), "loads")
                     if g("MEM_LDSENT"):
-                        print("      %-28s %10.2f cycles" % ("~ mean fast-load latency", g("MEM_LDINFL")/g("MEM_LDSENT")))
+                        R.row(1, "~ mean fast-load latency", "%.2f" % (g("MEM_LDINFL")/g("MEM_LDSENT")), "cycles")
                 for kk, ll in MEM_CNT:
                     if v.get(kk) is not None:
-                        print("      %-28s %10.3f per 1k insns" % ("~ " + ll, per_k(g(kk))))
+                        R.row(1, "~ " + ll, "%.3f" % per_k(g(kk)), "per 1k insns")
                 for kk, ll in (("MEM_LQOCC", "load queue"), ("MEM_SQOCC", "store queue")):
                     if v.get(kk) is not None:
-                        print("      %-28s %10.2f entries" % ("~ mean %s occupancy" % ll, g(kk)/cyc))
+                        R.row(1, "~ mean %s occupancy" % ll, "%.2f" % (g(kk)/cyc), "entries")
             # ST_DSP's disjoint parts (the `hold` set): a breakdown, never added alongside it.
             if k == "ST_DSP" and any(v.get(kk) is not None for kk, _ in DSP_SUB):
                 for kk, ll in DSP_SUB:
                     if g(kk):
-                        print("      %-28s %10.3f  %5.1f%%" % ("- " + ll, g(kk)/ins, 100.0*g(kk)/cyc))
+                        R.row(1, "- " + ll, share(g(kk)))
     for k, label in OCCUPANCY:
         if v.get(k) is not None:
-            print("    %-30s %10.3f  %5.1f%%   (occupancy, not in the sum)" % (label, g(k)/ins, 100.0*g(k)/cyc))
+            R.row(0, label, share(g(k)), "(occupancy, not in the sum)")
     if fe_bub:
         tag = " (derived)" if v.get("_FE_BUB_DERIVED") else ""
-        print("    %-30s %10.3f  %5.1f%%%s" % ("frontend bubble", fe_bub/ins, 100.0*fe_bub/cyc, tag))
+        R.row(0, "frontend bubble" + tag, share(fe_bub))
         other = fe_bub - sum(g(k) for k, _ in FE_SUB)
         for k, label in FE_SUB:
             if g(k):
-                print("      %-28s %10.3f  %5.1f%%" % ("- " + label, g(k)/ins, 100.0*g(k)/cyc))
+                R.row(1, "- " + label, share(g(k)))
         # FE_MMU + FE_IC + FE_ALN + FE_QUE = FE_BUB in the RTL: a remainder is a broken event map
         if abs(other) > 0.0005 * cyc:
-            print("      %-28s %10.3f  %5.1f%%   <-- unattributed"
-                  % ("- other", other/ins, 100.0*other/cyc))
+            R.row(1, "- other", share(other), "<-- unattributed")
     flag = ""
     if unattr > 0.005 * cyc:
-        flag = ("   <-- no backend events in this run: use perf-smol.sh cpi" if no_backend
-                else "   <-- a cause with no counter (or events dropped from the set)")
+        flag = ("<-- no backend events in this run: use perf-smol cpi" if no_backend
+                else "<-- a cause with no counter (or events dropped from the set)")
     elif unattr < -0.005 * cyc:
-        flag = "   (events overlap: a cycle blocked on two units counts in both)"
-    print("    %-30s %10.3f  %5.1f%%%s" % ("unattributed", unattr/ins, 100.0*unattr/cyc, flag))
+        flag = "(events overlap: a cycle blocked on two units counts in both)"
+    R.row(0, "unattributed", share(unattr), flag)
 
     mpki = []
     if any(v.get(k) is not None for k, _ in REDIR_SUB):
         tot = g("REDIR")
         for k, label in REDIR_SUB:
             if v.get(k) is not None:
-                mpki.append("    %-30s %10.3f" % ("redirect: " + label, per_k(g(k))))
+                mpki.append(("redirect: " + label, "%.3f" % per_k(g(k)), ""))
         if tot:
             rest = tot - sum(g(k) for k, _ in REDIR_SUB)
-            mpki.append("    %-30s %10.3f   (xRET, sfence.vma, CSR-write redirects, fence.i, jal)" % ("redirect: other", per_k(rest)))
+            mpki.append(("redirect: other", "%.3f" % per_k(rest), "(xRET, sfence.vma, CSR-write redirects, fence.i, jal)"))
     if v.get("RD_WAIT") is not None:
         # a mispredict's restart, from its resolve to its release or its squash at the head
-        mpki.append("    %-30s %10.3f   (%.1f%% of cycles: a resolved mispredict's restart)"
-                    % ("redirect drain, cycles/insn", g("RD_WAIT")/ins, 100.0*g("RD_WAIT")/cyc))
+        mpki.append(("redirect drain, cycles/insn", "%.3f" % (g("RD_WAIT")/ins),
+                     "(%.1f%% of cycles: a resolved mispredict's restart)" % (100.0*g("RD_WAIT")/cyc)))
     if v.get("DTLB_MISS") is not None:
-        per_walk = "" if not g("DTLB_MISS") or v.get("DT_WALK") is None else "     (%.1f busy cycles per start)" % (g("DT_WALK")/g("DTLB_MISS"))
-        mpki.append("    %-30s %10.3f%s" % ("dMMU walker starts", per_k(g("DTLB_MISS")), per_walk))
+        per_walk = "" if not g("DTLB_MISS") or v.get("DT_WALK") is None else "(%.1f busy cycles per start)" % (g("DT_WALK")/g("DTLB_MISS"))
+        mpki.append(("dMMU walker starts", "%.3f" % per_k(g("DTLB_MISS")), per_walk))
     for code, label, acc in (("REDIR", "pipeline redirects", None),
                              ("DCMISS", "D$ line fills", "DCACC"),
                              ("ICMISS", "I$ misses", "ICACC")):
         if v.get(code) is None:
             continue
-        rate = "" if not acc or not g(acc) else "     (%.3f%% of %s accesses)" % (
+        rate = "" if not acc or not g(acc) else "(%.3f%% of %s accesses)" % (
             100.0*g(code)/g(acc), acc[:2])
-        mpki.append("    %-30s %10.3f%s" % (label, per_k(g(code)), rate))
+        mpki.append((label, "%.3f" % per_k(g(code)), rate))
     if mpki:
-        print("\n  MPKI (per 1000 instructions)")
-        print("\n".join(mpki))
+        R.text("\n  MPKI (per 1000 instructions)")
+        for label, val, note in mpki:
+            R.row(0, label, val, note)
     else:
-        print("\n  MPKI: no redirect / miss / drain events in this run (perf-smol.sh cpi, br, mem)")
+        R.text("\n  MPKI: no redirect / miss / drain events in this run (perf-smol.sh cpi, br, mem)")
 
     for code, label in (("LOAD", "loads"), ("STORE", "stores")):
         if g(code):
-            print("  %-8s %12d  (%.1f%% of instructions)" % (label, g(code), 100.0*g(code)/ins))
+            R.text("  %-8s %12d  (%.1f%% of instructions)" % (label, g(code), 100.0*g(code)/ins))
     if unknown:
-        print("\n  ignored unrecognised events: %s" % ", ".join(sorted(set(unknown))))
+        R.text("\n  ignored unrecognised events: %s" % ", ".join(sorted(set(unknown))))
+    R.show()
 
 main()

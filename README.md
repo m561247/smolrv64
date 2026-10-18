@@ -277,8 +277,8 @@ after pass until a key: the data lines, the address lines, every word holding it
 random data at full bandwidth, and random data in a scattered order that opens a row on nearly
 every access; `M <addr> <len> [n]` tests a range for n passes.
 On the board,
-`tools/perf-smol.sh td <cmd> 2>&1 | tools/perf-cpi-stack.py` runs a command under the
-Top-Down event set and prints the report; `docs/SmolRV64-Spec.md` §11, "Reading the report",
+`perf-smol td <cmd>` (installed from coffee by `tools/perf-smol-install.sh`) runs a command
+under the Top-Down event set and prints the report; `docs/SmolRV64-Spec.md` §11, "Reading the report",
 explains each line and the `cpi` and `mem` sets that go under it.
 
 ## Repository layout
