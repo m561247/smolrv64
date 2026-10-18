@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "=== S98pi ==="
+/usr/bin/pi 100000 > /dev/null && echo "PI-DONE" || echo "PI-FAIL exit=$?"

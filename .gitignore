@@ -89,6 +89,10 @@ workloads/sysd/tiny128-sysd.cpio
 workloads/stress/ov/
 workloads/stress/overlay.cpio
 workloads/tiny128/tiny128-cosim-glibc.dt[sb]
+workloads/pi/ov/
+workloads/pi/overlay.cpio
+workloads/pi/tiny128-pi.cpio
+workloads/tiny128/tiny128-cosim-pi.dt[sb]
 workloads/tiny128/tiny128-cosim-sysd.dt[sb]
 workloads/tiny128/tiny128-simmerv.dtb
 workloads/ubuntu/ubuntu-nfs-simmerv.dtb
