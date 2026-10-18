@@ -66,7 +66,8 @@ The scheduler holds the instruction until its sources are ready and then issues 
 What may reorder is deliberately narrow, but it is no longer only the ALU. **Pure ALU ops
 and FP arithmetic both reorder freely**, in `u_iq_i`/`u_iq_i2`/`u_iq_i3` and `u_iq_f`
 respectively. **Slot k's ALU op goes to lane k** (lanes plan step 5.2a): three integer
-schedulers, each with its own ALU and shard, and no steering. An ALU op completes at issue; an FP op goes to stage F. Neither ever enters M.
+schedulers, each with its own ALU and shard, and no steering. **The lanes rotate** (§3.2):
+consecutive instructions go to consecutive lanes, so every lane takes every third instruction. An ALU op completes at issue; an FP op goes to stage F. Neither ever enters M.
 
 Everything else carries an `ord` bit; of those, FP ops go to the FP queue, and branches, jumps,
 multiplies, divides, system ops (lane A), loads, stores and the head ops (AMO, LR/SC, CBO) run in
@@ -139,7 +140,25 @@ AMO, a CSR op, a trap at dispatch or the interrupt pseudo-op goes alone), at mos
 F stage (an FP op, or an int-to-FP op through its lane), the MD stage or the SYSQ, one load and one store
 (the LQ's and SQ's single allocation ports), and nothing behind a CTI that redirects fetch at
 decode (`smolrv64_gclass`, read from the queue record). A load behind a store in its group
-takes the store-seqno after the store's. A member pops only with a **credit** for everything it allocates, from
+takes the store-seqno after the store's.
+
+**The lanes rotate.** Instruction j of a group goes to lane `(lc + j) % IW`, `lc` the lane the
+next instruction takes, so consecutive instructions go to consecutive lanes whatever the groups'
+sizes and every lane takes every IW-th instruction: the lanes' schedulers fill evenly with no
+steering logic. The IR holds the group by lane (slot k IS lane k), a cyclic run from its first
+lane `d_fc`; rename, the ROB and the group's load-behind-store test order its members by program
+position `(k - d_fc) % IW`. A head op (a non-plain op, alone) goes to lane A, whose paths are
+the SYSQ's and the head-op register's: it waits for `lc` = 0, setting it in a cycle that pops
+nothing (`realign`, `ROT-SIM` counts them), and lane B takes the next instruction. The queue
+reads its heads twice: in program order for the group rules (their classes alone), and at
+`q_rp + (k - lc) % IW` for lane k's record, so the rotation selects among the queue banks'
+outputs by flops and the record goes straight into the IR. A member's lane credit is its lane's
+(`ia`, `crd`'s lane bits rotated by `lc`). On the 60 M boot the lanes dispatch 20.45 / 20.14 / 19.87 M
+instructions, a head op waits for lane A in 238,526 cycles, the cycles the head's lane is full
+while another lane has room fall from 3,427,455 (slot k as lane k) to 1,551,254 (`IQFULL-SIM`),
+and the boot retires 3.82% more (52,794,871 against 50,850,470). The GB5 checkpoint slices (50 M
+retires each) take 11.89% fewer cycles in Navigation, 6.79% in HTML5, 6.18% in SQLite, 1.45% in
+PDF Rendering and 0.03% in Camera. A member pops only with a **credit** for everything it allocates, from
 flops, counted against what is already between the head and there: the ROB against the IR
 group, the LQ and SQ against the IR's load or store, each lane's scheduler against its
 dispatch-stage register and the IR's op, the FP scheduler against its FIFO (below) and the
@@ -170,7 +189,7 @@ held a group until its room appeared and dispatched it in that cycle.
 |---|---|
 | *(operands)* | **no longer a dispatch stall.** Waiting for operands happens in the scheduler now (§2.1); dispatch is blocked by structural resources only. |
 | `~cr_rob1..3` | no free ROB row (64 rows) beyond the IR group's (`st_rob`) |
-| `~cr_ia/ib/ic/l/f` | the member's scheduler has no entry beyond its dispatch-stage register and the IR's op — integer 10 each; the head-op register holds one (`cr_l`: none in flight, none in the IR); for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
+| `~cr_ia/ib/ic/l/f` | the member's scheduler (its lane's, rotated by `lc`) has no entry beyond its dispatch-stage register and the IR's op — integer 10 each; the head-op register holds one (`cr_l`: none in flight, none in the IR); for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
 | `rn_stall` | any rename shard below `LOWAT`=4 free registers, or the map's sweep after a squash (`st_rn`) |
 | `cr_ser`, `cr_csr` | a serializing op -- a fence, `fence.i`, an AMO, an xret, `ecall`/`ebreak`/`wfi`/`sfence.vma`, a trap from dispatch -- is **alone in flight**: it pops only when the ROB AND the store queue have drained (`drained`, rule C5) and the IR is empty, and nothing pops behind it until it commits. A CSR op does not drain: it waits only for the CSR op before it (`csr_infl`, or one in the IR) (`st_srz`) |
 
@@ -479,8 +498,13 @@ Navigation +0.07% and SQLite +0.00% cycles; walking back to the head instead wou
 **The free-list read addresses are registers only** (2026-09-17): bank g of each list
 reads at `h_hi + (g < h_lo)`, its next free entry; which slot allocates from which shard
 (the instruction-class decode, and never the stall) selects among the banks' OUTPUTS. The
-intra-bundle bypass (B's source is A's destination) is applied at `r_prs*_b/_c` alone; the
-core's pending lookup indexes the MAP's candidate and masks its result with `r_byp*`.
+intra-group bypass (a source that is an earlier slot's destination) is applied at `r_prs*`
+alone; the core's pending lookup indexes the MAP's candidate and masks its result with `r_byp*`.
+The group is a cyclic run of slots from `r_fc` (§3.2): slot k looks at the slots k-1, k-2, ...
+cyclically, nearest first, as far back as its program position, and a register two slots write
+takes the younger's copy (`newer`). A group allocates at most one register from each shard --
+lane k's integer destination is lane k's shard, and a group holds one FP load and one FP-unit op
+(asserted) -- so every slot takes its shard's head.
 
 ### 5.1 Sharding
 
@@ -546,18 +570,26 @@ A physical register's shard is encoded in its number and never changes, so a com
 ## 6. Reorder buffer
 
 - **64 rows of a group** (192 entries at IW=3), status only — no result values, no PC, no operands. A dispatch
-  group takes a row, slot k in column k, so an entry's index is `{row, column}` and that index
-  is its age. A row has 2^⌈log2 `IW`⌉ columns (at IW=3 the fourth is never valid); the
-  dispatch credit is a free row.
+  group takes a row, its instruction in lane k in column k. The lanes rotate (§3.2), so a
+  row's instructions start at its **first column** `fc[row]` and run on cyclically: position p
+  is column `(fc + p) % IW`. An op's **tag** is `{row, wrap, column}`, the wrap bit set when its
+  column is below `fc` (it is younger than its column suggests), so tags order as numbers in
+  program order and every age compare outside the ROB -- `kdead`, a distance from the head -- is
+  the plain one. The storage index is `{row, column}`, the tag without its wrap bit (`rsi`), and
+  indexes every per-entry array. A row has 2^⌈log2 `IW`⌉ columns (at IW=3 the fourth is never
+  valid); the dispatch credit is a free row.
 - **Sized by one knob**, `SMOLRV64_ROB_ROWS` (a power of two; 64 in the shipping build). The
   fetch sequence number that orders the restarts (`older()`, the sign of a difference) is
   sized from the window it spans: `SEQW` = ⌈log2 `SEQ_LIVE`⌉ + 1, `SEQ_LIVE` = FW + QD + IW +
   `ROB_ROWS` × IW, every op from the bundle register to the ROB head (217 at IW=3: 9 bits). An
   always-on check fatals when the seqno order of the mispredicts and the pending restart
   disagrees with their order in the ROB. The size is measured below (*Answered: how big a ROB*).
-- Column k is one array, written only by slot k and read only by commit port k. Commit runs
-  along the head's row from its first uncommitted column; a row may take several cycles, and
-  the head moves to the next row when the row's last valid column commits.
+- Column k is one array, written only by lane k. Inside, the pointers are positions `{ring
+  wrap, row, p}`. Commit port p is the head row's position p: the ports read every column of
+  the head's row and rotate the records into program order by `hfc`, the head row's first column
+  (a flop that follows the head), and the walk's ports likewise by its row's. Commit runs along
+  the head's row from its first uncommitted position; a row may take several cycles, and the
+  head moves to the next row when the row's last valid position commits.
 
 **Entry format — 16 bits.** `ent[]` is `{noret, rd, prd}`, plus `v` and `done` as separate
 bulk-clearable bit vectors.
@@ -579,7 +611,7 @@ keeps. The ROB is sized by the *window*; the scheduler that needs execute detail
 | `rd_v` | `\|prd` | physical register 0 is architectural x0's permanent mapping and is never freed, so it is never allocated |
 | `shard` | `prd[PBITS-1:IDXB]` | a physical register's shard is the top bits of its number and never changes |
 | `pold` | `rmap[c_rd]`, read at commit | `rmap` holds committed state, so in the cycle an entry commits its architectural register still maps to what that entry displaced; the commit write is what replaces it |
-- Completion is by **index**, allocated at rename and carried with the op. Lane k completes
+- Completion is by **tag**, allocated at rename and carried with the op. Lane k completes
   only column k: every op a lane runs or lands is its slot's (an integer register is renamed
   in its slot's lane), so the lane's port carries its column as a constant (asserted) and the
   other columns never compare it. The shared ports -- M's (with the landing loads), the FP
@@ -620,7 +652,7 @@ neither can restart -- letting a store commit past an older load that has not re
 needs a write-after-read check in the load queue (the store's drain must not pass the
 load's read), and that is the next step, measured separately. It steps like the head, along a row and then to the next.
 On a flush it returns with the head (above); `(irr - head) > (tail - head)` is fatal. Cost:
-one `{wrap, row, column}` pointer, one `done` lookup, one index compare in `smolrv64_core`.
+one `{wrap, row, p}` pointer, one `done` lookup, one tag compare in `smolrv64_core`.
 
 Simulation-only side arrays (`cs_pc`, `cs_insn`, `cs_val`, `cs_mkind`, `cs_mpa`) hold the
 cosim payload per slot so the ROB stays status-only in hardware.
@@ -636,9 +668,9 @@ without waiting for the branch to reach the head:
   speculative free-list head back over its register. An older mispredict resolving meanwhile
   moves the target back and the cursor goes on.
 - **The kill.** The cycle after the resolve the ROB turns the branch into a position, from
-  flops: `kh`, the head's when the walk began, and `kb`, the branch's distance from it. An op is
-  dead while the kill holds when its ROB entry is farther from `kh` than `kb` -- the rows after
-  the branch's and its row's later columns -- which each structure tests for its own entries
+  flops: `kh`, the head row's first tag when the walk began, and `kb`, the branch's distance from
+  it. An op is dead while the kill holds when its tag is farther from `kh` than `kb` -- the rows
+  after the branch's and its row's later tags -- which each structure tests for its own entries
   with one subtract and compare (`core/smolrv64_kill.vh`), not by indexing a 256-entry vector;
   the vector (`kd`, asserted equal) serves only the per-entry clears at the release. Every
   structure that holds an op clears its dead ones each cycle the kill holds: the schedulers,
@@ -1623,10 +1655,11 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `cp[0..IW-1].rmap` | `smolrv64_rename` | 64 each | 10 | 1 920 | LUTRAM | one copy per commit port (1W each, `rnewer` picks), 2*IW reads (the commits' displaced mappings, the sweep) |
 | `dirty` | `smolrv64_rename` | 64 | 1 | 64 | flops | the registers the sweep rewrites after a squash |
 | `fl[*].u.bank[*].mem` | `smolrv64_rename` | 64 per shard | 7 | 448 per shard | LUTRAM | one free list per shard in use (lanes 0..IW-1, SH_FL, SH_FF), `next_pow2(IW)` banks each |
-| `ent0`, `ent1` | `smolrv64_rob` | 8 each | 16 | 256 | LUTRAM | entry parity: 1W dispatch each, read at head and head+1 |
+| `col[0..IW-1].mem` | `smolrv64_rob` | 64 each | 27 | 5 184 | LUTRAM | column k, lane k's entries `{pold, noret, rd, prd}`: 1W (lane k's dispatch), 2R (the head's row, the walk's row; the ports rotate them into program order) |
+| `fc` | `smolrv64_rob` | 64 | 2 | 128 | LUTRAM | each row's first column: 1W (dispatch), read at the next head row, `irr`'s, the walk's and the walked-to branch's rows (`hfc`, the head row's, is a flop) |
 | *(two-wide dispatch and retire)* | | | | | | items 10b/10c: on the board since 2026-09-06 (gate W2F, 319cd248), after four silent bitstreams whose renamer Vivado had folded (docs/rtl-rules.md F4/F5) |
-| `v`, `done` | `smolrv64_rob` | 16 | 1 each | 32 | flops | bulk-clearable |
-| `irr` | `smolrv64_rob` | 1 | 5 | 5 | flops | the irrevocable pointer (§6) |
+| `v`, `done` | `smolrv64_rob` | 256 | 1 each | 512 | flops | bulk-clearable, by storage index |
+| `head`, `tail`, `irr` | `smolrv64_rob` | 1 each | 9 | 27 | flops | positions `{ring wrap, row, p}`; `irr` the irrevocable pointer (§6) |
 | `u_iq_i` entry | `smolrv64_iq` | 10 | 2+2×9 = 20 | 200 | flops | integer, slot A's, `NSRC`=2 (§6.1) |
 | `u_iq_i2`, `u_iq_i3` entry | `smolrv64_iq` | 10 each | 2+2×10 = 22 | 220 each | flops | integer, slot B's and slot C's, `NSRC`=2 (§6.1) |
 | `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/282/1 | 411 | flops | the head-op register (§8) |
@@ -1810,7 +1843,7 @@ dispatching cycles' instructions are exactly `DPATCH`. `perf-smol td CMD` prints
 | 10 | `BE_MMEM` | be:M-mem | M holds a head op (AMO, LR/SC, CBO) |
 | 12 | `BE_ROB` | be:rob-full | no ROB row for the head's group |
 | 13 / 14 | `BE_DEPLD` / `BE_DEPFP` | be:dep-load / be:dep-fp | no lane issued while a scheduler's reported entry waits on an integer load, AMO or CSR read / on an FP op's, FP load's, FP-port or divide result |
-| 15 | `BE_IQ` | be:iq-full | the head's scheduler credit: lane A's (slot A is lane A), the FP queue's, the head-op register's or the divide's |
+| 15 | `BE_IQ` | be:iq-full | the head's scheduler credit: its lane's (`hd_lane`), the FP queue's, the head-op register's or the divide's |
 | 16 / 17 / 18 | `BE_RN` / `BE_SQ` / `BE_LQ` | be:rename / be:sq-full / be:lq-full | a rename shard below `LOWAT` or the map's sweep / no store-queue credit / no load-queue credit |
 | 19 | `BE_SER` | be:serialize | a serialising op drains or is in flight, a CSR op waits for the one before it, a CBO waits for older addresses |
 | 20 | `BE_HELD` | be:held | the IR holds its group otherwise: the cycle after a redirect or a decode resteer |
@@ -1829,7 +1862,7 @@ has every event's exact description; this is the map by family:
 | `ST_FPU` | r0303 | stage F holds an op it cannot advance **+** no lane issued while a reported entry waits on an FP, FP-load, FP-port or divide result (`dep_fp`) |
 | `ST_DSP` | r0304 | the queue head waits for a credit other than the ROB's, while M can advance and no dependency holds issue: `ST_IQ + ST_RN + ST_SQ + ST_LQ + ST_SRZ` |
 | `ST_ROB` | r0305 | the queue head waits for ROB room |
-| `ST_IQ` / `ST_RN` / `ST_SQ` / `ST_LQ` / `ST_SRZ` | r0306 / r0307 / r0308 / r0309 / r030a | `ST_DSP` by cause, disjoint, in this order: lane A's scheduler, the FP queue, the head-op register or the divide credit / a rename shard below `LOWAT` or the map's sweep / a store with no store-queue credit / a load with no load-queue credit (neither has one while a head op is in flight or in the IR) / serialising, a CSR op or a CBO waiting |
+| `ST_IQ` / `ST_RN` / `ST_SQ` / `ST_LQ` / `ST_SRZ` | r0306 / r0307 / r0308 / r0309 / r030a | `ST_DSP` by cause, disjoint, in this order: the head's lane's scheduler, the FP queue, the head-op register or the divide credit / a rename shard below `LOWAT` or the map's sweep / a store with no store-queue credit / a load with no load-queue credit (neither has one while a head op is in flight or in the IR) / serialising, a CSR op or a CBO waiting |
 | `FE_BUB` | r0310 | the IR is empty, the head waits for no credit, M is free, no redirect is live and no back-end refill is due: `FE_MMU + FE_IC + FE_ALN + FE_QUE` |
 | `FE_MMU` / `FE_IC` / `FE_ALN` / `FE_QUE` | r0311 / r0312 / r0313 / r0314 | within `FE_BUB`: the iMMU cannot translate (a second-level lookup, a walk, or a walk held behind a weak branch) / no fetch bytes / bytes but no whole instruction / an instruction not yet in the IR |
 | `RD_WAIT` | r0317 | a mispredict's restart: from its resolve to its release (the walk and the kill, §6) or its squash at the ROB head |
@@ -1953,8 +1986,9 @@ counts those too). Either failing is a `$fatal`.
 
 Beside it, one line per backend cause splits that cause by the state the core holds that cycle,
 and each `$fatal`s on a cycle it cannot account for: `RENAME-SIM` (the shard below `LOWAT`, or the sweep; `SWEEP-SIM` counts the sweep's registers and cycles),
-`IQFULL-SIM` (the head's missing credit: lane A's, the head-op register's, the FP queue's, the
-divide's; and lane A's alone while another lane has room), `DEPLD-SIM` (the load the reported
+`IQFULL-SIM` (the head's missing credit: its lane's, the head-op register's, the FP queue's, the
+divide's; and its lane's alone while another lane has room), `ROT-SIM` (the instructions each lane
+dispatched, and the cycles a head op waited for lane A), `DEPLD-SIM` (the load the reported
 entry waits on: not issued, at M, a dTLB miss, faulting, ready, held behind an unknown or an
 overlapping store, a device load at the head, forwarding, a D$ waiter, in the D$, the slow path,
 in a landing buffer; a CSR read in the SYSQ; an AMO in M), `SER-SIM` (the serialising op, the CSR

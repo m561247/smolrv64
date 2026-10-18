@@ -1,7 +1,8 @@
 `default_nettype none
 
 // A circular array of DEPTH entries in NB distributed-RAM banks (entry p in bank p % NB, at index
-// p / NB), written up to NW entries a cycle and read NR CONSECUTIVE entries a cycle from rp.
+// p / NB), written up to NW entries a cycle and read NR entries a cycle, each at rp plus its own
+// offset below NB.
 //
 // WHY. A queue that takes several entries a cycle, held in flops, pays a mux at EVERY entry (which
 // writer lands here?) and a DEPTH:1 mux per read; both are the size of the array (rule I7). Banked,
@@ -14,9 +15,11 @@
 // an NW:1 mux per bank and bit. BYBANK=1 is the user that rotated its writers to the banks already
 // (NW = NB, writer j's position is in bank j, asserted): no mux at all.
 //
-// THE READS. rd[k] is the entry at rp + k, combinational, the value before this cycle's writes.
-// NR <= NB, so the NR entries are in distinct banks, and bank b is read at the entry at or after
-// rp in it. rp must be a register's value or close to it: it is every bank's read address (rule I6).
+// THE READS. rd[k] is the entry at rp + ro[k], combinational, the value before this cycle's writes.
+// Bank b is read once, at the entry at or after rp in it, so any offset below NB names an entry
+// some bank holds, and a read port is an NB:1 pick of the banks by (rp + ro[k]) % NB. rp must be
+// a register's value or close to it: it is every bank's read address (rule I6); the offsets select
+// only among the banks' outputs.
 module smolrv64_bankq
   #(parameter W     = 16,                 // entry width
     parameter DEPTH = 32,                 // entries, a multiple of NB
@@ -31,16 +34,17 @@ module smolrv64_bankq
     input  wire [NW*AB-1:0]   wp,         // writer j's position at [j*AB +: AB]
     input  wire [NW*W-1:0]    wd,
     input  wire [AB-1:0]      rp,
+    input  wire [NR*$clog2(NB)-1:0] ro,   // port k's offset from rp at [k*log2(NB) +: log2(NB)]
     output wire [NR*W-1:0]    rd);
 
    localparam integer BB = $clog2(NB);
    localparam integer BD = DEPTH / NB;    // entries a bank
    localparam integer IB = (BD > 1) ? $clog2(BD) : 1;
    localparam integer JB = (NW > 1) ? $clog2(NW) : 1;
-   initial if ((1 << BB) != NB || NB < NW || NB < NR || DEPTH % NB != 0 || BD < 1 || (1 << AB) != DEPTH
+   initial if ((1 << BB) != NB || NB < NW || DEPTH % NB != 0 || BD < 1 || (1 << AB) != DEPTH
                || (BYBANK && NW != NB))
-      $fatal(1, "smolrv64_bankq: DEPTH=%0d NB=%0d NW=%0d NR=%0d AB=%0d BYBANK=%0d: NB is a power of two >= NW, NR, dividing DEPTH = 2**AB (= NW when BYBANK)",
-             DEPTH, NB, NW, NR, AB, BYBANK);
+      $fatal(1, "smolrv64_bankq: DEPTH=%0d NB=%0d NW=%0d AB=%0d BYBANK=%0d: NB is a power of two >= NW, dividing DEPTH = 2**AB (= NW when BYBANK)",
+             DEPTH, NB, NW, AB, BYBANK);
 
    wire [W-1:0] brd [0:NB-1];             // each bank's entry at or after rp
    genvar gb, gk;
@@ -81,9 +85,8 @@ module smolrv64_bankq
       assign brd[gb] = mem[ridx];
    end endgenerate
    generate for (gk = 0; gk < NR; gk = gk + 1) begin: rk
-      localparam [AB-1:0] K = gk;
-      wire [AB-1:0] pos = rp + K;
-      assign rd[gk*W +: W] = brd[pos[BB-1:0]];
+      wire [BB-1:0] b = rp[BB-1:0] + ro[gk*BB +: BB];
+      assign rd[gk*W +: W] = brd[b];
    end endgenerate
 endmodule
 

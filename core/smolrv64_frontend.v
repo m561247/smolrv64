@@ -51,6 +51,7 @@ module smolrv64_frontend
     output wire                    hd_v,              // the queue head has an instruction...
     output wire                    hd_take,           // ...and pops it this cycle
     output wire [15:0]             hd_gc,             // its dispatch class (the stall accounting's)
+    output wire [$clog2(IW)-1:0]   hd_lane,           // ...and the lane it goes to
     input  wire [PCW-1:0]          redirect_pc,
     input  wire [SEQW-1:0]         redirect_seq,
     input  wire [RASB-1:0]         redirect_rsp,      // the RAS top the redirect restores
@@ -91,9 +92,10 @@ module smolrv64_frontend
     input  wire [PCW-1:0]          res_last,        // resolving op's last halfword's address (the predictor's key)
     input  wire [PCW-1:0]          res_tgt,
 
-    // ================= the IR: one dispatch group, a decoded record per slot =================
+    // ================= the IR: one dispatch group, a decoded record per lane =================
     output reg  [IW-1:0]           d_valid,
-    output reg  [IW*`IR_RECW-1:0]  d_rec,           // slot k's record at [k*IR_RECW +: IR_RECW]
+    output reg  [IW*`IR_RECW-1:0]  d_rec,           // lane k's record at [k*IR_RECW +: IR_RECW]
+    output reg  [$clog2(IW)-1:0]   d_fc,            // the lane of the group's first instruction
     output wire [SEQW-1:0]         cur_seq,           // fetch PC's seqno (trap resume)
     // The frontend's invariants for the integrity log (rv_errlog bits 48..63), registered in
     // each unit: [5:0] the ring, [8:6] the predictor, [10:9] fetch, [12:11] this module.
@@ -325,7 +327,6 @@ module smolrv64_frontend
    wire [QNB*IRW-1:0] q_wd;
    wire [QNB-1:0]     q_bv;                             // the bank takes a record this cycle
    wire [QNB-1:0]     pb_svq = {{(QNB-FW){1'b0}}, pb_sv};
-   wire [IW*IRW-1:0]  q_rd;
    generate for (gk = 0; gk < QNB; gk = gk + 1) begin: sl
       localparam [QLB-1:0] B = gk;
       wire [QLB-1:0]  j = B - q_wp[QLB-1:0];             // the bundle's slot landing in this bank
@@ -340,14 +341,41 @@ module smolrv64_frontend
       always @(posedge clk) if (!reset & q_bv[gk] & imm_wide)
          $fatal(1, "smolrv64_frontend: slot %0d's immediate (insn %08x at %h) does not fit the record's 32 bits", j, inst, pc);
    end endgenerate
-   smolrv64_bankq #(.W(IRW), .DEPTH(QDEPTH), .NW(QNB), .NR(IW), .NB(QNB), .BYBANK(1)) u_q
-     (.clk(clk), .reset(reset), .wv(q_bv), .wp(q_wpos), .wd(q_wd), .rp(q_rp), .rd(q_rd));
-   // the heads: decoded records at q_rp + k, and each one's dispatch class (the record's last field)
-   wire [IRW-1:0] qh [0:IW-1];
+   // THE LANES ROTATE. Instruction j of a group goes to lane (lc + j) % IW, lc being the lane the
+   // next instruction takes, so consecutive instructions go to consecutive lanes whatever the
+   // groups' sizes and every lane takes every IW-th instruction: the schedulers fill evenly with no
+   // steering. A head op (not plain) goes alone to lane A, waiting for lc to be 0 -- it sets lc to 0
+   // in a cycle it does not pop, the head ops' paths stay lane A's, and the next instruction takes
+   // lane B. The queue reads the heads twice: in program order for the group rules (their classes),
+   // and at q_rp + (k - lc) % IW for lane k's record, so the rotation selects among the banks'
+   // outputs by flops and the record goes straight into the IR.
+   localparam integer LB = $clog2(IW);
+   function automatic [LB-1:0] radd(input [LB-1:0] a, input [CW-1:0] b);   // (a + b) % IW, a < IW, b <= IW
+      reg [CW:0] t;
+      begin t = {{(CW+1-LB){1'b0}}, a} + {1'b0, b};  radd = (t >= IW) ? t[LB-1:0] - IW[LB-1:0] : t[LB-1:0]; end
+   endfunction
+   function automatic [LB-1:0] rsub(input [LB-1:0] a, input [LB-1:0] b);  // (a - b) % IW, a, b < IW
+      rsub = (a >= b) ? a - b : a + IW[LB-1:0] - b;
+   endfunction
+   reg  [LB-1:0]     lc;
+   initial lc = {LB{1'b0}};
+   wire [2*IW*QLB-1:0] q_ro;
+   wire [2*IW*IRW-1:0] q_rd2;
+   generate for (gk = 0; gk < IW; gk = gk + 1) begin: ro
+      localparam [LB-1:0] K = gk;
+      assign q_ro[gk*QLB +: QLB]        = gk[QLB-1:0];                                // program order
+      assign q_ro[(IW + gk)*QLB +: QLB] = {{(QLB-LB){1'b0}}, rsub(K, lc)};            // lane k's
+   end endgenerate
+   smolrv64_bankq #(.W(IRW), .DEPTH(QDEPTH), .NW(QNB), .NR(2*IW), .NB(QNB), .BYBANK(1)) u_q
+     (.clk(clk), .reset(reset), .wv(q_bv), .wp(q_wpos), .wd(q_wd), .rp(q_rp), .ro(q_ro), .rd(q_rd2));
+   // the heads' dispatch classes in program order (the record's last field), and lane k's record
    wire [15:0]    g  [0:IW-1];
+   wire [IRW-1:0] ql [0:IW-1];
+   `IR_DECL(h_)                                   // the head's record by name (the stall accounting's)
+   assign `IR_REC(h_) = q_rd2[0 +: IRW];
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: hd
-      assign qh[gk] = q_rd[gk*IRW +: IRW];
-      assign g[gk]  = qh[gk][15:0];
+      assign g[gk]  = q_rd2[gk*IRW +: 16];
+      assign ql[gk] = q_rd2[(IW + gk)*IRW +: IRW];
    end endgenerate
    wire [CW-1:0]  q_pop;                          // entries leaving this cycle (the group's take)
    wire [CW-1:0]  q_pushn = cnt(q_wr);            // entries pushed
@@ -395,16 +423,23 @@ module smolrv64_frontend
    // a CBO is the one head op that does not serialise (an AMO or LR/SC does)
    wire g0_cbo  = g[0][G_L] & ~g[0][G_PLAIN] & ~g[0][G_SER];
    wire head_go = g[0][G_SER] ? crd[CR_SER] : g[0][G_CSR] ? crd[CR_CSR] : g0_cbo ? crd[CR_CBO] : 1'b1;
+   // instruction j's lane credit: lane (lc + j) % IW's
+   wire [IW-1:0] crd_ia = crd[CR_IA +: IW];
+   wire [IW-1:0] ia;
+   generate for (gk = 0; gk < IW; gk = gk + 1) begin: lj
+      assign ia[gk] = crd_ia[radd(lc, gk[CW-1:0])];
+   end endgenerate
+   wire realign = rule[0] & ~g[0][G_PLAIN] & (lc != {LB{1'b0}});   // a head op waits for lane A
    assign rule[0] = ~q_empty;
-   assign take[0] = rule[0] & crd[CR_POP] & head_go & crd[CR_ROB1]
-                  & room(g[0], crd[CR_IA], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
+   assign take[0] = rule[0] & crd[CR_POP] & head_go & ~realign & crd[CR_ROB1]
+                  & room(g[0], ia[0], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
    assign c_fc[0] = unit_op(g[0]);  assign c_ld[0] = g[0][G_LD];  assign c_st[0] = g[0][G_ST];
    generate for (gk = 1; gk < IW; gk = gk + 1) begin: rl
       localparam [QAW:0] K = gk;
       assign rule[gk] = rule[gk-1] & (q_cnt > K) & g[0][G_PLAIN] & g[gk][G_PLAIN] & ~g[gk-1][G_DCR]
                       & ~(unit_op(g[gk]) & c_fc[gk-1]) & ~(g[gk][G_LD] & c_ld[gk-1]) & ~(g[gk][G_ST] & c_st[gk-1]);
       assign take[gk] = rule[gk] & take[gk-1] & crd[CR_ROB1 + gk]
-                      & room(g[gk], crd[CR_IA + gk], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
+                      & room(g[gk], ia[gk], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
       assign c_fc[gk] = c_fc[gk-1] | unit_op(g[gk]);
       assign c_ld[gk] = c_ld[gk-1] | g[gk][G_LD];
       assign c_st[gk] = c_st[gk-1] | g[gk][G_ST];
@@ -413,18 +448,28 @@ module smolrv64_frontend
    // (a redirect, an early restart, a decode resteer), in which case it is the wrong path.
    assign q_pop = cnt_iw(take);
    assign hd_v = rule[0];  assign hd_take = take[0];  assign hd_gc = g[0];
-   // a group dispatches whole: a prefix of the slots, all of the IR's
-   wire e_order = ~reset & ((|(consume[IW-1:1] & ~consume[IW-2:0])) | (consume[0] & (consume != d_valid)));
+   assign hd_lane = g[0][G_PLAIN] ? lc : {LB{1'b0}};
+   always @(posedge clk) begin
+      if (reset | redirect | realign) lc <= {LB{1'b0}};
+      else                            lc <= radd(lc, q_pop);
+   end
+   // a group dispatches whole: all of the IR's lanes
+   wire e_order = ~reset & (|consume) & (consume != d_valid);
    always @(posedge clk)
       if (e_order) $fatal(1, "smolrv64_frontend: a group dispatched in part (consume %b, valid %b)", consume, d_valid);
    reg  [1:0] fe_err_q;
    always @(posedge clk) fe_err_q <= reset ? 2'd0 : {e_order, e_bundle};
    assign fe_err = {3'd0, fe_err_q, f_err, bp_err, ring_err};
+   wire [IW-1:0] take_c = take;                   // the whole vector, for the loop below
+   reg  [IW-1:0] take_l;                          // lane k's instruction is taken: j = (k - lc) % IW
+   integer       tk;
+   always @* for (tk = 0; tk < IW; tk = tk + 1) take_l[tk] = take_c[rsub(tk[LB-1:0], lc)];
    always @(posedge clk) begin
       if (reset | redirect) d_valid <= {IW{1'b0}};
       else begin
-         d_valid <= take;
-         for (k = 0; k < IW; k = k + 1) d_rec[k*IRW +: IRW] <= qh[k];
+         d_valid <= take_l;
+         d_fc    <= lc;
+         for (k = 0; k < IW; k = k + 1) d_rec[k*IRW +: IRW] <= ql[k];
       end
    end
 endmodule

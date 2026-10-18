@@ -34,11 +34,14 @@
 // allocations, and restoring the speculative head frees them all in one cycle, with no walk
 // and no checkpoints.
 //
-// THE GROUP. Up to IW slots rename in a cycle, slot k younger than slot k-1 (slot k only
-// with every slot before it): a source of slot k equal to an earlier slot's destination takes
-// that slot's new register (the youngest such), a destination of slot k shadows an earlier
-// slot's to the same register, and slot k takes the next free entry after the earlier slots'
-// allocations from its shard. IW commits likewise, in order.
+// THE GROUP. Up to IW slots rename in a cycle, one per lane, in program order from the group's
+// first lane r_fc on, cyclically (smolrv64_frontend rotates the lanes): slot k is at program
+// position (k - r_fc) % IW. A source equal to an earlier slot's destination takes that slot's new
+// register (the youngest such: slot k looks at slots k-1, k-2, ... cyclically, nearest first, as
+// far back as its position), and a destination shadows an earlier slot's to the same register. A
+// group allocates at most one register from each shard (lane k's integer destination is lane k's
+// shard, and a group holds one FP load and one FP-unit op), so every slot takes its shard's head.
+// IW commits in program order, port k the k-th.
 
 module smolrv64_rename
   #(parameter IDXB  = 7,
@@ -51,11 +54,11 @@ module smolrv64_rename
    (input  wire                  clk,
     input  wire                  reset,
 
-    // ---- rename: slot k at [k] ----
+    // ---- rename: slot k at [k], the group a cyclic run of slots from r_fc ----
     input  wire [IW-1:0]         r_valid,      // slot k renames this cycle
-    // slot k holds an instruction, taken or not: what the free-list read addresses count, so a
-    // candidate register never waits for the dispatch decision (a slot is taken only behind
-    // the slots before it, so for every taken slot the count is the same)
+    input  wire [((IW > 1) ? $clog2(IW) : 1)-1:0] r_fc,   // the slot of the group's first instruction
+    // slot k holds an instruction, taken or not: what the group's bypass reads, so no new
+    // register or bypassed source waits for the dispatch decision (a group is taken whole)
     input  wire [IW-1:0]         r_cand,
     input  wire [IW*6-1:0]       r_rs1, r_rs2, r_rs3, r_rd,
     input  wire [IW-1:0]         r_rd_v,       // writes a register (x0 destinations excluded)
@@ -215,19 +218,29 @@ module smolrv64_rename
    end endgenerate
    // Reads are of the PRE-rename mapping, including a source equal to the slot's own
    // destination: rd is written at the clock edge, so the reads see the old value. An earlier
-   // slot's destination is bypassed in: the youngest earlier slot naming the source wins.
+   // slot's destination is bypassed in: the youngest earlier slot naming the source wins. Slot k
+   // is at position ps[k], and the slot d behind it (cyclically) is earlier when d <= ps[k]: the
+   // nearest wins, so the slots are looked at farthest first.
    wire [IW-1:0] writes = r_cand & r_rd_v;   // candidates, not takes
+   wire [IW-1:0] alloc  = r_valid & r_rd_v;
+   wire [IW-1:0] shadowed;                   // a younger slot of the group writes the same register
+   reg  [NB-1:0] ps [0:IW-1];                // slot k's program position in the group
+   integer       pk2;
+   always @* for (pk2 = 0; pk2 < IW; pk2 = pk2 + 1)
+      ps[pk2] = (pk2[NB-1:0] >= r_fc) ? pk2[NB-1:0] - r_fc : pk2[NB-1:0] + IW[NB-1:0] - r_fc;
    wire [PBITS-1:0] np [0:NS-1];               // the youngest earlier slot's new register
    wire [NS-1:0]    byp;
    generate for (gp = 0; gp < NS; gp = gp + 1) begin: by
       localparam integer K = gp / 3;           // the source's slot
       reg              b;
       reg [PBITS-1:0]  n;
-      integer j;
+      integer d, j;
       always @* begin
          b = 1'b0;  n = {PBITS{1'b0}};
-         for (j = 0; j < K; j = j + 1)
-            if (writes[j] & (sa[gp] == r_rd[j*6 +: 6])) begin b = 1'b1;  n = r_prd[j*PBITS +: PBITS]; end
+         for (d = IW - 1; d >= 1; d = d - 1) begin
+            j = (K + IW - d) % IW;
+            if ((d <= ps[K]) & writes[j] & (sa[gp] == r_rd[j*6 +: 6])) begin b = 1'b1;  n = r_prd[j*PBITS +: PBITS]; end
+         end
       end
       assign byp[gp] = b;  assign np[gp] = n;
    end endgenerate
@@ -242,12 +255,23 @@ module smolrv64_rename
       // the destination's displaced mapping: the youngest earlier slot writing it, else the map's
       reg              db;
       reg [PBITS-1:0]  dn;
-      integer          dj;
+      integer          dd, dj;
       always @* begin
          db = 1'b0;  dn = {PBITS{1'b0}};
-         for (dj = 0; dj < gk; dj = dj + 1)
-            if (writes[dj] & (r_rd[dj*6 +: 6] == r_rd[gk*6 +: 6])) begin db = 1'b1;  dn = r_prd[dj*PBITS +: PBITS]; end
+         for (dd = IW - 1; dd >= 1; dd = dd - 1) begin
+            dj = (gk + IW - dd) % IW;
+            if ((dd <= ps[gk]) & writes[dj] & (r_rd[dj*6 +: 6] == r_rd[gk*6 +: 6])) begin db = 1'b1;  dn = r_prd[dj*PBITS +: PBITS]; end
+         end
       end
+      // ...and whether a younger slot writes it too: then this one's mapping is not the newest
+      reg              sh_y;
+      integer          yj;
+      always @* begin
+         sh_y = 1'b0;
+         for (yj = 0; yj < IW; yj = yj + 1)
+            if ((yj != gk) & alloc[yj] & (ps[yj] > ps[gk]) & (r_rd[yj*6 +: 6] == r_rd[gk*6 +: 6])) sh_y = 1'b1;
+      end
+      assign shadowed[gk] = sh_y;
       assign r_pold[gk*PBITS +: PBITS] = db ? dn : sp[NS + gk];
       // the sweep's committed mapping, and whether commit k's register is still its newest mapping
       assign x_d[gk] = xv[rnewer[x_a[gk]] * IW + gk];
@@ -395,11 +419,11 @@ module smolrv64_rename
    integer          fk;
    initial for (fk = 0; fk < IW; fk = fk + 1) begin fre_q[fk] = {NSH{1'b0}}; c_pold_q[fk] = {PBITS{1'b0}}; end
 
-   // THE FREE-LIST READ ADDRESSES DO NOT SEE THE STALL (alloc_r addresses; alloc advances).
+   // THE FREE-LIST READ ADDRESSES DO NOT SEE THE STALL: a list's head is read from its pointer
+   // alone, and alloc advances it. alloc_r is the candidates', at most one a list (checked).
    wire [IW-1:0] alloc_r = r_cand & r_rd_v;
-   wire [IW-1:0] alloc   = r_valid & r_rd_v;
 
-   wire [IDXB-1:0] rdx [0:IW*NSH-1];   // each list's register for slot k at [k*NSH + list]
+   wire [IDXB-1:0] rdx [0:NSH-1];      // each list's head register
    wire [NSH-1:0]  low_n;              // each list's low-water flag for next cycle
    wire [NSH-1:0]  fre_n [0:IW-1];     // commit k frees into list s
 
@@ -415,9 +439,7 @@ module smolrv64_rename
          assign fre_n[gk][gL] = c_w[gk] & (c_pold[gk][PBITS-1:IDXB] == SHL);   // free push: the register's shard
       end
     if (!sh_used(gL)) begin: none   // a shard this width does not use: no list, never low
-      for (gk = 0; gk < IW; gk = gk + 1) begin: z
-         assign rdx[gk*NSH + gL] = {IDXB{1'b0}};
-      end
+      assign rdx[gL] = {IDXB{1'b0}};
       assign low_n[gL] = 1'b0;
     end else begin: u
       localparam integer N  = n_of(gL);
@@ -466,15 +488,8 @@ module smolrv64_rename
          always @(posedge clk) if (wen) mem[wpos[PW-2:FLLB]] <= wd;
          assign flrd[gB] = mem[h[PW-2:FLLB] + {{(PW-2-FLLB){1'b0}}, behind[gB]}];
       end
-      // slot k's entry: the head plus the earlier slots' allocations from this list (a
-      // second and third LUTRAM read port, not more pointers; LOWAT >= IW keeps them all inside
-      // the free set)
-      for (gk = 0; gk < IW; gk = gk + 1) begin: e
-         localparam [IW-1:0] BEFORE = (1 << gk) - 1;   // the slots before slot k
-         wire [PW-1:0] n = cnt(sel_r & BEFORE);
-         wire [PW-2:0] off = h[PW-2:0] + n[PW-2:0];
-         assign rdx[gk*NSH + gL] = flrd[off[FLLB-1:0]];
-      end
+      // the slot allocating from this list takes its head (one a group)
+      assign rdx[gL] = flrd[h[FLLB-1:0]];
 
       // The pointers come from configuration, like the arrays (see the reset note below).
       initial begin h = {PW{1'b0}}; hc = {PW{1'b0}}; t = T0; end
@@ -488,6 +503,8 @@ module smolrv64_rename
       always @(posedge clk) if (!reset) begin
          if (cnt(sel) > avail)
             $fatal(1, "smolrv64_rename: shard %0d allocated past its free list (%0d free)", gL, avail);
+         if (cnt(sel_r) > 1)
+            $fatal(1, "smolrv64_rename: the group holds %0d candidates for shard %0d", cnt(sel_r), gL);
          if (avail > N[PW-1:0])
             $fatal(1, "smolrv64_rename: shard %0d has %0d free of %0d", gL, avail, N);
          if (cnt(wsel) > 1)
@@ -530,7 +547,7 @@ module smolrv64_rename
 
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: pr
       wire [2:0] sh = r_shard[gk*3 +: 3];
-      assign r_prd[gk*PBITS +: PBITS] = {sh, rdx[gk*NSH + sh]};
+      assign r_prd[gk*PBITS +: PBITS] = {sh, rdx[sh]};
    end endgenerate
 
    // THE FREE LISTS AND THE MAPS ARE INITIALISED BY THE BITSTREAM AND NEVER RESET. No RAM can be
@@ -566,10 +583,11 @@ module smolrv64_rename
       // register this cycle wins (the loop's order)
       for (j = 0; j < IW; j = j + 1)
          if (c_w[j]) rnewer[c_rd[j*6 +: 6]] <= j[NB-1:0];
-      // ---- rename: likewise for the speculative map. A flush in the same cycle squashes the
-      // group; its registers are dirty, and the sweep rewrites them.
+      // ---- rename: likewise for the speculative map, the youngest slot writing a register
+      // winning. A flush in the same cycle squashes the group; its registers are dirty, and the
+      // sweep rewrites them.
       for (j = 0; j < IW; j = j + 1)
-         if (alloc[j]) newer[r_rd[j*6 +: 6]] <= j[NB-1:0];
+         if (alloc[j] & ~shadowed[j]) newer[r_rd[j*6 +: 6]] <= j[NB-1:0];
       // ---- the walk: the oldest column's winning within a row (the loop runs youngest first)
       for (j = IW - 1; j >= 0; j = j - 1)
          if (w_v[j]) newer[w_rd[j*6 +: 6]] <= j[NB-1:0];
@@ -642,8 +660,6 @@ module smolrv64_rename
          // physical register 0 into a free list.
          if (alloc[ik] && r_rd[ik*6 +: 6] == 6'd0)
             $fatal(1, "smolrv64_rename: slot %0d renamed x0", ik);
-         if (ik > 0 && r_valid[ik] && !r_valid[ik-1])
-            $fatal(1, "smolrv64_rename: slot %0d renamed without the one before it", ik);
          if (r_valid[ik] & ~r_cand[ik])
             $fatal(1, "smolrv64_rename: slot %0d renamed and was not a candidate", ik);
          // an f-register goes to an FP shard, any other register to its slot's lane

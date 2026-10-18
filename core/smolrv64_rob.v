@@ -10,14 +10,22 @@
 // docs/Area-Efficient-Scalar-OoO.md 2: "The reorder buffer holds status, not data." An entry
 // is {noret, rd, prd}, which is exactly what `smolrv64_rename`'s commit port consumes.
 //
-// ROWS: a dispatch group takes a row, slot k in column k, so an entry's index is {row, column}
-// and column k is written only by slot k and read only by commit port k. The head commits
-// along its row from its first uncommitted column; a row may take several cycles to commit,
-// and the head moves to the next row when the row's last valid column commits. Positions
-// (head, tail, irr) are {wrap, row, column}, ordered as numbers; the tail is always column 0.
+// ROWS: a dispatch group takes a row, its instruction in lane k in column k, so column k is
+// written only by lane k and completed only by lane k's ops. The lanes rotate (smolrv64_frontend),
+// so a row's instructions start at its FIRST COLUMN fc[row] and run on cyclically: the
+// instruction at program position p in the row is in column (fc + p) % IW. An entry's TAG is
+// {row, wrap, column}, wrap set when its column is below fc (the instruction is younger than its
+// column suggests), so tags order as numbers in program order and every age compare outside --
+// smolrv64_kill.vh's kdead, a distance from the head -- is the plain one; the storage index is
+// {row, column}, the tag without its wrap bit. Inside, the pointers (head, tail, irr) are
+// positions {ring wrap, row, p}, ordered as numbers; the tail is always p = 0. The head commits
+// along its row from its first uncommitted position, IW ports in program order (port p is
+// position p), so the commit and the walk read column (fc + p) % IW: a rotation of the row's
+// records at the ports, from fc. A row may take several cycles to commit, and the head moves to
+// the next row when the row's last valid position commits.
 module smolrv64_rob
   #(parameter ROWS  = 32,
-    parameter IDXB  = 7,              // $clog2(ROWS) + CB: an entry is {row, column}
+    parameter IDXB  = 8,              // a tag: $clog2(ROWS) + 1 + CB, {row, wrap, column}
     parameter PBITS = 9,
     parameter IW    = 2,              // the group width: IW allocations and IW commits a cycle
     parameter NW    = 3,              // simultaneous completion ports
@@ -28,8 +36,10 @@ module smolrv64_rob
    (input  wire                   clk,
     input  wire                   reset,
 
-    // ---- dispatch: a group in program order (slot k at [k]; slot k only with k-1), at RENAME ----
+    // ---- dispatch: a group, lane k's instruction at [k], at RENAME ----
+    // the group's lanes are a cyclic run from d_fc: (d_fc + p) % IW for p below its size
     input  wire [IW-1:0]          d_valid,
+    input  wire [CB-1:0]          d_fc,
     input  wire [IW*6-1:0]        d_rd,
     // 0 when the instruction writes no register. Physical register 0 is never allocated --
     // it is architectural x0's permanent mapping and is never freed -- so `d_prd != 0` IS
@@ -42,7 +52,7 @@ module smolrv64_rob
     input  wire [IW-1:0]          d_noret,
     input  wire [IW*PBITS-1:0]    d_pold,       // the mapping rd's rename displaced (the walk's)
     output wire [IW-1:0]          d_ready,      // a row is free (every bit)
-    output wire [IW*IDXB-1:0]     d_idx,        // the entry each takes, {row, k}; ride it with the op
+    output wire [IW*IDXB-1:0]     d_idx,        // the entry each takes, its tag; ride it with the op
 
     // ---- completion: out of order, names its slot by the tag it was given ----
     input  wire [NW-1:0]          w_v,
@@ -52,14 +62,16 @@ module smolrv64_rob
     // `done` a cycle later, which keeps the completion cones out of retire.
     input  wire                   h_fin,
 
-    // ---- commit: column k of the head row on port k, in order, into smolrv64_rename ----
-    // c_kill[k] for the head's column: the head is trapping (retire nothing, free nothing). For
-    // a column behind it: that entry may not retire this cycle -- it retires only with every
+    // ---- commit: position p of the head row on port p, in order, into smolrv64_rename ----
+    // c_kill[p] for the head's position: the head is trapping (retire nothing, free nothing). For
+    // a position behind it: that entry may not retire this cycle -- it retires only with every
     // one before it, and never while M still holds its op (a trap or redirect resolved in M
     // waits there for the head with done set; retiring it from behind the head retires the
     // wrong path).
     input  wire [IW-1:0]          c_kill,
     output wire [IW-1:0]          c_valid,
+    output wire [IW-1:0]          c_head,       // port p is the head's (one-hot while the ROB holds any)
+    output wire [IW*IDXB-1:0]     c_idx,        // port p's entry, its tag
     output wire [IW*6-1:0]        c_rd,
     output wire [IW-1:0]          c_rd_v,       // derived: |c_prd
     output wire [IW*PBITS-1:0]    c_prd,
@@ -70,7 +82,7 @@ module smolrv64_rob
     // rollback: there is nothing to walk because rename never wrote the free-list array.
     input  wire                   flush,
     output wire                   empty,
-    output wire [IDXB-CB:0]       occ_n,        // rows allocated now: the dispatch credit
+    output wire [IDXB-CB-1:0]     occ_n,        // rows allocated now: the dispatch credit
     // Which slot is oldest. An instruction that does anything beyond writing its own
     // register -- trap, redirect -- may act only when it IS this slot, or it would squash an
     // older op still in flight ahead of it.
@@ -90,7 +102,7 @@ module smolrv64_rob
 
     // ---- the walk: from the tail back to a mispredicted branch, a row a cycle ----
     // k_v names the branch (a later k_v names an older one: the walk goes on to it). Each cycle
-    // the walk names the dead entries of one row that write a register, column k on [k], with
+    // the walk names the dead entries of one row that write a register, position p on [p], with
     // their rd, prd and displaced mapping, for smolrv64_rename to undo. wl_done: the walk has
     // reached its branch (until the flush).
     input  wire                   k_v,
@@ -99,13 +111,13 @@ module smolrv64_rob
     output wire [IW*6-1:0]        wl_rd,
     output wire [IW*PBITS-1:0]    wl_prd, wl_pold,
     output wire                   wl_done,
-    // THE KILL: every entry younger than the branch, one bit per entry index, from flops, for
-    // every structure that holds an op to look its own up in (kd_v & kd[its rob]). Valid from
-    // the second cycle after k_v until the flush.
+    // THE KILL: every entry younger than the branch, one bit per storage index, from flops, for
+    // every structure that holds an op to look its own up in (kd_v & kd[its storage index]). Valid
+    // from the second cycle after k_v until the flush.
     output reg                    kd_v,
-    output reg  [(1 << IDXB)-1:0] kd,
+    output reg  [ROWS*(1 << CB)-1:0] kd,
     // ...and the same kill as a position, for a structure to test its own entry with
-    // smolrv64_kill.vh's kdead(): kh, the head's position when the walk began, and kb, the
+    // smolrv64_kill.vh's kdead(): kh, the head row's first tag when the walk began, and kb, the
     // branch's distance from it. kd stays for the per-entry clears (this ROB's, the core's).
     output reg  [IDXB-1:0]        kh,
     output reg  [IDXB-1:0]        kb,
@@ -118,34 +130,61 @@ module smolrv64_rob
    // rmap[c_rd] at commit and that still holds it.
    localparam EW    = PBITS + 1 + 6 + PBITS;      // {pold, noret, rd, prd}
    localparam NCOL  = 1 << CB;                    // columns; those at IW and above are never valid
-   localparam DEPTH = ROWS * NCOL;                // the index space
-   localparam RB    = IDXB - CB;                  // row bits
+   localparam RB    = IDXB - 1 - CB;              // row bits
+   localparam SB    = RB + CB;                    // a storage index: {row, column}
+   localparam DEPTH = ROWS * NCOL;                // the storage
    localparam [RB:0] ROWS_S = ROWS[RB:0];         // sized, so the occupancy check cannot truncate
-   localparam [IDXB:0] ROW1 = NCOL[IDXB:0];       // one row, as a position step
+   localparam [SB:0] ROW1 = NCOL[SB:0];           // one row, as a position step
+   initial if ((1 << RB) != ROWS) $fatal(1, "smolrv64_rob: IDXB=%0d is not $clog2(ROWS=%0d) + 1 + CB=%0d", IDXB, ROWS, CB);
    reg [DEPTH-1:0] v, done;                     // bulk-cleared on flush, so flops by necessity
-   reg [IDXB:0]    head, tail, irr;             // {wrap, row, column}; head <= irr <= tail
+   reg [SB:0]      head, tail, irr;             // positions {ring wrap, row, p}; head <= irr <= tail
+   reg [CB-1:0]    fc [0:ROWS-1];               // each row's first column
+   reg [CB-1:0]    hfc, ifc;                    // the head row's and irr's row's (flops: the commit ports
+                                                // and the pointer's step rotate by them)
    integer         ri, rj;
    initial begin
-      v = {DEPTH{1'b0}}; done = {DEPTH{1'b0}}; head = 0; tail = 0; irr = 0;
+      v = {DEPTH{1'b0}}; done = {DEPTH{1'b0}}; head = 0; tail = 0; irr = 0; hfc = 0; ifc = 0;
+      for (ri = 0; ri < ROWS; ri = ri + 1) fc[ri] = {CB{1'b0}};
    end
 
-   wire [IDXB-1:0] hidx = head[IDXB-1:0];
-   wire [RB-1:0]   hrow = head[IDXB-1:CB];
-   wire [CB-1:0]   hcol = head[CB-1:0];
-   wire [RB-1:0]   trow = tail[IDXB-1:CB];
-   wire [RB:0]     occ  = tail[IDXB:CB] - head[IDXB:CB];   // rows, the head's counting
+   // a row's position p in storage: column (f + p) % IW, and its wrap bit; positions IW and above
+   // are the never-valid columns themselves
+   function automatic [CB-1:0] col_of(input [CB-1:0] f, input [CB-1:0] p);
+      reg [CB:0] t;
+      begin
+         t = {1'b0, f} + {1'b0, p};
+         col_of = (p >= IW) ? p : (t >= IW) ? t[CB-1:0] - IW[CB-1:0] : t[CB-1:0];
+      end
+   endfunction
+   function automatic wrap_of(input [CB-1:0] f, input [CB-1:0] p);
+      wrap_of = (p < IW) & (({1'b0, f} + {1'b0, p}) >= IW);
+   endfunction
+   function automatic [IDXB-1:0] tag_of(input [RB-1:0] r, input [CB-1:0] f, input [CB-1:0] p);
+      tag_of = {r, wrap_of(f, p), col_of(f, p)};
+   endfunction
+   function automatic [SB-1:0] six(input [IDXB-1:0] t);     // a tag's storage index
+      six = {t[IDXB-1:CB+1], t[CB-1:0]};
+   endfunction
+   function automatic [CB-1:0] pos_of(input [CB-1:0] f, input [CB:0] wc);   // a tag's {wrap, column}: its p
+      pos_of = wc[CB] ? wc[CB-1:0] + IW[CB-1:0] - f : wc[CB-1:0] - f;
+   endfunction
+
+   wire [RB-1:0]   hrow = head[SB-1:CB];
+   wire [CB-1:0]   hp   = head[CB-1:0];
+   wire [RB-1:0]   trow = tail[SB-1:CB];
+   wire [RB:0]     occ  = tail[SB:CB] - head[SB:CB];   // rows, the head's counting
+   wire [SB-1:0]   hsx  = {hrow, col_of(hfc, hp)};      // the head's storage index
    assign empty    = (head == tail);
    assign occ_n    = occ;
-   assign head_idx = hidx;
-   assign head_n_idx = head_n[IDXB-1:0];
+   assign head_idx = tag_of(hrow, hfc, hp);
    wire ready = (occ < ROWS_S);
-   // slot k reads slot k-1: per-bit variables, so the chains are not loops to the simulator
+   // port p reads port p-1: per-bit variables, so the chains are not loops to the simulator
    wire [IW-1:0]   cv /*verilator split_var*/;
    wire [IW-1:0]   do_alloc = d_valid & {IW{ready}};
    genvar gk;
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: sl
       localparam [CB-1:0] K = gk;
-      assign d_idx[gk*IDXB +: IDXB] = {trow, K};
+      assign d_idx[gk*IDXB +: IDXB] = {trow, K < d_fc, K};
       assign d_ready[gk] = ready;
    end endgenerate
 
@@ -158,54 +197,57 @@ module smolrv64_rob
             if (w_v[q] && (w_ix[q*IDXB +: IDXB] == ix)) w_hits = 1'b1;
       end
    endfunction
-   wire head_done = v[hidx] & (done[hidx] | h_fin);
-   wire [IDXB-1:0] iidx = irr[IDXB-1:0];
-   assign irr_idx = iidx;
+   wire head_done = v[hsx] & (done[hsx] | h_fin);
+   wire [RB-1:0] irow = irr[SB-1:CB];
+   assign irr_idx = tag_of(irow, ifc, irr[CB-1:0]);
    assign irr_v   = (irr != tail);
-   // A row per cycle: the pointer crosses every column of its row, from its own on, that is done
-   // or completing on an IRR_FWD port (a column with no op is skipped), and stops at the first that
-   // is not; past the row's last it goes to the next row.
-   wire [IDXB-CB-1:0] irow = irr[IDXB-1:CB];
-   wire [NCOL-1:0]    ir_wait;                 // the column's op is not done
+   // A row per cycle: the pointer crosses every position of its row, from its own on, that is done
+   // or completing on an IRR_FWD port (a position with no op is skipped), and stops at the first
+   // that is not; past the row's last it goes to the next row.
+   wire [NCOL-1:0]    ir_wait;                 // the position's op is not done
    genvar gic;
    generate for (gic = 0; gic < NCOL; gic = gic + 1) begin: irc
-      wire [IDXB-1:0] ix = {irow, gic[CB-1:0]};
-      reg             fw;
-      integer         q;
+      localparam [CB-1:0] P = gic;
+      wire [SB-1:0] ix = {irow, col_of(ifc, P)};
+      reg           fw;
+      integer       q;
       always @* begin
          fw = 1'b0;
          for (q = 0; q < NW; q = q + 1)
-            if (IRR_FWD[q] && w_v[q] && (w_ix[q*IDXB +: IDXB] == ix)) fw = 1'b1;
+            if (IRR_FWD[q] && w_v[q] && (six(w_ix[q*IDXB +: IDXB]) == ix)) fw = 1'b1;
       end
-      assign ir_wait[gic] = v[ix] & ((~done[ix] & ~fw) | (rp_v & (ix == rp_ix))) & (gic >= irr[CB-1:0]);
+      assign ir_wait[gic] = v[ix] & ((~done[ix] & ~fw) | (rp_v & (ix == six(rp_ix)))) & (gic >= irr[CB-1:0]);
    end endgenerate
-   reg  [IDXB:0] irr_step;
-   integer       ick;
+   reg  [SB:0] irr_step;
+   integer     ick;
    always @* begin
-      irr_step = {irr[IDXB:CB] + 1'b1, {CB{1'b0}}};
+      irr_step = {irr[SB:CB] + 1'b1, {CB{1'b0}}};
       for (ick = NCOL - 1; ick >= 0; ick = ick - 1)
-         if (ir_wait[ick]) irr_step = {irr[IDXB:CB], ick[CB-1:0]};
+         if (ir_wait[ick]) irr_step = {irr[SB:CB], ick[CB-1:0]};
       if (irr == tail) irr_step = irr;
    end
-   // the entry after a position: the next column of its row while that is valid, else the next row
-   function automatic [IDXB:0] next_pos(input [IDXB:0] p);
+   // the position after one of the head row's: the next while it is valid, else the next row
+   function automatic [SB:0] next_pos(input [SB:0] p);
       begin
-         if ((p[CB-1:0] != NCOL - 1) && v[p[IDXB-1:0] + 1'b1]) next_pos = p + 1'b1;
-         else next_pos = {p[IDXB:CB] + 1'b1, {CB{1'b0}}};
+         if ((p[CB-1:0] != NCOL - 1) && v[{hrow, col_of(hfc, p[CB-1:0] + 1'b1)}]) next_pos = p + 1'b1;
+         else next_pos = {p[SB:CB] + 1'b1, {CB{1'b0}}};
       end
    endfunction
 
    // ---- the walk ----
-   // The next row to walk (wl_row) and the columns of it still to walk (those below wl_lim);
-   // the branch is {k_row, k_col}, and only its younger columns die in its own row. When the
-   // walk reaches the branch's row it stops there with wl_lim = k_col + 1, so a later, older
+   // The next row to walk (wl_row) and the positions of it still to walk (those below wl_lim);
+   // the branch is {k_row, k_p}, and only its younger positions die in its own row. When the
+   // walk reaches the branch's row it stops there with wl_lim = k_p + 1, so a later, older
    // branch walks on from exactly the entries not yet walked, the old branch included.
    reg            wl_run, wl_end;
    reg [RB-1:0]   wl_row;
    reg [CB:0]     wl_lim;
    reg [RB-1:0]   k_row;
-   reg [CB-1:0]   k_col;
-   initial begin wl_run = 1'b0; wl_end = 1'b0; wl_row = 0; wl_lim = 0; k_row = 0; k_col = 0; end
+   reg [CB-1:0]   k_p;
+   reg [CB:0]     k_wc;                        // the branch's {wrap, column} (the order check's)
+   wire [RB-1:0]  kn_row = k_idx[IDXB-1:CB+1];
+   wire [CB-1:0]  kn_fc  = fc[kn_row];
+   initial begin wl_run = 1'b0; wl_end = 1'b0; wl_row = 0; wl_lim = 0; k_row = 0; k_p = 0; k_wc = 0; end
    assign wl_done = wl_end & ~wl_run & ~k_v;      // not in a cycle that names a new, older branch
    localparam [CB:0] NCOL_S = NCOL;
    always @(posedge clk) begin
@@ -213,45 +255,48 @@ module smolrv64_rob
          wl_run <= 1'b0;  wl_end <= 1'b0;
       end else begin
          if (wl_run) begin
-            if (wl_row == k_row) begin wl_run <= 1'b0;  wl_end <= 1'b1;  wl_lim <= {1'b0, k_col} + 1'b1; end
+            if (wl_row == k_row) begin wl_run <= 1'b0;  wl_end <= 1'b1;  wl_lim <= {1'b0, k_p} + 1'b1; end
             else begin wl_row <= wl_row - 1'b1;  wl_lim <= NCOL_S; end
          end
          if (k_v) begin
-            k_row <= k_idx[IDXB-1:CB];  k_col <= k_idx[CB-1:0];  wl_run <= 1'b1;
+            k_row <= kn_row;  k_p <= pos_of(kn_fc, k_idx[CB:0]);  k_wc <= k_idx[CB:0];  wl_run <= 1'b1;
             if (~wl_run & ~wl_end) begin wl_row <= trow - 1'b1;  wl_lim <= NCOL_S; end
          end
       end
    end
    // the kill vector: a row after the branch's (in ring order from the head) dies whole, and in
-   // the branch's own row the columns after it; computed from flops the cycle k_v arrives
-   wire [RB-1:0] kb_rel = k_idx[IDXB-1:CB] - hrow;
+   // the branch's own row the entries after it (a column's tag above the branch's); computed from
+   // flops the cycle k_v arrives
+   wire [RB-1:0] kb_rel = kn_row - hrow;
    reg  [DEPTH-1:0] kd_n;
    integer kr, kc;
    always @* for (kr = 0; kr < ROWS; kr = kr + 1)
       for (kc = 0; kc < NCOL; kc = kc + 1)
          kd_n[kr*NCOL + kc] = ((kr[RB-1:0] - hrow) > kb_rel)
-                            | ((kr[RB-1:0] == k_idx[IDXB-1:CB]) & (kc[CB-1:0] > k_idx[CB-1:0]));
+                            | ((kr[RB-1:0] == kn_row) & ({kc[CB-1:0] < kn_fc, kc[CB-1:0]} > k_idx[CB:0]));
    initial begin kd_v = 1'b0; kd = {DEPTH{1'b0}}; kh = {IDXB{1'b0}}; kb = {IDXB{1'b0}}; end
    always @(posedge clk) begin
-      if (k_v) begin kd <= kd_n;  kh <= {hrow, {CB{1'b0}}};  kb <= {kb_rel, k_idx[CB-1:0]}; end
+      if (k_v) begin kd <= kd_n;  kh <= {hrow, 1'b0, {CB{1'b0}}};  kb <= {kb_rel, k_idx[CB:0]}; end
       kd_v <= ~reset & ~flush & ~rel & (kd_v | k_v);
    end
    // the position form names exactly the vector's entries (kd_n's rows past the branch's from the
-   // head, and its own row's later columns, are the entries farther from kh than kb)
+   // head, and its own row's later tags, are the entries farther from kh than kb)
    localparam integer ROBB = IDXB;
 `include "smolrv64_kill.vh"
    integer kx;
    always @(posedge clk) if (!reset && kd_v)
       for (kx = 0; kx < DEPTH; kx = kx + 1)
-         if (kd[kx] != kdead(1'b1, kh, kb, kx[IDXB-1:0]))
+         if (kd[kx] != kdead(1'b1, kh, kb, {kx[SB-1:CB], kx[CB-1:0] < fc[kx[SB-1:CB]], kx[CB-1:0]}))
             $fatal(1, "smolrv64_rob: the kill's position (kh %0d, kb %0d) and its vector disagree at entry %0d", kh, kb, kx);
    // a later branch is older than the one walked to; nothing allocates while the walk runs
-   wire [RB-1:0] k_rel  = k_idx[IDXB-1:CB] - hrow, kq_rel = k_row - hrow;
+   wire [RB-1:0] k_rel  = kn_row - hrow, kq_rel = k_row - hrow;
    always @(posedge clk) if (!reset) begin
-      if (k_v & (wl_run | wl_end) & ~flush & ~({k_rel, k_idx[CB-1:0]} < {kq_rel, k_col}))
-         $fatal(1, "smolrv64_rob: a walk to entry %0d after one to the older or same entry %0d", k_idx, {k_row, k_col});
-      if (k_v & ~flush & (~v[k_idx] | empty))
+      if (k_v & (wl_run | wl_end) & ~flush & ~({k_rel, k_idx[CB:0]} < {kq_rel, k_wc}))
+         $fatal(1, "smolrv64_rob: a walk to entry %0d after one to the older or same entry %0d", k_idx, {k_row, k_wc});
+      if (k_v & ~flush & (~v[six(k_idx)] | empty))
          $fatal(1, "smolrv64_rob: a walk to entry %0d, which holds no live op", k_idx);
+      if (k_v & ~flush & (k_idx != tag_of(kn_row, kn_fc, pos_of(kn_fc, k_idx[CB:0]))))
+         $fatal(1, "smolrv64_rob: the walk's branch %0d does not carry its row's wrap bit (first column %0d)", k_idx, kn_fc);
       if ((wl_run | k_v) & (|do_alloc))
          $fatal(1, "smolrv64_rob: an allocation while the walk runs");
       if (rel & ~(kd_v & wl_done))
@@ -260,32 +305,44 @@ module smolrv64_rob
          $fatal(1, "smolrv64_rob: an allocation in the release's cycle");
    end
 
-   // ---- the columns: one write (slot k) and two reads (the head row, the walk's row) each ----
-   // c_kill on the head's column: the head is trapping. It must NOT commit -- a trap does not
+   // ---- the columns: one write (lane k) and two reads (the head row, the walk's row) each ----
+   // The ports rotate the row's columns into program order: port p reads column (fc + p) % IW.
+   // c_kill on the head's position: the head is trapping. It must NOT commit -- a trap does not
    // write rd -- and the redirect that follows flushes it, which returns its allocation through
-   // the free list's own pointer rollback. A column behind it retires with every one before it,
+   // the free list's own pointer rollback. A position behind it retires with every one before it,
    // and never in a flush cycle: a mispredicted branch COMMITS and redirects in the same cycle,
    // and the entry behind it is the wrong path.
+   wire [EW-1:0] he [0:IW-1], we [0:IW-1];      // column k's entry in the head's row, the walk's row
+   wire [CB-1:0] wfc = fc[wl_row];
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: col
-      localparam [CB-1:0] K = gk;
       reg [EW-1:0] mem [0:ROWS-1];
       integer bi; initial for (bi = 0; bi < ROWS; bi = bi + 1) mem[bi] = {EW{1'b0}};
       always @(posedge clk) if (do_alloc[gk]) mem[trow] <= {d_pold[gk*PBITS +: PBITS], d_noret[gk], d_rd[gk*6 +: 6], d_prd[gk*PBITS +: PBITS]};
-      wire [EW-1:0]   e  = mem[hrow];
-      wire [EW-1:0]   we = mem[wl_row];           // the walk's read port
-      wire [IDXB-1:0] wx = {wl_row, K};
-      assign wl_v[gk] = wl_run & v[wx] & ({1'b0, K} < wl_lim) & ((wl_row != k_row) | (K > k_col))
-                      & (we[PBITS-1:0] != {PBITS{1'b0}});
-      assign wl_prd[gk*PBITS +: PBITS]  = we[PBITS-1:0];
-      assign wl_rd[gk*6 +: 6]           = we[PBITS +: 6];
-      assign wl_pold[gk*PBITS +: PBITS] = we[EW-1 -: PBITS];
-      wire [IDXB-1:0] ix = {hrow, K};
+      assign he[gk] = mem[hrow];
+      assign we[gk] = mem[wl_row];                 // the walk's read port
+   end endgenerate
+   generate for (gk = 0; gk < IW; gk = gk + 1) begin: port
+      localparam [CB-1:0] P = gk;
+      // the walk's position p
+      wire [CB-1:0]   wc = col_of(wfc, P);
+      wire [EW-1:0]   w  = we[wc];
+      assign wl_v[gk] = wl_run & v[{wl_row, wc}] & ({1'b0, P} < wl_lim) & ((wl_row != k_row) | (P > k_p))
+                      & (w[PBITS-1:0] != {PBITS{1'b0}});
+      assign wl_prd[gk*PBITS +: PBITS]  = w[PBITS-1:0];
+      assign wl_rd[gk*6 +: 6]           = w[PBITS +: 6];
+      assign wl_pold[gk*PBITS +: PBITS] = w[EW-1 -: PBITS];
+      // the head row's position p
+      wire [CB-1:0]   hc = col_of(hfc, P);
+      wire [EW-1:0]   e  = he[hc];
+      wire [SB-1:0]   ix = {hrow, hc};
       if (gk == 0) begin: h
-         assign cv[0] = (hcol == K) & head_done & ~c_kill[0];
+         assign cv[0] = (hp == P) & head_done & ~c_kill[0];
       end else begin: b
-         assign cv[gk] = (hcol == K) ? (head_done & ~c_kill[gk])
-                       : (hcol < K) & cv[gk-1] & v[ix] & done[ix] & ~c_kill[gk] & ~flush;
+         assign cv[gk] = (hp == P) ? (head_done & ~c_kill[gk])
+                       : (hp < P) & cv[gk-1] & v[ix] & done[ix] & ~c_kill[gk] & ~flush;
       end
+      assign c_head[gk]               = (hp == P);
+      assign c_idx[gk*IDXB +: IDXB]   = tag_of(hrow, hfc, P);
       assign c_prd[gk*PBITS +: PBITS] = e[PBITS-1:0];
       assign c_rd[gk*6 +: 6]          = e[PBITS +: 6];
       assign c_noret[gk]              = e[PBITS+6];
@@ -294,42 +351,65 @@ module smolrv64_rob
    assign c_valid = cv;
    wire [IW-1:0] cvv = cv;                          // the same, read by the loops below
 
-   // the head after this cycle's commits: past the last committing column, or the next row
-   reg  [IDXB:0] head_n;
-   integer       hk;
+   // the head after this cycle's commits: past the last committing position, or the next row
+   reg  [SB:0] head_n;
+   integer     hk;
    always @* begin
       head_n = head;
       for (hk = 0; hk < IW; hk = hk + 1)
-         if (cvv[hk]) head_n = next_pos({head[IDXB:CB], hk[CB-1:0]});
+         if (cvv[hk]) head_n = next_pos({head[SB:CB], hk[CB-1:0]});
    end
+   // the next row's first column, an allocation into it this cycle forwarded: the head's when it
+   // moves there, its row's at p = 0
+   wire [RB-1:0] nrow = hrow + 1'b1;
+   wire [CB-1:0] nfc  = ((|do_alloc) & (trow == nrow)) ? d_fc : fc[nrow];
+   wire          h_adv = (head_n[SB:CB] != head[SB:CB]);
+   assign head_n_idx = h_adv ? {nrow, 1'b0, nfc} : tag_of(hrow, hfc, head_n[CB-1:0]);
    // the irrevocable pointer never falls behind the head
-   wire [IDXB:0] irr_lag  = head_n - irr_step;            // > 0 and < half the space: behind
-   wire [IDXB:0] irr_n    = ((irr_lag != 0) & ~irr_lag[IDXB]) ? head_n : irr_step;
+   wire [SB:0] irr_lag  = head_n - irr_step;            // > 0 and < half the space: behind
+   wire [SB:0] irr_n    = ((irr_lag != 0) & ~irr_lag[SB]) ? head_n : irr_step;
    // a flush empties the ROB at a row boundary: the head's row if nothing of it has committed
-   wire [IDXB:0] flush_pos = (head_n[CB-1:0] == {CB{1'b0}}) ? head_n : {head_n[IDXB:CB] + 1'b1, {CB{1'b0}}};
-   always @(posedge clk) if (!reset)
-      for (ri = 1; ri < IW; ri = ri + 1)
-         if (d_valid[ri] && !d_valid[ri-1])
-            $fatal(1, "smolrv64_rob: allocation %0d without the one before it", ri);
+   wire [SB:0] flush_pos = (head_n[CB-1:0] == {CB{1'b0}}) ? head_n : {head_n[SB:CB] + 1'b1, {CB{1'b0}}};
+   // the head row's first column follows the head: the next row's when the head moves there, and
+   // an allocation into the head's row (an empty ROB) sets it; irr's likewise, or the head's when
+   // the pointer takes the head's position
+   wire          f_adv = flush ? (flush_pos[SB:CB] != head[SB:CB]) : h_adv;
+   wire [CB-1:0] hfc_n = f_adv ? nfc : ((|do_alloc) & (trow == hrow)) ? d_fc : hfc;
+   wire [RB-1:0] inrow = irow + 1'b1;
+   wire [CB-1:0] ifc_n = (flush | ((irr_lag != 0) & ~irr_lag[SB])) ? hfc_n
+                       : (irr_step[SB:CB] != irr[SB:CB]) ? (((|do_alloc) & (trow == inrow)) ? d_fc : fc[inrow])
+                       : ((|do_alloc) & (trow == irow)) ? d_fc : ifc;
+   // a group's lanes are one cyclic run from its first
+   reg           e_run;
+   integer       ak;
+   always @* begin
+      e_run = (|d_valid) & ~d_valid[d_fc];
+      for (ak = 1; ak < IW; ak = ak + 1)
+         if (d_valid[col_of(d_fc, ak[CB-1:0])] & ~d_valid[col_of(d_fc, ak[CB-1:0] - 1'b1)]) e_run = 1'b1;
+   end
+   always @(posedge clk) if (!reset & e_run)
+      $fatal(1, "smolrv64_rob: allocation %b is not a run of lanes from the first, %0d", d_valid, d_fc);
 
    always @(posedge clk) begin
       if (reset) begin
-         v <= {DEPTH{1'b0}}; done <= {DEPTH{1'b0}}; head <= 0; tail <= 0; irr <= 0;
+         v <= {DEPTH{1'b0}}; done <= {DEPTH{1'b0}}; head <= 0; tail <= 0; irr <= 0; hfc <= 0; ifc <= 0;
       end else begin
          for (ri = 0; ri < IW; ri = ri + 1)
             if (do_alloc[ri]) begin v[{trow, ri[CB-1:0]}] <= 1'b1;  done[{trow, ri[CB-1:0]}] <= 1'b0; end
-         if (|do_alloc) tail <= tail + ROW1;
+         if (|do_alloc) begin tail <= tail + ROW1;  fc[trow] <= d_fc; end
          for (ri = 0; ri < NW; ri = ri + 1)
-            if (w_v[ri]) done[w_ix[ri*IDXB +: IDXB]] <= 1'b1;
+            if (w_v[ri]) done[six(w_ix[ri*IDXB +: IDXB])] <= 1'b1;
          for (ri = 0; ri < IW; ri = ri + 1)
-            if (cvv[ri]) v[{hrow, ri[CB-1:0]}] <= 1'b0;
+            if (cvv[ri]) v[{hrow, col_of(hfc, ri[CB-1:0])}] <= 1'b0;
          head <= head_n;
          irr <= irr_n;
+         hfc <= hfc_n;
+         ifc <= ifc_n;
          // the release, before the flush (a flush in its cycle wins): the dead entries go and
          // the tail steps back to the row after the branch's
          if (rel) begin
             for (rj = 0; rj < DEPTH; rj = rj + 1) if (kd[rj]) begin v[rj] <= 1'b0;  done[rj] <= 1'b0; end
-            tail <= {head[IDXB:CB] + {1'b0, kq_rel} + 1'b1, {CB{1'b0}}};
+            tail <= {head[SB:CB] + {1'b0, kq_rel} + 1'b1, {CB{1'b0}}};
          end
          // A flush kills everything YOUNGER than the entry committing this cycle -- the
          // redirecting instruction is itself older and must still commit. Ordered after the
@@ -355,25 +435,31 @@ module smolrv64_rob
 
    // ---- invariants (always on: docs/rtl-rules.md A1) --------------------------------
    always @(posedge clk) if (!reset) begin
-      if (d_valid[0] & ~ready)
+      if ((|d_valid) & ~ready)
          $fatal(1, "smolrv64_rob: dispatch into a full ROB (head=%0d tail=%0d)", head, tail);
-      if (h_fin & ~w_hits(hidx))
-         $fatal(1, "smolrv64_rob: h_fin without a completion of the head (entry %0d)", hidx);
+      if (h_fin & ~w_hits(head_idx))
+         $fatal(1, "smolrv64_rob: h_fin without a completion of the head (entry %0d)", head_idx);
       for (ri = 0; ri < NW; ri = ri + 1) if (w_v[ri]) begin
-         if (~v[w_ix[ri*IDXB +: IDXB]])
+         if (~v[six(w_ix[ri*IDXB +: IDXB])])
             $fatal(1, "smolrv64_rob: completion for entry %0d, which holds no live op",
                    w_ix[ri*IDXB +: IDXB]);
-         if (done[w_ix[ri*IDXB +: IDXB]])
+         if (done[six(w_ix[ri*IDXB +: IDXB])])
             $fatal(1, "smolrv64_rob: entry %0d completed twice", w_ix[ri*IDXB +: IDXB]);
+         if (w_ix[ri*IDXB + CB] != (w_ix[ri*IDXB +: CB] < fc[w_ix[ri*IDXB + CB + 1 +: RB]]))
+            $fatal(1, "smolrv64_rob: completion for entry %0d with the wrong wrap bit", w_ix[ri*IDXB +: IDXB]);
          for (rj = 0; rj < NW; rj = rj + 1)
             if (rj > ri && w_v[rj] && (w_ix[rj*IDXB +: IDXB] == w_ix[ri*IDXB +: IDXB]))
                $fatal(1, "smolrv64_rob: two ports completing entry %0d in one cycle",
                       w_ix[ri*IDXB +: IDXB]);
       end
-      if (~empty & ~v[hidx])
+      if (~empty & ~v[hsx])
          $fatal(1, "smolrv64_rob: the head (%0d) holds no live op", head);
+      if (~empty & (hfc != fc[hrow]))
+         $fatal(1, "smolrv64_rob: the head row's first column %0d, the row's %0d", hfc, fc[hrow]);
+      if (irr_v & (ifc != fc[irow]))
+         $fatal(1, "smolrv64_rob: irr's row's first column %0d, the row's %0d", ifc, fc[irow]);
       if (tail[CB-1:0] != {CB{1'b0}})
-         $fatal(1, "smolrv64_rob: the tail is not at a row's first column (%0d)", tail);
+         $fatal(1, "smolrv64_rob: the tail is not at a row's first position (%0d)", tail);
       // Occupancy can never exceed the array. Catches a lost commit or a double allocate at
       // the moment it happens rather than as a wedge thousands of cycles later.
       if (occ > ROWS_S)

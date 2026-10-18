@@ -207,7 +207,7 @@ module csr_file
                       HPMEV_ST_FPU = 16'h0303,   // Stage F holds an op it cannot advance, + no lane issued while a scheduler's lowest-slot waiting entry needs an FP op's, FP load's, FP-port or divide result
                       HPMEV_ST_DSP = 16'h0304,   // The queue head waits for a credit other than the ROB's while M can advance and no load or FP dependency holds issue: ST_IQ + ST_RN + ST_SQ + ST_LQ + ST_SRZ
                       HPMEV_ST_ROB = 16'h0305,   // The queue head waits for ROB room
-                      HPMEV_ST_IQ  = 16'h0306,   // The queue head: lane A's scheduler, the FP FIFO and scheduler, the head-op register or the divide credit is full
+                      HPMEV_ST_IQ  = 16'h0306,   // The queue head: its lane's scheduler, the FP FIFO and scheduler, the head-op register or the divide credit is full
                       HPMEV_ST_RN  = 16'h0307,   // The queue head: a rename shard is below LOWAT, or the map's sweep after a squash runs
                       HPMEV_ST_SQ  = 16'h0308,   // The queue head holds a store and has no store-queue credit (none while a head op is in flight or in the IR)
                       HPMEV_ST_LQ  = 16'h0309,   // The queue head holds a load and has no load-queue credit (none while a head op is in flight or in the IR)

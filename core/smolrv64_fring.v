@@ -186,8 +186,12 @@ module smolrv64_fring
       assign rp_wp[ga*RSB +: RSB] = tail + ga[RSB-1:0] - {{(RSB-3){1'b0}}, rp_skip};
       assign rp_wd[ga*17 +: 17] = {ic_data[ga*16 +: 16], rp_st[ga]};
    end endgenerate
+   wire [HW*3-1:0] rg_ro;                       // the window: HW consecutive halfwords
+   generate for (ga = 0; ga < HW; ga = ga + 1) begin: ro
+      assign rg_ro[ga*3 +: 3] = ga[2:0];
+   end endgenerate
    smolrv64_bankq #(.W(17), .DEPTH(RS), .NW(8), .NR(HW), .NB(8)) u_rg
-     (.clk(clk), .reset(reset), .wv(rp_wv), .wp(rp_wp), .wd(rp_wd), .rp(rg_head), .rd(rg_rd));
+     (.clk(clk), .reset(reset), .wv(rp_wv), .wp(rp_wp), .wd(rp_wd), .rp(rg_head), .ro(rg_ro), .rd(rg_rd));
    // The ring's head is the PC, what it holds and has in flight fits, and every mark held or in
    // flight has its prediction queued.
    integer k;

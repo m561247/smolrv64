@@ -61,7 +61,7 @@ BACKEND = [("ST_MEM", "a head op in M, or a wait on an integer load"), ("ST_FPU"
            ("ST_ROB", "queue head without ROB room")]
 OCCUPANCY = [("ST_DIV", "a divide in the MD stage"), ("ST_MUL", "a multiply in flight in a lane")]
 # ST_IQ..ST_SRZ are the disjoint parts of ST_DSP (the `hold` set): a breakdown underneath it.
-DSP_SUB = [("ST_IQ", "lane A's scheduler, the FP queue, the head-op register or the divide credit"),
+DSP_SUB = [("ST_IQ", "the head's lane's scheduler, the FP queue, the head-op register or the divide credit"),
            ("ST_RN", "rename: a shard below LOWAT, or the map's sweep after a squash"),
            ("ST_SQ", "no store-queue credit"), ("ST_LQ", "no load-queue credit"),
            ("ST_SRZ", "serialising, a CSR op or a CBO waiting")]

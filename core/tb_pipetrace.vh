@@ -17,6 +17,11 @@
    localparam integer PT_SB = 10;
    localparam integer PT_SN = 1 << PT_SB;
    reg [63:0] pt_id [0:255];  reg pt_v [0:255];  reg [7:0] pt_c [0:255];
+   // a ROB tag's storage index, the rows' key: the tag without its wrap bit (smolrv64_rob)
+   localparam integer PT_CB = (IW > 1) ? $clog2(IW) : 1;
+   function [7:0] ptx(input [15:0] t);
+      ptx = 8'(((t >> (PT_CB + 1)) << PT_CB) | (t & ((16'd1 << PT_CB) - 16'd1)));
+   endfunction
    reg [63:0] ps_id [0:PT_SN-1];  reg ps_v [0:PT_SN-1];  reg [7:0] ps_c [0:PT_SN-1];
    reg [63:0] ps_pc [0:PT_SN-1];  reg [31:0] ps_raw [0:PT_SN-1];
    // mirrors of the bundle register and the decoupling queue: the sequence numbers they hold
@@ -113,7 +118,7 @@
             else                                           head_why = "z";   // serialisation, a CSR or CBO gate
          end
          else if (!cr[CR_ROB1 + k])                        head_why = "O";
-         else if ((g[dut.core.GC_I] & !cr[CR_IA + k]) | (g[dut.core.GC_FC] & !cr[CR_F]) | (g[dut.core.GC_M] & !cr[CR_DIV]))
+         else if ((g[dut.core.GC_I] & !dut.core.fe.ia[k]) | (g[dut.core.GC_FC] & !cr[CR_F]) | (g[dut.core.GC_M] & !cr[CR_DIV]))
                                                            head_why = "I";   // its lane's scheduler, the FP queue, the MD stage
          else if (g[dut.core.GC_ST] & !cr[CR_ST])          head_why = "S";
          else if (g[dut.core.GC_LD] & !cr[CR_LD])          head_why = "L";
@@ -173,17 +178,17 @@
    genvar gpl, gpe;
    generate for (gpl = 0; gpl < IW; gpl = gpl + 1) begin: ptl
       assign pl_stg_v[gpl]   = dut.core.ln[gpl].stg_v;
-      assign pl_stg_rob[gpl] = 8'(dut.core.ln[gpl].stg_rob);
+      assign pl_stg_rob[gpl] = ptx(16'(dut.core.ln[gpl].stg_rob));
       assign pl_iss_v[gpl]   = dut.core.ln[gpl].iss_v;
       assign pl_iss_ent[gpl] = 8'(dut.core.ln[gpl].iss_ent);
       assign pl_x[gpl]       = dut.core.ln[gpl].v & ~dut.core.redirect;   // executes this cycle
-      assign pl_rob[gpl]     = 8'(dut.core.ln[gpl].rob);
-      assign pl_m1[gpl]      = dut.core.ln[gpl].m1;   assign pl_mrob1[gpl] = 8'(dut.core.ln[gpl].mrob1);
-      assign pl_m2[gpl]      = dut.core.ln[gpl].m2;   assign pl_mrob2[gpl] = 8'(dut.core.ln[gpl].mrob2);
+      assign pl_rob[gpl]     = ptx(16'(dut.core.ln[gpl].rob));
+      assign pl_m1[gpl]      = dut.core.ln[gpl].m1;   assign pl_mrob1[gpl] = ptx(16'(dut.core.ln[gpl].mrob1));
+      assign pl_m2[gpl]      = dut.core.ln[gpl].m2;   assign pl_mrob2[gpl] = ptx(16'(dut.core.ln[gpl].mrob2));
       for (gpe = 0; gpe < PT_NI; gpe = gpe + 1) begin: e
          assign pl_iq_v[gpl*PT_NI + gpe]   = dut.core.ln[gpl].u_iq.v[gpe];
          assign pl_iq_rdy[gpl*PT_NI + gpe] = &dut.core.ln[gpl].u_iq.srdy[gpe*2 +: 2];
-         assign pl_iq_rob[gpl*PT_NI + gpe] = 8'(dut.core.ln[gpl].u_iq.e_rob[gpe]);
+         assign pl_iq_rob[gpl*PT_NI + gpe] = ptx(16'(dut.core.ln[gpl].u_iq.e_rob[gpe]));
       end
    end endgenerate
    initial if (dut.core.NI != PT_NI) $fatal(1, "tb: the pipe trace assumes %0d entries a lane scheduler, the core has %0d", PT_NI, dut.core.NI);
@@ -209,39 +214,39 @@
       end
       // the FP port: its dispatch stage, its scheduler, j_*, the lanes' handoffs, stage F and the
       // FPU's ops in flight
-      if (dut.core.stg_v_f) put(8'(dut.core.stg_rob_f), "t");
+      if (dut.core.stg_v_f) put(ptx(16'(dut.core.stg_rob_f)), "t");
       for (pj = 0; pj < dut.core.NF; pj = pj + 1)
          if (dut.core.u_iq_f.v[pj])
-            put(8'(dut.core.u_iq_f.e_rob[pj]),
+            put(ptx(16'(dut.core.u_iq_f.e_rob[pj])),
                 (dut.core.u_iq_f.iss_v && 32'(dut.core.u_iq_f.iss_ent) == pj) ? "p"
                 : (&dut.core.u_iq_f.srdy[pj*3 +: 3]) ? "s" : "w");
-      if (dut.core.j_v)     put(8'(dut.core.j_rob), "j");
-      for (pj = 0; pj < IW; pj = pj + 1) if (dut.core.hx_vv[pj]) put(8'(dut.core.hx_rob_l[pj]), "h");
-      for (pj = 0; pj < dut.core.NFQ; pj = pj + 1) if (dut.core.fq_v[pj]) put(8'(dut.core.fq_rob[pj]), "F");
-      if (dut.core.f_valid) put(8'(dut.core.f_rob), "F");
+      if (dut.core.j_v)     put(ptx(16'(dut.core.j_rob)), "j");
+      for (pj = 0; pj < IW; pj = pj + 1) if (dut.core.hx_vv[pj]) put(ptx(16'(dut.core.hx_rob_l[pj])), "h");
+      for (pj = 0; pj < dut.core.NFQ; pj = pj + 1) if (dut.core.fq_v[pj]) put(ptx(16'(dut.core.fq_rob[pj])), "F");
+      if (dut.core.f_valid) put(ptx(16'(dut.core.f_rob)), "F");
       // memory: an address waiting for M, M's fill, a load waiting to access or accessing, a store
       // waiting for its data, a result waiting in its lane's landing buffer
       for (pj = 0; pj < dut.core.LQ_N; pj = pj + 1) if (dut.core.u_lq.v[pj]) begin
-         ix = 8'(dut.core.u_lq.rob[pj]);
+         ix = ptx(16'(dut.core.u_lq.rob[pj]));
          if (dut.core.u_lq.lnd[pj]) ;                   // landed and watched: complete
          else if (dut.core.la_v[pj])                    put(ix, "m");
          else if (dut.core.u_lq.av[pj] & dut.core.u_lq.sent[pj])  put(ix, "l");
          else if (dut.core.u_lq.av[pj] & !dut.core.u_rob.done[ix]) put(ix, "k");
       end
       for (pj = 0; pj < dut.core.SQ_N; pj = pj + 1) if (dut.core.u_sq.v[pj]) begin
-         ix = 8'(dut.core.u_sq.rob[pj]);
+         ix = ptx(16'(dut.core.u_sq.rob[pj]));
          if (dut.core.sa_v[pj])                         put(ix, "m");
          else if (dut.core.u_sq.av[pj] & ~dut.core.u_sq.dv[pj]) put(ix, "y");
          else if (dut.core.u_sq.av[pj])                 put(ix, "=");
       end
-      if (dut.core.m_valid) put(8'(dut.core.m_rob_idx), "M");
+      if (dut.core.m_valid) put(ptx(16'(dut.core.m_rob_idx)), "M");
       for (pj = 0; pj < IW; pj = pj + 1)
          for (pk = 0; pk < dut.core.LBN; pk = pk + 1)
             if (pk < dut.core.lb_n[pj])
-               put(8'(dut.core.lb_rob[pj*dut.core.LBN + ((dut.core.lb_h[pj] + pk) % dut.core.LBN)]), "e");
-      if (dut.core.sy_v)  put(8'(dut.core.sy_rob), "Y");
-      if (dut.core.md_v)  put(8'(dut.core.md_rob), "v");
-      if (dut.core.mq_v)  put(8'(dut.core.mq_rob), "v");
+               put(ptx(16'(dut.core.lb_rob[pj*dut.core.LBN + ((dut.core.lb_h[pj] + pk) % dut.core.LBN)])), "e");
+      if (dut.core.sy_v)  put(ptx(16'(dut.core.sy_rob)), "Y");
+      if (dut.core.md_v)  put(ptx(16'(dut.core.md_rob)), "v");
+      if (dut.core.mq_v)  put(ptx(16'(dut.core.mq_rob)), "v");
       // a lane's multiply in flight, and what it executes this cycle
       for (pj = 0; pj < IW; pj = pj + 1) begin
          if (pl_m1[pj]) put(pl_mrob1[pj], "u");
@@ -251,8 +256,8 @@
       // a mispredicted CTI waiting for its restart (it completes at the squash or the release), and
       // the entries the kill marked dead, waiting for the release that drops them
       for (pj = 0; pj < IW; pj = pj + 1)
-         if (dut.core.lr_v[pj] & dut.core.lr_mis[pj]) put(8'(dut.core.lr_rob[pj]), "!");
-      if (dut.core.fr_v) put(8'(dut.core.fr_rob), "!");
+         if (dut.core.lr_v[pj] & dut.core.lr_mis[pj]) put(ptx(16'(dut.core.lr_rob[pj])), "!");
+      if (dut.core.fr_v) put(ptx(16'(dut.core.fr_rob)), "!");
       if (dut.core.rob_kd_v)
          for (pi = 0; pi < dut.core.ROB_DEPTH; pi = pi + 1) if (dut.core.rob_kd[pi]) put(8'(pi), "X");
       if (trace_on) for (pi = 0; pi < 256; pi = pi + 1)
@@ -281,8 +286,8 @@
       // 3. the ends of this cycle: retire, the squashes, dispatch binding a ROB index, the IR's
       // dropped group, a frontend redirect
       for (pj = 0; pj < IW; pj = pj + 1)
-         if (dut.core.rc_v[pj] && pt_v[dut.core.rc_idx[pj]]) begin
-            kan_close(pt_id[dut.core.rc_idx[pj]], pt_c[dut.core.rc_idx[pj]], 1'b0);  pt_v[dut.core.rc_idx[pj]] = 1'b0;
+         if (dut.core.rc_v[pj] && pt_v[dut.core.rc_sx[pj]]) begin
+            kan_close(pt_id[dut.core.rc_sx[pj]], pt_c[dut.core.rc_sx[pj]], 1'b0);  pt_v[dut.core.rc_sx[pj]] = 1'b0;
          end
       if (dut.core.redirect)
          for (pi = 0; pi < 256; pi = pi + 1) if (pt_v[pi]) begin kan_close(pt_id[pi], pt_c[pi], 1'b1); pt_v[pi] = 1'b0; end
@@ -292,7 +297,7 @@
       for (pj = 0; pj < IW; pj = pj + 1)
          if (dut.core.s_v[pj] && ps_v[dut.core.s_seq[pj]]) begin
             if (dut.core.s_takev[pj]) begin
-               ix = 8'(dut.core.s_rob[pj]);
+               ix = ptx(16'(dut.core.s_rob[pj]));
                if (pt_v[ix]) kan_close(pt_id[ix], pt_c[ix], 1'b1);
                pt_id[ix] = ps_id[dut.core.s_seq[pj]];  pt_c[ix] = ps_c[dut.core.s_seq[pj]];  pt_v[ix] = 1'b1;
                $fdisplay(kf, "L\t%0d\t1\trob %0d seq %0d", pt_id[ix], ix, dut.core.s_seq[pj]);   // the detail: grep a row by either

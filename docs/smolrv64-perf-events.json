@@ -77,7 +77,7 @@
   {
     "EventName": "ST_IQ",
     "EventCode": "0x0306",
-    "BriefDescription": "The queue head: lane A's scheduler, the FP FIFO and scheduler, the head-op register or the divide credit is full"
+    "BriefDescription": "The queue head: its lane's scheduler, the FP FIFO and scheduler, the head-op register or the divide credit is full"
   },
   {
     "EventName": "ST_RN",

@@ -648,19 +648,28 @@ module tb;
    end
 
    // ---- IQFULL-SIM: be:iq-full's cycles by the credit the queue head misses -------------
-   // The head is slot A, so the scheduler credit it needs is lane A's: lane A's scheduler (cr_i[0]),
-   // the head-op register (cr_l), the FP queue (cr_f) or the divide credit (cr_div). An op can miss
-   // two (a divide needs lane A's scheduler and the MD stage, a head op lane A's and the register).
-   // Of the cycles lane A's scheduler is the only credit missing, those another lane's scheduler
-   // has room in (cr_i[1..]): the cycles a head placed by queue position, not always in A, finds room.
-   reg [63:0] iq_c [0:5];   // lane A, head op, FP queue, divide; lane A alone; ...with another lane's room
+   // The scheduler credit the head needs: its lane's scheduler (cr_i[fe_hd_lane]), the head-op
+   // register (cr_l), the FP queue (cr_f) or the divide credit (cr_div). An op can miss two (a
+   // divide needs its lane's scheduler and the MD stage, a head op lane A's and the register). Of
+   // the cycles its lane's scheduler is the only credit missing, those another lane's scheduler has
+   // room in: what the lanes' rotation leaves of a full lane beside an empty one.
+   reg [63:0] iq_c [0:5];   // its lane, head op, FP queue, divide; its lane alone; ...with another lane's room
    reg [4:0]  iq_fp;
    integer    iqi;
    initial begin for (iqi = 0; iqi < 6; iqi = iqi + 1) iq_c[iqi] = 64'd0; iq_fp = 5'd0; end
    wire [15:0] iq_gc  = dut.core.fe_hd_gc;
-   wire [4:0]  iq_now = {|(dut.core.cr_i >> 1),
+   wire [IW-1:0] iq_hl = IW'(1) << dut.core.fe_hd_lane;   // the head's lane
+   // ROT-SIM: the instructions each lane dispatched, and the cycles a head op waited for lane A
+   reg [63:0] rot_n [0:IW-1];
+   reg [63:0] rot_ra;
+   initial begin for (iqi = 0; iqi < IW; iqi = iqi + 1) rot_n[iqi] = 64'd0; rot_ra = 64'd0; end
+   always @(posedge clk) if (!reset && meas) begin
+      for (iqi = 0; iqi < IW; iqi = iqi + 1) if (dut.core.s_takev[iqi]) rot_n[iqi] <= rot_n[iqi] + 64'd1;
+      if (dut.core.fe.realign) rot_ra <= rot_ra + 64'd1;
+   end
+   wire [4:0]  iq_now = {|(dut.core.cr_i & ~iq_hl),
                          iq_gc[dut.core.GC_M] & ~dut.core.cr_div, iq_gc[dut.core.GC_FC] & ~dut.core.cr_f,
-                         iq_gc[dut.core.GC_L] & ~dut.core.cr_l,   iq_gc[dut.core.GC_I]  & ~dut.core.cr_i[0]};
+                         iq_gc[dut.core.GC_L] & ~dut.core.cr_l,   iq_gc[dut.core.GC_I]  & ~|(dut.core.cr_i & iq_hl)};
    wire [4:0]  iq_f   = td_rf ? iq_fp : iq_now;
    always @(posedge clk) begin
       if (!td_rf) iq_fp <= iq_now;
@@ -786,7 +795,7 @@ module tb;
             if (!dut.core.fe.rule[k])
                dsj = (!dut.core.fe.g[0][dut.core.GC_PLAIN] || !g[dut.core.GC_PLAIN]) ? 0
                    : dut.core.fe.g[k-1][dut.core.GC_DCR] ? 2 : 1;
-            else if (g[dut.core.GC_I] && !cr[CR_IA + k]) dsj = 3;
+            else if (g[dut.core.GC_I] && !dut.core.fe.ia[k]) dsj = 3;   // its lane's (the lanes rotate)
             else if (g[dut.core.GC_LD] && !cr[CR_LD])    dsj = 4;
             else if (g[dut.core.GC_ST] && !cr[CR_ST])    dsj = 5;
             else if (g[dut.core.GC_FC] && !cr[CR_F])     dsj = 6;
@@ -888,18 +897,22 @@ module tb;
       end
    endfunction
    always @(negedge clk) if (!reset) begin : sersim
-      reg [3:0] hk;
-      hk = ser_cls(dut.core.d_insn, dut.core.d_is_amo, dut.core.d_is_csr, dut.core.d_is_fencei,
+      reg [3:0] hk, ik;
+      // the queue head's op (a held head is the op a be:serialize cycle waits on), and the IR's head
+      // op (slot A's: a head op goes alone, to lane A)
+      hk = ser_cls(dut.core.fe.h_insn, dut.core.fe.h_is_amo, dut.core.fe.h_is_csr, dut.core.fe.h_is_fencei,
+                   dut.core.fe.h_illegal | dut.core.fe.h_fault);
+      ik = ser_cls(dut.core.d_insn, dut.core.d_is_amo, dut.core.d_is_csr, dut.core.d_is_fencei,
                    dut.core.d_illegal | dut.core.d_fault);
       if (sp_v) begin                          // last cycle's class: a refill takes the one before it
          ser_kp = sp_rf ? ser_kp : sp_inf ? sp_k : hk;
          if (sp_m) begin
-            if (ser_kp >= SER_N) $fatal(1, "tb: be:serialize charged to %h, not a serialising, CSR or CBO op (c=%0d)", dut.core.d_insn, c);
+            if (ser_kp >= SER_N) $fatal(1, "tb: be:serialize charged to %h, not a serialising, CSR or CBO op (c=%0d)", dut.core.fe.h_insn, c);
             ser_c[ser_kp] = ser_c[ser_kp] + 1;
          end
       end
       sp_v = (td_k == 5'd19);  sp_rf = td_rf;  sp_inf = dut.core.ser_inflight;  sp_k = ser_k_q;  sp_m = meas;
-      if (dut.core.rn_valid & dut.core.d_ser) ser_k_q = hk;   // the IR's op dispatches now
+      if (dut.core.rn_valid & dut.core.d_ser) ser_k_q = ik;   // the IR's op dispatches now
    end
 
    // ---- FRING-SIM: the fetch stream and its predictions, printed with TOPDOWN-SIM ----------
@@ -946,7 +959,7 @@ module tb;
    always @(negedge clk) if (!reset && meas) begin
       for (iwi = 0; iwi < 64; iwi = iwi + 1)
          for (iwk = 0; iwk < dut.core.IW; iwk = iwk + 1)
-            if (im_v[iwi] && retire[iwk] && dut.core.cs_pc[dut.core.rc_idx[iwk]][38:6] == im_ln[iwi])
+            if (im_v[iwi] && retire[iwk] && dut.core.cs_pc[dut.core.rc_sx[iwk]][38:6] == im_ln[iwi])
                im_u[iwi] = 1'b1;
       if (dut.u_icache.perf_miss) begin
          if (im_v[im_wp] && !im_u[im_wp]) im_waste = im_waste + 1;
@@ -957,7 +970,7 @@ module tb;
    always @(negedge clk) if (!reset && meas) begin
       for (iwi = 0; iwi < 32; iwi = iwi + 1)
          for (iwk = 0; iwk < dut.core.IW; iwk = iwk + 1)
-            if (iw_v[iwi] && retire[iwk] && dut.core.cs_pc[dut.core.rc_idx[iwk]][38:12] == iw_pg[iwi])
+            if (iw_v[iwi] && retire[iwk] && dut.core.cs_pc[dut.core.rc_sx[iwk]][38:12] == iw_pg[iwi])
                iw_u[iwi] = 1'b1;
       if (dut.core.u_immu.start_walk) begin
          if (iw_v[iw_wp] && !iw_u[iw_wp]) iw_waste = iw_waste + 1;
@@ -1073,7 +1086,7 @@ module tb;
       if (dut.core.redirect && watch_prd_v) $display("[c=%0d] watch redirect (prd %0d still watched)", c, watch_prd);
       // retirement on any commit port
       for (ww = 0; ww < dut.core.IW; ww = ww + 1)
-         if (dut.core.rc_v[ww] && dut.core.cs_pc[dut.core.rc_idx[ww]] == watch_pc[39:0])
+         if (dut.core.rc_v[ww] && dut.core.cs_pc[dut.core.rc_sx[ww]] == watch_pc[39:0])
             $display("[c=%0d] watch COMMIT port=%0d", c, ww);
    end
    initial begin
@@ -1136,7 +1149,7 @@ module tb;
                      // the restart's state: a wedge with one pending names its branch and what holds it
                      $display("tb: restart fr_v=%b fr_rob=%0d walk run=%b end=%b kill=%b age=%0d fpu_dead=%b rob v[head]=%b done[head]=%b",
                               dut.core.fr_v, dut.core.fr_rob, dut.core.u_rob.wl_run, dut.core.u_rob.wl_end, dut.core.rob_kd_v,
-                              dut.core.kd_age, dut.core.fpu_dead, dut.core.u_rob.v[dut.core.rob_head_idx], dut.core.u_rob.done[dut.core.rob_head_idx]);
+                              dut.core.kd_age, dut.core.fpu_dead, dut.core.u_rob.v[dut.core.u_rob.hsx], dut.core.u_rob.done[dut.core.u_rob.hsx]);
                      $fatal(1, "tb: nothing retired for %0d cycles (retires=%0d, ROB head %0d, pc~%h)",
                             c - last_ret, nret, dut.core.rob_head_idx, dut.imem_addr);
                   end
@@ -1194,8 +1207,11 @@ module tb;
                al_wait, al_wait_idle, al_young, ls_st, ls_b2b);
       $display("SER-SIM be:serialize cycles by class: csr-read=%0d csr-write=%0d amo=%0d fence=%0d fence.i=%0d cbo=%0d sfence=%0d xret/ecall/ebreak/wfi/irq=%0d trap=%0d",
                ser_c[0], ser_c[1], ser_c[2], ser_c[3], ser_c[4], ser_c[5], ser_c[6], ser_c[7], ser_c[8]);
-      $display("IQFULL-SIM be:iq-full cycles by the head's missing credit (a cycle can miss two): lane-A=%0d head-op=%0d fp-queue=%0d divide=%0d | lane A's alone=%0d, of them another lane with room=%0d",
+      $display("IQFULL-SIM be:iq-full cycles by the head's missing credit (a cycle can miss two): its-lane=%0d head-op=%0d fp-queue=%0d divide=%0d | its lane's alone=%0d, of them another lane with room=%0d",
                iq_c[0], iq_c[1], iq_c[2], iq_c[3], iq_c[4], iq_c[5]);
+      $write("ROT-SIM instructions dispatched by lane:");
+      for (iqi = 0; iqi < IW; iqi = iqi + 1) $write(" %s=%0d", 8'("A" + iqi), rot_n[iqi]);
+      $display(" | cycles a head op waited for lane A=%0d", rot_ra);
       $display("DEPLD-SIM be:dep-load cycles by the load waited on: not-issued=%0d at-M=%0d dtlb-miss=%0d faulting=%0d ready=%0d held-unknown=%0d held-overlap=%0d device-head=%0d forwarding=%0d dcache-waiter=%0d dcache=%0d slow-path=%0d | landing-buffer=%0d sysq-csr=%0d amo-in-M=%0d",
                dl_c[0], dl_c[1], dl_c[2], dl_c[3], dl_c[4], dl_c[5], dl_c[6], dl_c[7], dl_c[8], dl_c[9], dl_c[10],
                dl_c[11], dl_c[12], dl_c[13], dl_c[14]);
