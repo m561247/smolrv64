@@ -1292,7 +1292,10 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
     SYSQ). The load re-executes behind
     the stores it conflicted with. The irrevocable pointer stops at it meanwhile.
   - *The wait table.* `mdw`: a 2-bit saturating counter per load-PC hash (PC[8:1], 256 entries),
-    forgotten every 4 M cycles. A load waits for older unknown addresses when its counter is 2 or
+    a distributed RAM with one write a cycle; it forgets one entry every 16 K cycles, so each
+    entry every 4 M (a step that loses its cycle to a replay or a training event waits for the
+    entry's next turn). Measured against forgetting the whole table at once: +0.05% cycles over
+    five GB5 slices, the 60 M boot +0.004% retires; never forgetting costs Navigation +0.73%. A load waits for older unknown addresses when its counter is 2 or
     3. A replay sets it to 2. The store queue reports, for every load, the cycle the last unknown
     older address comes in and whether the load overlapped it (`l_res_a`, `l_res_c`): overlap
     counts up, no overlap counts down, one event a cycle, trained the cycle after it resolves. A load that aliases rarely goes back to
@@ -1616,7 +1619,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `tq_seq`, `tq_rob`, `tq_dk`, `tq_rt` | `smolrv64_core` | 16 | 9/8/1/1 | 304 | flops | the training queue's entries as every one is compared: the redirect's seq, the retire ports' and the kill's ROB index |
 | `rob_ffr` | `smolrv64_core` | 256 (192 used) | 5 | 960 | LUTRAM | an FP op's exception flags by ROB slot: 1W (the landing result), 1R per retire port |
 | `rob_ffv` | `smolrv64_core` | 256 (192 used) | 1 | 192 | flops | the slot's FP result landed: cleared by its allocation, set by the landing |
-| `mdw` | `smolrv64_core` | 256 | 2 | 512 | flops | the memory-dependence wait table: read at dispatch by the load's PC, written by a replay and by one training event a cycle (§8) |
+| `mdw` | `smolrv64_core` | 256 | 2 | 512 | LUTRAM | the memory-dependence wait table: read at dispatch by the load's PC and by training, 1W (a replay, else one training event, else the forget's step; §8) |
 | `spl_ld`, `spl_st` | `smolrv64_core` | 16, 32 | 8+274 = 282 | 13 536 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at M's pick (§8) |
 | `u_la`, `u_sa` `wb[0..IW-1].mem` | `smolrv64_mwram` (in `smolrv64_core`) | 16, 32 a bank | 64 | 9 216 | LUTRAM | the lanes' arrived VAs, a bank per lane (1W, its lane), 1R at M's pick; `lvt` (2 bits an entry, flops) names the bank that wrote the entry last (§8) |
 | `la_v`, `sa_v` | `smolrv64_core` | 16, 32 | 1 | 48 | flops | an entry's address has arrived and M has not taken it |

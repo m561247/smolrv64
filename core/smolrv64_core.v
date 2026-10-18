@@ -1808,10 +1808,16 @@ module smolrv64_core
    // a cycle after it resolves: the event's pick and its counter's index are registered (md_*_q),
    // so the store queue's resolution flops reach a register, and the table's read, step and write
    // start from one.
+   // A distributed RAM written once a cycle: a replay, else the training event, else the forget.
+   // The table forgets one entry every 2^14 cycles, so each entry every 2^22: clearing the whole
+   // table at once would need every entry written in one cycle, i.e. flops. A forget step that
+   // loses its cycle to a replay or a training event waits for the entry's next turn (a hint).
    localparam integer MDW_B = 8;
-   reg  [2*(1 << MDW_B)-1:0] mdw;
-   reg  [21:0]               mdw_age;
-   initial begin mdw = {(2*(1 << MDW_B)){1'b0}}; mdw_age = 22'd0; end
+   localparam integer MDW_N = 1 << MDW_B;
+   (* ram_style = "distributed" *) reg [1:0] mdw [0:MDW_N-1];
+   reg  [MDW_B+13:0]         mdw_age;
+   integer                   mdi;
+   initial begin for (mdi = 0; mdi < MDW_N; mdi = mdi + 1) mdw[mdi] = 2'd0;  mdw_age = {(MDW_B+14){1'b0}}; end
    wire                      rp_fire;                           // a replay redirects now (below)
    wire [PCW-1:0]            sy_pc_w;
    wire [LQ_N-1:0]           md_ev = sq_l_res_c | sq_l_res_a;   // a load's resolution
@@ -1829,17 +1835,18 @@ module smolrv64_core
       md_a_q <= sq_l_res_a[md_i];
       md_p_q <= lq_e_pch[md_i*8 +: 8];
    end
-   wire [1:0]                md_cur = mdw[2*md_p_q +: 2];
+   wire [1:0]                md_cur = mdw[md_p_q];
    wire [1:0]                md_new = md_a_q ? ((md_cur == 2'd3) ? 2'd3 : md_cur + 2'd1)
                                              : ((md_cur == 2'd0) ? 2'd0 : md_cur - 2'd1);
    wire [MDW_B-1:0]          rp_p   = sy_pc_w[MDW_B:1];
-   assign ld_wt = (`SMOLRV64_MDSPEC == 0) ? 1'b1 : (`SMOLRV64_MDSPEC == 2) ? 1'b0 : mdw[2*gld_pc[MDW_B:1] + 1];
-   always @(posedge clk) begin
-      mdw_age <= reset ? 22'd0 : mdw_age + 22'd1;
-      if (md_v_q) mdw[2*md_p_q +: 2] <= md_new;
-      if (rp_fire) mdw[2*rp_p +: 2] <= 2'd2;                    // after the training arm: a replay wins
-      if (reset | (&mdw_age)) mdw <= {(2*(1 << MDW_B)){1'b0}};  // now and then, forget
-   end
+   wire [1:0]                md_rd  = mdw[gld_pc[MDW_B:1]];
+   assign ld_wt = (`SMOLRV64_MDSPEC == 0) ? 1'b1 : (`SMOLRV64_MDSPEC == 2) ? 1'b0 : md_rd[1];
+   wire                      mw_fg = &mdw_age[13:0];           // the forget's step
+   wire                      mw_we = rp_fire | md_v_q | mw_fg;
+   wire [MDW_B-1:0]          mw_a  = rp_fire ? rp_p : md_v_q ? md_p_q : mdw_age[MDW_B+13:14];
+   wire [1:0]                mw_d  = rp_fire ? 2'd2 : md_v_q ? md_new : 2'd0;
+   always @(posedge clk) mdw_age <= reset ? {(MDW_B+14){1'b0}} : mdw_age + 1'b1;
+   always @(posedge clk) if (mw_we) mdw[mw_a] <= mw_d;
 
    smolrv64_lq #(.NENT(LQ_N), .IDXB(LQ_IB), .PAW(56), .PBITS(RN_PBITS),
              .ROBB(ROB_IDXB), .SQIB(SQ_TB), .SEQW(SEQW), .LRAM_BASE(LBASE), .LRAM_LG2(LRAM_LG2)) u_lq
