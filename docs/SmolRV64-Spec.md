@@ -1002,8 +1002,9 @@ the lane's write register), its ROB completion, its value on the lane's snoop bu
 the store queue's data), and its result (`mul3`'s stage B, `pre_result`) into the lane's write
 register at the edge, which the PRF writes at T+3. A multiply is never in a scheduler's
 wake-at-select matrix (`e_long`): its dependents wake at its broadcast. The lane takes one
-multiply a cycle. Invariants: nothing executes in a lane's reserved slot, and the multiply is at
-`mul3`'s stage B in it.
+multiply a cycle into `mul3` (it is fully pipelined), but each multiply takes two of the lane's
+execute slots, its own and the reserved one, so a lane sustains one every two cycles. Invariants:
+nothing executes in a lane's reserved slot, and the multiply is at `mul3`'s stage B in it.
 
 **A divide** is class M at dispatch (`d_cls_m`) and issues in its slot's lane like a multiply:
 the lane reads both operands in its execute cycle and hands them, with the op's ROB index and

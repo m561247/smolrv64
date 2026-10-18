@@ -1,8 +1,8 @@
 `default_nettype none
 
-// 3-cycle pipelined RV64 multiply, 1 outstanding (start/busy/done/abort), integrated
-// as a deferred-completion unit like the divider so it is OFF the single-cycle execute
-// path. One 65x65 signed multiply covers every op (low or high half), instead of the
+// 3-cycle RV64 multiply, fully pipelined: a start every cycle, each result 3 cycles later
+// (done), a squash flushing every stage (abort). A deferred-completion unit, OFF the
+// single-cycle execute path. One 65x65 signed multiply covers every op (low or high half), instead of the
 // combinational version's three full 64x64 products -> far fewer DSPs.
 //
 //   f3: 000 MUL (low)  001 MULH  010 MULHSU  011 MULHU ;  is_w: MULW (low 32, sext)
@@ -11,7 +11,7 @@
 module mul3
   (input  wire        clk,
    input  wire        reset,
-   input  wire        start,        // begin (ignored while busy)
+   input  wire        start,        // begin a multiply (every cycle if wanted)
    input  wire        abort,        // squash: flush the pipe, no done
    input  wire [63:0] rs1,
    input  wire [63:0] rs2,
@@ -48,9 +48,7 @@ module mul3
       end
    end
 
-   // busy = the registered stages only (NOT start: start is gated by ~busy upstream,
-   // so including it would form a combinational loop). The start-cycle stall is covered
-   // by q_iss_is_mul in the scheduler's busy gate.
+   // busy: a multiply in some stage (the registered stages only, not start)
    assign busy   = v1 | v2 | v3;
 
    assign done   = v3;
