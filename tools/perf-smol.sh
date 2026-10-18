@@ -23,6 +23,8 @@
 #   perf-smol mem  ./prog      D$/I$ traffic, loads/stores, the dMMU walker                ( 8)
 #   perf-smol memcpi ./prog    the memory events, queue occupancies, fast-load latency     (13)
 #   perf-smol br   ./prog      redirect causes + the drain                                 ( 5)
+#   perf-smol hold ./prog      the dispatch hold (ST_DSP) by cause: the head's scheduler,
+#                              rename, the store and load queues, serialising              ( 8)
 #   perf-smol all  ./prog      24 of the events -- MULTIPLEXED, estimates only             (24)
 #
 # Running only the FE_* events (r0310-r0314) names no back-end wait: every one lands in
@@ -59,7 +61,7 @@ case "$SET" in
   all) EV=r0003,r0004,r0005,r0006,r0007,r0008,r0100,r0102,r0104,r0110,r0112,r0300,r0301,r0302,r0303,r0304,r0305,r0310,r0311,r0312,r0313,r0314,r0317,r0318
        echo "warning: 24 raw events > 13 counters -- perf will multiplex and every count is" >&2
        echo "         a scaled ESTIMATE.  The CPI-stack residual will not close.  Prefer 'cpi'." >&2 ;;
-  *)   echo "usage: $0 {td|tdbe|tdfe|cpi|mem|memcpi|br|hold|all} COMMAND..." >&2; exit 2 ;;
+  *)   echo "usage: $0 {td|tdbe|tdfe|cpi|hold|mem|memcpi|br|all} COMMAND..." >&2; exit 2 ;;
 esac
 
 # No sudo if the admin lowered perf_event_paranoid (see tools/perf-smol-setup.sh); fall back

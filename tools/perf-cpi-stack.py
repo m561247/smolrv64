@@ -172,14 +172,14 @@ def topdown(v, width, R):
         R.row(0, name, pc(n))
     if disp < 0 or min(bs, fe, be) < 0:
         sys.exit("error: the level-1 buckets exceed the cycles -- the event map is wrong (docs/smolrv64-perf-events.json)")
-    def sub(parent, rows):
+    def sub(parent, rows, rest_label):
         rest = parent
         for label, k in rows:
             if v.get(k) is not None:
                 R.row(1, "- " + label, pc(g(k)))
                 rest -= g(k)
         if any(v.get(k) is not None for _, k in rows):
-            R.row(1, "- the rest", pc(rest))
+            R.row(1, "- " + rest_label, pc(rest))
     have3 = tdk(v, {"bad speculation": bs, "front-end": fe, "back-end": be, "dispatching": disp}, pc, R)
     R.text("\n  level 2")
     R.row(0, "bad speculation", pc(bs))
@@ -188,11 +188,13 @@ def topdown(v, width, R):
         R.row(1, "- a resolved restart waiting (drain)", pc(drain))
         R.row(1, "- the redirect itself", pc(bs - drain))
     R.row(0, "front-end", pc(fe))
-    sub(fe, [("latency: iMMU walk / no fetch bytes", "TD_FE_LAT")])
+    sub(fe, [("latency: iMMU walk / no fetch bytes", "TD_FE_LAT")],
+        "bytes but no whole instruction, or not yet in the IR (tdfe splits)")
     R.row(0, "back-end", pc(be))
     sub(be, [("memory: a head op in M / an integer-load wait", "TD_BE_MEM"),
              ("no ROB room", "TD_BE_ROB"),
-             ("no scheduler / load / store queue room", "TD_BE_IQ")])
+             ("no scheduler / load / store queue room", "TD_BE_IQ")],
+        "rename, serialising, FP results, the held IR (tdbe splits)")
     if v.get("DPATCH") is not None:
         slots = width * cyc
         R.text("\n  slots (%d x cycles)" % width)
