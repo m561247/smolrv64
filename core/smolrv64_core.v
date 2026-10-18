@@ -431,14 +431,14 @@ module smolrv64_core
 
    // rename's ports, a field per slot (slot k at [k])
    wire [IW*RN_PBITS-1:0] rn_prs1v, rn_prs2v, rn_prs3v, rn_sprs1v, rn_sprs2v, rn_sprs3v;
-   wire [IW*RN_PBITS-1:0] rn_mprs1v, rn_mprs2v, rn_mprs3v, rn_prdv, rn_poldv;
+   wire [IW*RN_PBITS-1:0] rn_prdv, rn_poldv;
    // the walk (5.4e): the ROB's dead rows, a row a cycle, into rename
    wire [IW-1:0]          rob_wl_v;
    wire [IW*6-1:0]        rob_wl_rd;
    wire [IW*RN_PBITS-1:0] rob_wl_prd, rob_wl_pold;
    wire                   rob_wl_done;
    wire                   cf_red_fire;
-   wire [IW-1:0]          rn_lv1v, rn_lv2v, rn_lv3v, rn_byp1v, rn_byp2v, rn_byp3v;
+   wire [IW-1:0]          rn_byp1v, rn_byp2v, rn_byp3v;
    wire [IW*6-1:0]        s_rs1v, s_rs2v, s_rs3v, s_rdv;
    wire [IW-1:0]          s_rd_vv, s_takev;
    wire [IW*3-1:0]        s_shardv;
@@ -457,8 +457,6 @@ module smolrv64_core
       .r_rs1(s_rs1v), .r_rs2(s_rs2v), .r_rs3(s_rs3v), .r_rd(s_rdv), .r_rd_v(s_rd_vv), .r_shard(s_shardv),
       .r_prs1(rn_prs1v), .r_prs2(rn_prs2v), .r_prs3(rn_prs3v),
       .r_sprs1(rn_sprs1v), .r_sprs2(rn_sprs2v), .r_sprs3(rn_sprs3v),
-      .r_mprs1(rn_mprs1v), .r_mprs2(rn_mprs2v), .r_mprs3(rn_mprs3v),
-      .r_lv1(rn_lv1v), .r_lv2(rn_lv2v), .r_lv3(rn_lv3v),
       .r_byp1(rn_byp1v), .r_byp2(rn_byp2v), .r_byp3(rn_byp3v),
       .r_prd(rn_prdv), .r_pold(rn_poldv),
       // commit comes from the ROB head and the entries behind it
@@ -632,21 +630,13 @@ module smolrv64_core
    // long after it did -- which sent a later reader looking for work that was already done
    // (D9: a stale statement stops the next person from checking). The I3 assertion below
    // still cross-checks it every cycle. NWB=3, one per PRF shard, matching the write ports.
-   // READINESS QUERIES BOTH MAPS AND SELECTS AFTERWARDS.
+   // READINESS QUERIES THE MAP'S OWN READ. A source's register is the map's (rn_sprs*) unless an
+   // earlier slot of the group writes it, and then it is that slot's new register, pending by
+   // definition: so the lookup starts at the map read and r_byp* masks the 1-bit RESULT, rather
+   // than the bypassed 10-bit tag addressing the table. The map has one candidate: a total squash
+   // restores it by the sweep (smolrv64_rename), so no committed copy is read beside it.
    //
-   // It used to query the already-muxed tag: lv[rs] picked smap[rs] or rmap[rs], and THAT
-   // 9-bit result addressed the 512-deep pending array. `lv` is a late signal -- it is
-   // written every rename and cleared wholesale on a flush -- so it sat in front of a
-   // register-file-sized lookup whose output then had to reach every issue-queue entry's
-   // ready bit. That was the post-floorplan critical path: u_rename/lv_reg[15] ->
-   // u_iq_l/e_r_reg[9][2], 82% route (see docs/rtl-rules.md I2).
-   //
-   // Readiness is a pure function of `pend`, so pnd(lv ? s : m) == (lv ? pnd(s) : pnd(m)).
-   // Looking BOTH candidates up in parallel and letting lv pick the 1-bit RESULT turns a
-   // late 9-bit address mux into a late 2:1 on one wire. The map reads do not depend on lv
-   // and start immediately. Cost is three more read ports on a 1-bit-wide array.
-   //
-   // rn_prs* keeps the muxed tag: the queue payload and psmem still need the actual number,
+   // rn_prs* keeps the bypassed tag: the queue payload and psmem still need the actual number,
    // but that is a write into flops/LUTRAM, not a lookup feeding readiness.
    // The integrity log's top three bits carry the backend's invariants on the frontend's bus:
    // a writeback to a register that is not pending (a squashed op's result), a register allocated
@@ -655,33 +645,31 @@ module smolrv64_core
    wire        fpu_err;
    wire [15:0] fe_err_f;
    assign fe_err = {fpu_err, pend_err, fe_err_f[12:0]};
-   // the queries: each slot's six map candidates (rs1..rs3 speculative, then committed), then
-   // each lane's two operands (the issue check below). By file: a slot's rs1 and rs2 and a lane's
-   // operands may name either; a slot's rs3 (an FMA's) and the F FIFO head's sources name an
-   // f-register or p0, and read the FP table alone.
-   localparam integer NQ = 6*IW + 2*NL;
+   // the queries: each slot's three sources (rs1..rs3, the map's read), then each lane's two
+   // operands (the issue check below). By file: a slot's rs1 and rs2 and a lane's operands may
+   // name either; a slot's rs3 (an FMA's) and the F FIFO head's sources name an f-register or p0,
+   // and read the FP table alone.
+   localparam integer NQ = 3*IW + 2*NL;
    wire [NQ-1:0] pnd_q;
-   wire [6*IW*RN_PBITS-1:0] pnd_sq;              // slot k's six candidates at [6k..6k+5]
+   wire [3*IW*RN_PBITS-1:0] pnd_sq;              // slot k's three sources at [3k..3k+2]
    wire [IW-1:0]            pnd_av;
    wire [3*RN_PBITS-1:0]    fpq_h1;              // the F FIFO's next head's sources, for its check (below)
    wire [2:0]               fpq_h1r;             // ...and whether the table calls each ready
-   wire [4*IW*RN_PBITS-1:0] pnd_qx;              // slot k's rs1/rs2 candidates at [4k..4k+3]
-   wire [2*IW*RN_PBITS-1:0] pnd_qf;              // ...its rs3 candidates at [2k..2k+1]
-   wire [4*IW-1:0]          pnd_rx;
-   wire [2*IW-1:0]          pnd_rf;
+   wire [2*IW*RN_PBITS-1:0] pnd_qx;              // slot k's rs1/rs2 at [2k..2k+1]
+   wire [IW*RN_PBITS-1:0]   pnd_qf;              // ...its rs3 at [k]
+   wire [2*IW-1:0]          pnd_rx;
+   wire [IW-1:0]            pnd_rf;
    genvar gpq;
    generate for (gpq = 0; gpq < IW; gpq = gpq + 1) begin: pq
-      localparam integer B = 6*gpq;
-      assign pnd_qx[4*gpq*RN_PBITS +: 4*RN_PBITS] = {pnd_sq[(B+4)*RN_PBITS +: RN_PBITS], pnd_sq[(B+3)*RN_PBITS +: RN_PBITS],
-                                                     pnd_sq[(B+1)*RN_PBITS +: RN_PBITS], pnd_sq[B*RN_PBITS +: RN_PBITS]};
-      assign pnd_qf[2*gpq*RN_PBITS +: 2*RN_PBITS] = {pnd_sq[(B+5)*RN_PBITS +: RN_PBITS], pnd_sq[(B+2)*RN_PBITS +: RN_PBITS]};
-      assign pnd_q[B +: 6] = {pnd_rf[2*gpq+1], pnd_rx[4*gpq+3], pnd_rx[4*gpq+2],
-                              pnd_rf[2*gpq],   pnd_rx[4*gpq+1], pnd_rx[4*gpq]};
+      localparam integer B = 3*gpq;
+      assign pnd_qx[2*gpq*RN_PBITS +: 2*RN_PBITS] = pnd_sq[B*RN_PBITS +: 2*RN_PBITS];
+      assign pnd_qf[gpq*RN_PBITS +: RN_PBITS]     = pnd_sq[(B+2)*RN_PBITS +: RN_PBITS];
+      assign pnd_q[B +: 3] = {pnd_rf[gpq], pnd_rx[2*gpq+1], pnd_rx[2*gpq]};
    end endgenerate
    initial if ((RN_NFL != RN_NINT) | (RN_NFF != RN_NINT))
       $fatal(1, "smolrv64_core: the pending table's shards are one size: FL %0d, FF %0d, integer %0d", RN_NFL, RN_NFF, RN_NINT);
    smolrv64_pending #(.PBITS(RN_PBITS), .IDXB(RN_IDXB), .SHN(RN_NINT), .NL(NL), .NS(IW), .NWB(NWB_C), .NWBF(2),
-                      .NQ(4*IW + 2*NL), .NQF(2*IW + 3)) u_pend
+                      .NQ(2*IW + 2*NL), .NQF(IW + 3)) u_pend
      (.clk(clk), .reset(reset),
       // EVERY CANDIDATE'S PENDING BIT IS SET, TAKEN OR NOT: the set enable is the slot's own
       // valid and destination, never the dispatch take, whose
@@ -691,7 +679,7 @@ module smolrv64_core
       // and it is set again when it is taken.
       .a_v(pnd_av), .a_preg(rn_prdv),
       .w_v(wkv), .w_preg(wkp), .err(pend_err),
-      .q({l_psv, pnd_qx}),   .r({pnd_q[6*IW +: 2*NL], pnd_rx}),
+      .q({l_psv, pnd_qx}),   .r({pnd_q[3*IW +: 2*NL], pnd_rx}),
       .qf({fpq_h1, pnd_qf}), .rf({fpq_h1r, pnd_rf}),
       .flush(redirect));
 
@@ -859,11 +847,11 @@ module smolrv64_core
       wire [2:0] shard = shard_of(q_rd[5], q_is_mem, LANE);
       wire [RN_PBITS-1:0] prs1 = rn_prs1v[gs*RN_PBITS +: RN_PBITS], prs2 = rn_prs2v[gs*RN_PBITS +: RN_PBITS],
                           prs3 = rn_prs3v[gs*RN_PBITS +: RN_PBITS], prd = rn_prdv[gs*RN_PBITS +: RN_PBITS];
-      // readiness: both map candidates' pending bits, the late lv picking the RESULT; a source that
-      // is an earlier slot's new register is pending by definition
-      wire pr1 = ~rn_byp1v[gs] & (rn_lv1v[gs] ? pnd_q[6*gs]     : pnd_q[6*gs + 3]);
-      wire pr2 = ~rn_byp2v[gs] & (rn_lv2v[gs] ? pnd_q[6*gs + 1] : pnd_q[6*gs + 4]);
-      wire pr3 = ~rn_byp3v[gs] & (rn_lv3v[gs] ? pnd_q[6*gs + 2] : pnd_q[6*gs + 5]);
+      // readiness: the map read's pending bit; a source that is an earlier slot's new register
+      // is pending by definition
+      wire pr1 = ~rn_byp1v[gs] & pnd_q[3*gs];
+      wire pr2 = ~rn_byp2v[gs] & pnd_q[3*gs + 1];
+      wire pr3 = ~rn_byp3v[gs] & pnd_q[3*gs + 2];
       // A plain store's rs2 is an operand of its store-buffer entry, which watches for it itself
       // (smolrv64_sq's snoop), so the scheduler does not wait on it: the store issues on its address.
       wire [2:0] srdy = {pr3 | ~q_rs3_v, pr2 | ~q_rs2_v | st_nb, pr1 | ~q_rs1_v};
@@ -888,9 +876,8 @@ module smolrv64_core
       assign s_ld_nb[gs] = ld_nb;  assign s_st_nb[gs] = st_nb;  assign s_dcr[gs] = dcr;
       assign s_rs1v[gs*6 +: 6] = q_rs1;  assign s_rs2v[gs*6 +: 6] = q_rs2;  assign s_rs3v[gs*6 +: 6] = q_rs3;
       assign s_rdv[gs*6 +: 6] = q_rd;    assign s_rd_vv[gs] = q_rd_v;     assign s_shardv[gs*3 +: 3] = shard;
-      assign pnd_sq[(6*gs)*RN_PBITS +: 6*RN_PBITS] =
-             {rn_mprs3v[gs*RN_PBITS +: RN_PBITS], rn_mprs2v[gs*RN_PBITS +: RN_PBITS], rn_mprs1v[gs*RN_PBITS +: RN_PBITS],
-              rn_sprs3v[gs*RN_PBITS +: RN_PBITS], rn_sprs2v[gs*RN_PBITS +: RN_PBITS], rn_sprs1v[gs*RN_PBITS +: RN_PBITS]};
+      assign pnd_sq[(3*gs)*RN_PBITS +: 3*RN_PBITS] =
+             {rn_sprs3v[gs*RN_PBITS +: RN_PBITS], rn_sprs2v[gs*RN_PBITS +: RN_PBITS], rn_sprs1v[gs*RN_PBITS +: RN_PBITS]};
       // EVERY CANDIDATE'S PENDING BIT IS SET, TAKEN OR NOT (see u_pend)
       assign pnd_av[gs] = fe_dv[gs] & q_rd_v;
       assign s_srdy_hit[gs] = srdy | {wk(prs3), wk(prs2), wk(prs1)};
@@ -1442,9 +1429,9 @@ module smolrv64_core
       // structurally -- an entry is not selectable until every source is ready); a store's rs2
       // is the store queue's
       always @(posedge clk) if (!reset & iss) begin
-         if (q_rs1_v & ~pnd_q[6*IW + 2*gl])
+         if (q_rs1_v & ~pnd_q[3*IW + 2*gl])
             $fatal(1, "core: lane %0d executed with rs1 p%0d still pending (rob=%0d pc=%h)", gl, ps1, rob, q_pc);
-         if (q_rs2_v & ~pnd_q[6*IW + 2*gl + 1] & ~(q_is_store & is_lmem(q_insn)))
+         if (q_rs2_v & ~pnd_q[3*IW + 2*gl + 1] & ~(q_is_store & is_lmem(q_insn)))
             $fatal(1, "core: lane %0d executed with rs2 p%0d still pending (rob=%0d)", gl, ps2, rob);
       end
       wire sys  = is_sysq(q_insn, q_illegal, q_fault);   // a system op or a trap: the SYSQ's, nothing here

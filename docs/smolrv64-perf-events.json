@@ -82,7 +82,7 @@
   {
     "EventName": "ST_RN",
     "EventCode": "0x0307",
-    "BriefDescription": "The queue head: a rename shard is below LOWAT"
+    "BriefDescription": "The queue head: a rename shard is below LOWAT, or the map's sweep after a squash runs"
   },
   {
     "EventName": "ST_SQ",
@@ -332,7 +332,7 @@
   {
     "EventName": "TDK_BE_RN",
     "EventCode": "0x0510",
-    "BriefDescription": "top-down cause td_k = 16: back-end: a rename shard below LOWAT (be:rename)"
+    "BriefDescription": "top-down cause td_k = 16: back-end: a rename shard below LOWAT, or the map's sweep (be:rename)"
   },
   {
     "EventName": "TDK_BE_SQ",

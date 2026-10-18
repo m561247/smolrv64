@@ -208,7 +208,7 @@ module csr_file
                       HPMEV_ST_DSP = 16'h0304,   // The queue head waits for a credit other than the ROB's while M can advance and no load or FP dependency holds issue: ST_IQ + ST_RN + ST_SQ + ST_LQ + ST_SRZ
                       HPMEV_ST_ROB = 16'h0305,   // The queue head waits for ROB room
                       HPMEV_ST_IQ  = 16'h0306,   // The queue head: lane A's scheduler, the FP FIFO and scheduler, the head-op register or the divide credit is full
-                      HPMEV_ST_RN  = 16'h0307,   // The queue head: a rename shard is below LOWAT
+                      HPMEV_ST_RN  = 16'h0307,   // The queue head: a rename shard is below LOWAT, or the map's sweep after a squash runs
                       HPMEV_ST_SQ  = 16'h0308,   // The queue head holds a store and has no store-queue credit (none while a head op is in flight or in the IR)
                       HPMEV_ST_LQ  = 16'h0309,   // The queue head holds a load and has no load-queue credit (none while a head op is in flight or in the IR)
                       HPMEV_ST_SRZ = 16'h030a,   // The queue head: a serializing op drains or is in flight, a CSR op waits for the one before it, or a CBO waits for older addresses (the rest of ST_DSP)
@@ -261,7 +261,7 @@ module csr_file
                      HPMEV_TDK_BE_DEPLD = 16'h050d,   // top-down cause td_k = 13: back-end: issue waits on an integer load, AMO or CSR read (be:dep-load)
                      HPMEV_TDK_BE_DEPFP = 16'h050e,   // top-down cause td_k = 14: back-end: issue waits on an FP, FP-load, FP-port or divide result (be:dep-fp)
                      HPMEV_TDK_BE_IQ    = 16'h050f,   // top-down cause td_k = 15: back-end: no scheduler credit at the queue head (be:iq-full)
-                     HPMEV_TDK_BE_RN    = 16'h0510,   // top-down cause td_k = 16: back-end: a rename shard below LOWAT (be:rename)
+                     HPMEV_TDK_BE_RN    = 16'h0510,   // top-down cause td_k = 16: back-end: a rename shard below LOWAT, or the map's sweep (be:rename)
                      HPMEV_TDK_BE_SQ    = 16'h0511,   // top-down cause td_k = 17: back-end: no store-queue credit (be:sq-full)
                      HPMEV_TDK_BE_LQ    = 16'h0512,   // top-down cause td_k = 18: back-end: no load-queue credit (be:lq-full)
                      HPMEV_TDK_BE_SER   = 16'h0513,   // top-down cause td_k = 19: back-end: serialisation, a CSR op or a CBO waiting (be:serialize)

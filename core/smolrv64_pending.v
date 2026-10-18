@@ -37,8 +37,8 @@ module smolrv64_pending
     // ---- read: "is this register ready?" Readiness is a pure function of the tables (no
     // same-cycle write-forward: the schedulers cover a producer writing back in the cycle its
     // consumer is written, and a forward here would close a loop through readiness), so a
-    // query of either map candidate and a late pick of the RESULT is the same as a query of
-    // the picked candidate. Read ports are the one thing duplication genuinely buys. A query
+    // query of the rename map's read with a late mask of the RESULT (an earlier slot's bypass)
+    // is the same as a query of the bypassed register. Read ports are the one thing duplication genuinely buys. A query
     // of either file reads both tables and its number's shard[2] picks; a query that names an
     // f-register or p0 (an absent source) reads the FP table alone.
     input  wire [NQ*PBITS-1:0]   q,

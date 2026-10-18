@@ -62,7 +62,7 @@ BACKEND = [("ST_MEM", "a head op in M, or a wait on an integer load"), ("ST_FPU"
 OCCUPANCY = [("ST_DIV", "a divide in the MD stage"), ("ST_MUL", "a multiply in flight in a lane")]
 # ST_IQ..ST_SRZ are the disjoint parts of ST_DSP (the `hold` set): a breakdown underneath it.
 DSP_SUB = [("ST_IQ", "lane A's scheduler, the FP queue, the head-op register or the divide credit"),
-           ("ST_RN", "rename: a shard below LOWAT"),
+           ("ST_RN", "rename: a shard below LOWAT, or the map's sweep after a squash"),
            ("ST_SQ", "no store-queue credit"), ("ST_LQ", "no load-queue credit"),
            ("ST_SRZ", "serialising, a CSR op or a CBO waiting")]
 # The memory events: cycle counts printed as shares of all cycles (they overlap ST_MEM and each
@@ -86,7 +86,7 @@ TDK = {"bad speculation": [("TDK_REDIRECT", "a redirect"), ("TDK_DRAIN", "a reso
        "back-end": [("TDK_BE_MMEM", "M holds a head op"), ("TDK_BE_ROB", "no ROB room"),
                     ("TDK_BE_DEPLD", "a wait on an integer load / AMO / CSR read"),
                     ("TDK_BE_DEPFP", "a wait on an FP / FP-load / divide result"),
-                    ("TDK_BE_IQ", "no scheduler credit"), ("TDK_BE_RN", "rename below LOWAT"),
+                    ("TDK_BE_IQ", "no scheduler credit"), ("TDK_BE_RN", "rename below LOWAT or sweeping"),
                     ("TDK_BE_SQ", "no store-queue credit"), ("TDK_BE_LQ", "no load-queue credit"),
                     ("TDK_BE_SER", "serialising / CSR / CBO"), ("TDK_BE_HELD", "the IR held after a redirect or resteer")],
        "dispatching": [("TDK_OK1", "1 instruction"), ("TDK_OK2", "2"), ("TDK_OK3", "3"), ("TDK_OK4", "4")]}

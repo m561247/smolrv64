@@ -627,20 +627,22 @@ module tb;
    // cycle with them, so a cause's split covers exactly its cycles.
    wire td_rf = dut.core.td_rf;
 
-   // ---- RENAME-SIM: be:rename's cycles by the shards whose free list is low --------------
-   // Rename stalls while any list is low, so a cycle can count in several: which shard's size a
-   // rename stall is about. Shards 0..IW-1 are lanes A.., SH_FL takes the FP loads' landings and
-   // SH_FF the F stage's results; the report lists the shards this width uses.
-   reg [63:0] rn_low [0:7];
-   reg [7:0]  rn_fp;
+   // ---- RENAME-SIM: be:rename's cycles by the shards whose free list is low, and the sweep ---
+   // Rename stalls while any list is low or the map's sweep runs, so a cycle can count in several:
+   // which shard's size a rename stall is about. Shards 0..IW-1 are lanes A.., SH_FL takes the FP
+   // loads' landings and SH_FF the F stage's results; the report lists the shards this width uses.
+   // [8] is the sweep after a squash (smolrv64_rename x_busy).
+   reg [63:0] rn_low [0:8];
+   reg [8:0]  rn_fp;
    integer rli;
-   initial begin for (rli = 0; rli < 8; rli = rli + 1) rn_low[rli] = 64'd0; rn_fp = 8'd0; end
-   wire [7:0] rn_f = td_rf ? rn_fp : dut.core.rn_shard_low;
+   initial begin for (rli = 0; rli < 9; rli = rli + 1) rn_low[rli] = 64'd0; rn_fp = 9'd0; end
+   wire [8:0] rn_now = {dut.core.u_rename.x_busy, dut.core.rn_shard_low};
+   wire [8:0] rn_f = td_rf ? rn_fp : rn_now;
    always @(posedge clk) begin
-      if (!td_rf) rn_fp <= dut.core.rn_shard_low;
+      if (!td_rf) rn_fp <= rn_now;
       if (!reset && meas && (td_k == 5'd16)) begin
-         if (rn_f == 8'd0) $fatal(1, "tb: a be:rename cycle with no shard low (c=%0d)", c);
-         for (rli = 0; rli < 8; rli = rli + 1)
+         if (rn_f == 9'd0) $fatal(1, "tb: a be:rename cycle with no shard low and no sweep (c=%0d)", c);
+         for (rli = 0; rli < 9; rli = rli + 1)
             if (rn_f[rli]) rn_low[rli] <= rn_low[rli] + 64'd1;
       end
    end
@@ -1216,14 +1218,16 @@ module tb;
                fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd);
       $display("BTB-SIM trainings=%0d carried-hit=%0d | against the slots now: duplicate allocations=%0d stale rewrites=%0d",
                bt_n, bt_car, bt_dup, bt_stale);
-      $write("RENAME-SIM be:rename cycles each shard is low (a cycle can count in several):");
+      $write("RENAME-SIM be:rename cycles each shard is low, and the sweep (a cycle can count in several):");
       for (rli = 0; rli < 8; rli = rli + 1)
          if (dut.core.sh_used(3'(rli))) begin
             if (rli < IW)                   $write(" lane-%c=%0d", 8'("A" + rli), rn_low[rli]);
             else if (rli == 32'(SH_FL))     $write(" fp-loads=%0d", rn_low[rli]);
             else                            $write(" f-stage=%0d", rn_low[rli]);
          end
+      $write(" sweep=%0d", rn_low[8]);
       $display("");
+      $display("SWEEP-SIM squashes=%0d dirty=%0d exact=%0d walk-only=%0d pick-cycles=%0d busy-cycles=%0d", dut.core.u_rename.sw_n, dut.core.u_rename.sw_d, dut.core.u_rename.sw_x, dut.core.u_rename.sw_w, dut.core.u_rename.sw_g, dut.core.u_rename.sw_c);
       $display("MEMDEP loads blocked only by unknown older store addresses: resolved clear=%0d (waited %0d cycles), resolved aliased=%0d (waited %0d cycles)",
                dut.core.u_sq.sp_clear, dut.core.u_sq.sp_clear_cyc, dut.core.u_sq.sp_alias, dut.core.u_sq.sp_alias_cyc);
       $display("SQ  queued-load starts=%0d, past an older store=%0d (%0d.%0d%%) | alias-held cycles=%0d (%0d.%0d%%) | mean occupancy=%0d.%02d entries | full cycles=%0d",

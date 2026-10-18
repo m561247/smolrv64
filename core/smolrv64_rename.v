@@ -1,6 +1,6 @@
 `default_nettype none
 
-// Register renaming for smolrv64_core: SMAP/RMAP + lv[], and one free list per PRF shard. It
+// Register renaming for smolrv64_core: SMAP/RMAP + dirty[], and one free list per PRF shard. It
 // gives smolrv64_prf a known destination shard, which is the only cheap way to get more than
 // one write port (see smolrv64_prf.v's header).
 //
@@ -8,14 +8,20 @@
 // map -- a 32 x PBITS parallel load.  On this FPGA that fanout is the failure mode: the
 // restore value has to reach every map flop.  Instead:
 //
-//     read     : lv[a] ? SMAP[a] : RMAP[a]
-//     rename   : SMAP[rd] <= p_new ;  lv[rd] <= 1
-//     commit   : RMAP[rd] <= p_commit
-//     rollback : lv[*] <= 0                      -- ONE control signal, 64 flops
+//     read     : SMAP[a]
+//     rename   : SMAP[rd] <= p_new ;  dirty[rd] <= 1
+//     commit   : RMAP[rd] <= p_commit ;  a cycle later dirty[rd] <= 0 if SMAP[rd] is still p_commit
+//     walk     : SMAP[rd] <= pold, each entry back to a mispredicted branch (dirty[rd] <= 1)
+//     squash   : THE SWEEP -- each dirty register rewritten from RMAP, IW a cycle, rename stalled
 //
-// Correct because RMAP holds committed state: after a flush every read falls through to it,
-// and stale SMAP entries are simply invisible until re-renamed.  Only lv[] is flops; SMAP
-// and RMAP are arrays the tools infer as LUTRAM, one copy per slot (see the map below).
+// A register that is not dirty maps in SMAP to its committed mapping (asserted every cycle), so
+// a total squash rewrites only what an uncommitted rename or walk touched: 6 registers on the
+// 60 M boot (4.4 of them exactly), 2.4 cycles of IW from the squash's own cycle, mostly under
+// the redirect's own freeze. Measured against restoring in one cycle: -0.09% retires on the
+// 60 M boot, Navigation +0.07% and SQLite +0.00% cycles (walking back to the head would cost
+// +1.4-2.3%). Every read sees SMAP alone, so no consumer looks up a second, committed
+// candidate. SMAP and RMAP are arrays the tools infer as LUTRAM, one copy per writer (see the
+// map below); dirty is 64 flops.
 //
 // THE FREE LISTS.  One per shard, because a physical register belongs to exactly one shard.
 // This departs from docs/Area-Efficient-Scalar-OoO.md 9.1, which derives the tail from a
@@ -55,14 +61,10 @@ module smolrv64_rename
     input  wire [IW-1:0]         r_rd_v,       // writes a register (x0 destinations excluded)
     input  wire [IW*3-1:0]       r_shard,      // destination shard, from the instruction class
     output wire [IW*PBITS-1:0]   r_prs1, r_prs2, r_prs3,
-    // The two candidates and the bit that chooses between them, so a consumer whose result
-    // does not depend on WHICH map won can look both up in parallel and select afterwards.
-    // `lv` is late; the map read is not. The speculative candidate is the MAP's: an earlier
-    // slot's bypass is applied at r_prs* only, and r_byp* says the source IS an earlier slot's
-    // new register (pending by definition).
-    output wire [IW*PBITS-1:0]   r_sprs1, r_sprs2, r_sprs3,   // speculative (smap)
-    output wire [IW*PBITS-1:0]   r_mprs1, r_mprs2, r_mprs3,   // committed  (rmap)
-    output wire [IW-1:0]         r_lv1, r_lv2, r_lv3,         // lv[rs]: 1 = take the speculative
+    // The map's own read, before an earlier slot's bypass, so a lookup whose answer the bypass
+    // decides anyway (readiness) starts at the map read; r_byp* says the source IS an earlier
+    // slot's new register (pending by definition).
+    output wire [IW*PBITS-1:0]   r_sprs1, r_sprs2, r_sprs3,
     output wire [IW-1:0]         r_byp1, r_byp2, r_byp3,      // slot 0's are 0
     output wire [IW*PBITS-1:0]   r_prd,        // the newly allocated physical register
     // the mapping slot k's destination displaces (an earlier slot's new register when the group
@@ -76,7 +78,7 @@ module smolrv64_rename
     input  wire [IW*PBITS-1:0]   c_prd,        // becomes the committed mapping
 
     // ---- recovery ----
-    input  wire                  flush,        // total squash: everything uncommitted dies
+    input  wire                  flush,        // total squash: everything uncommitted dies; the sweep follows
     // The walk: a ROB row a cycle from the tail back to a mispredicted branch, column k on [k].
     // Each entry it names had renamed rd into prd and displaced pold; the map takes pold back
     // (the oldest column winning in a row) and prd's free list steps its head back over prd.
@@ -89,7 +91,7 @@ module smolrv64_rename
     input  wire                  w_chk,
 
     // ---- back pressure and instrumentation ----
-    output wire                  stall,        // ANY shard low -- see the note below
+    output wire                  stall,        // ANY shard low, or the sweep running -- see the notes below
     output wire [7:0]            shard_low);   // per shard, for the hpm counters
 
 `include "smolrv64_shards.vh"
@@ -101,20 +103,32 @@ module smolrv64_rename
    localparam integer NR = NS + IW;                      // ...and each slot's destination
 
    // ---- the map -------------------------------------------------------------------
-   // IW COPIES OF THE SPECULATIVE MAP, one write port each: slot k writes copy k, and
-   // newer[reg] says which copy holds the latest mapping. A LUTRAM has one write port, and IW
-   // renames per cycle need IW; duplicating the array by WRITER is the map's version of the
-   // PRF's sharding rule. The COMMITTED map likewise: commit k writes copy k, and rnewer[reg]
-   // says which is current.
-   reg [63:0]      lv;
+   // IW COPIES OF THE SPECULATIVE MAP, one write port each: slot k writes copy k (as do the
+   // walk's column k and the sweep's lane k), and newer[reg] says which copy holds the latest
+   // mapping. A LUTRAM has one write port, and IW renames per cycle need IW; duplicating the
+   // array by WRITER is the map's version of the PRF's sharding rule. The COMMITTED map
+   // likewise: commit k writes copy k, and rnewer[reg] says which is current. RMAP is read only
+   // by the commits (the displaced mapping) and the sweep.
+   reg [63:0]      dirty;
    reg [NB-1:0]    newer  [0:63];
    reg [NB-1:0]    rnewer [0:63];
    // every source read: slot k's rs1, rs2, rs3 at [3k], [3k+1], [3k+2] and its rd at [NS+k];
    // and every commit's displaced mapping, rmap[c_rd[k]], read before the commit's own write lands
    wire [5:0]       sa [0:NR-1];
    wire [PBITS-1:0] sv [0:IW*NR-1];          // copy c's speculative mapping of read p
-   wire [PBITS-1:0] mv [0:IW*NR-1];          // ...and its committed one
    wire [PBITS-1:0] pv [0:IW*IW-1];          // copy c's committed mapping of commit k's rd
+   wire [PBITS-1:0] xv [0:IW*IW-1];          // copy c's committed mapping of the sweep's lane k register
+   wire [PBITS-1:0] cv [0:IW*IW-1];          // copy c's speculative mapping of the register commit k wrote
+   // the sweep's write, a cycle after its pick (below): lane k rewrites register x_a[k]
+   reg  [IW-1:0]    x_v;
+   reg  [5:0]       x_a [0:IW-1];
+   wire [PBITS-1:0] x_d [0:IW-1];            // ...with its committed mapping
+   reg              x_busy;                  // the sweep runs (rename stalls)
+   // a commit's dirty test, a cycle after the commit (registered: c_rd comes off the ROB's array)
+   wire [IW-1:0]    cc_hit;                  // commit k's register is still its newest mapping
+   reg  [IW-1:0]    cc_v;
+   reg  [5:0]       cc_rd  [0:IW-1];
+   reg  [PBITS-1:0] cc_prd [0:IW-1];
    genvar gk, gc, gp;
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: src
       assign sa[3*gk]     = r_rs1[gk*6 +: 6];
@@ -123,8 +137,8 @@ module smolrv64_rename
       assign sa[NS + gk]  = r_rd[gk*6 +: 6];
    end endgenerate
 `ifndef SYNTHESIS
-   // The walk's check (w_chk): a flat copy of the committed map, and r's committed mapping after
-   // this cycle's commits (the last commit of r wins, as rnewer's).
+   // The checks' committed map: a flat copy, and r's committed mapping after this cycle's commits
+   // (the last commit of r wins, as rnewer's).
    reg [PBITS-1:0] cm [0:63];
    integer cmi;
    initial for (cmi = 0; cmi < 32; cmi = cmi + 1) begin
@@ -153,40 +167,51 @@ module smolrv64_rename
       end
       wire sw = r_valid[gc] & r_rd_v[gc];            // this slot's allocation
       wire cw = c_valid[gc] & c_rd_v[gc];
-      // one write statement: this slot's rename, or the walk's column gc (never both: rename is
-      // frozen while the walk runs, asserted)
-      wire [5:0]       sw_a = sw ? r_rd[gc*6 +: 6] : w_rd[gc*6 +: 6];
-      wire [PBITS-1:0] sw_d = sw ? r_prd[gc*PBITS +: PBITS] : w_pold[gc*PBITS +: PBITS];
-      always @(posedge clk) if (!reset & (sw | w_v[gc])) smap[sw_a] <= sw_d;
+      // one write statement: this slot's rename, the walk's column gc, or the sweep's lane gc
+      // (never two: rename is frozen while the walk or the sweep runs, and the sweep runs after a
+      // squash, which ends the walk; asserted)
+      wire [5:0]       wa = sw ? r_rd[gc*6 +: 6] : w_v[gc] ? w_rd[gc*6 +: 6] : x_a[gc];
+      wire [PBITS-1:0] wd = sw ? r_prd[gc*PBITS +: PBITS] : w_v[gc] ? w_pold[gc*PBITS +: PBITS] : x_d[gc];
+      always @(posedge clk) if (!reset & (sw | w_v[gc] | x_v[gc])) smap[wa] <= wd;
       always @(posedge clk) if (!reset & cw) rmap[c_rd[gc*6 +: 6]] <= c_prd[gc*PBITS +: PBITS];
-      always @(posedge clk) if (!reset & sw & w_v[gc])
-         $fatal(1, "smolrv64_rename: slot %0d renames while the walk writes its map copy", gc);
+      always @(posedge clk) if (!reset & ((sw & w_v[gc]) | ((sw | w_v[gc]) & x_v[gc])))
+         $fatal(1, "smolrv64_rename: map copy %0d is written twice (rename %b, walk %b, sweep %b)", gc, sw, w_v[gc], x_v[gc]);
 `ifndef SYNTHESIS
-      // every register this copy holds the current mapping of, against the committed map
+      // every register this copy holds the current mapping of, against the committed map: RMAP
+      // after the walk; SMAP after the walk (every register: a mapping the walk did not restore
+      // was committed or clean), and SMAP whenever no sweep is in flight for a register not dirty
       integer ck;
-      always @(posedge clk) if (!reset & w_chk)
-         for (ck = 0; ck < 64; ck = ck + 1) begin
-            if (rnewer[ck] == gc && rmap[ck] != cm[ck])
-               $fatal(1, "smolrv64_rename: rmap copy %0d holds %h for r%0d, the committed map %h", gc, rmap[ck], ck, cm[ck]);
-            if (lv[ck] && newer[ck] == gc && smap[ck] != cm_after[ck])
-               $fatal(1, "smolrv64_rename: after the walk r%0d maps to %h (copy %0d), committed %h", ck, smap[ck], gc, cm_after[ck]);
-         end
+      always @(posedge clk) if (!reset) begin
+         if (w_chk)
+            for (ck = 0; ck < 64; ck = ck + 1) begin
+               if (rnewer[ck] == gc && rmap[ck] != cm[ck])
+                  $fatal(1, "smolrv64_rename: rmap copy %0d holds %h for r%0d, the committed map %h", gc, rmap[ck], ck, cm[ck]);
+               if (newer[ck] == gc && smap[ck] != cm_after[ck])
+                  $fatal(1, "smolrv64_rename: after the walk r%0d maps to %h (copy %0d), committed %h", ck, smap[ck], gc, cm_after[ck]);
+            end
+         if (~x_busy & ~(|x_v))
+            for (ck = 0; ck < 64; ck = ck + 1)
+               if (!dirty[ck] && newer[ck] == gc && smap[ck] != cm[ck])
+                  $fatal(1, "smolrv64_rename: r%0d is clean but maps to %h (copy %0d), committed %h", ck, smap[ck], gc, cm[ck]);
+      end
+      // SWEEP-SIM: the registers this copy holds the newest mapping of where it is not the committed one
+      reg [63:0] sw_neq;
+      integer    sk;
+      always @* for (sk = 0; sk < 64; sk = sk + 1) sw_neq[sk] = (newer[sk] == gc) && (smap[sk] != cm_after[sk]);
 `endif
       for (gp = 0; gp < NR; gp = gp + 1) begin: rd
          assign sv[gc*NR + gp] = smap[sa[gp]];
-         assign mv[gc*NR + gp] = rmap[sa[gp]];
       end
       for (gp = 0; gp < IW; gp = gp + 1) begin: pd
          assign pv[gc*IW + gp] = rmap[c_rd[gp*6 +: 6]];
+         assign xv[gc*IW + gp] = rmap[x_a[gp]];
+         assign cv[gc*IW + gp] = smap[cc_rd[gp]];
       end
    end endgenerate
-   // each source's candidates: the copy newer/rnewer names (a wire per read: rule F4)
-   wire [PBITS-1:0] sp [0:NR-1], mp [0:NR-1];
-   wire [NR-1:0]    lvs;
+   // each source's mapping: the copy newer names (a wire per read: rule F4)
+   wire [PBITS-1:0] sp [0:NR-1];
    generate for (gp = 0; gp < NR; gp = gp + 1) begin: sel
-      assign sp[gp]  = sv[newer[sa[gp]] * NR + gp];
-      assign mp[gp]  = mv[rnewer[sa[gp]] * NR + gp];
-      assign lvs[gp] = lv[sa[gp]];
+      assign sp[gp] = sv[newer[sa[gp]] * NR + gp];
    end endgenerate
    // Reads are of the PRE-rename mapping, including a source equal to the slot's own
    // destination: rd is written at the clock edge, so the reads see the old value. An earlier
@@ -207,14 +232,13 @@ module smolrv64_rename
       assign byp[gp] = b;  assign np[gp] = n;
    end endgenerate
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: out
-      assign r_sprs1[gk*PBITS +: PBITS] = sp[3*gk];      assign r_mprs1[gk*PBITS +: PBITS] = mp[3*gk];
-      assign r_sprs2[gk*PBITS +: PBITS] = sp[3*gk + 1];  assign r_mprs2[gk*PBITS +: PBITS] = mp[3*gk + 1];
-      assign r_sprs3[gk*PBITS +: PBITS] = sp[3*gk + 2];  assign r_mprs3[gk*PBITS +: PBITS] = mp[3*gk + 2];
-      assign r_lv1[gk] = lvs[3*gk];  assign r_lv2[gk] = lvs[3*gk + 1];  assign r_lv3[gk] = lvs[3*gk + 2];
+      assign r_sprs1[gk*PBITS +: PBITS] = sp[3*gk];
+      assign r_sprs2[gk*PBITS +: PBITS] = sp[3*gk + 1];
+      assign r_sprs3[gk*PBITS +: PBITS] = sp[3*gk + 2];
       assign r_byp1[gk] = byp[3*gk];  assign r_byp2[gk] = byp[3*gk + 1];  assign r_byp3[gk] = byp[3*gk + 2];
-      assign r_prs1[gk*PBITS +: PBITS] = byp[3*gk]     ? np[3*gk]     : lvs[3*gk]     ? sp[3*gk]     : mp[3*gk];
-      assign r_prs2[gk*PBITS +: PBITS] = byp[3*gk + 1] ? np[3*gk + 1] : lvs[3*gk + 1] ? sp[3*gk + 1] : mp[3*gk + 1];
-      assign r_prs3[gk*PBITS +: PBITS] = byp[3*gk + 2] ? np[3*gk + 2] : lvs[3*gk + 2] ? sp[3*gk + 2] : mp[3*gk + 2];
+      assign r_prs1[gk*PBITS +: PBITS] = byp[3*gk]     ? np[3*gk]     : sp[3*gk];
+      assign r_prs2[gk*PBITS +: PBITS] = byp[3*gk + 1] ? np[3*gk + 1] : sp[3*gk + 1];
+      assign r_prs3[gk*PBITS +: PBITS] = byp[3*gk + 2] ? np[3*gk + 2] : sp[3*gk + 2];
       // the destination's displaced mapping: the youngest earlier slot writing it, else the map's
       reg              db;
       reg [PBITS-1:0]  dn;
@@ -224,8 +248,85 @@ module smolrv64_rename
          for (dj = 0; dj < gk; dj = dj + 1)
             if (writes[dj] & (r_rd[dj*6 +: 6] == r_rd[gk*6 +: 6])) begin db = 1'b1;  dn = r_prd[dj*PBITS +: PBITS]; end
       end
-      assign r_pold[gk*PBITS +: PBITS] = db ? dn : lvs[NS + gk] ? sp[NS + gk] : mp[NS + gk];
+      assign r_pold[gk*PBITS +: PBITS] = db ? dn : sp[NS + gk];
+      // the sweep's committed mapping, and whether commit k's register is still its newest mapping
+      assign x_d[gk] = xv[rnewer[x_a[gk]] * IW + gk];
+      assign cc_hit[gk] = cc_v[gk] & (cv[newer[cc_rd[gk]] * IW + gk] == cc_prd[gk]);
    end endgenerate
+
+   // ---- THE SWEEP -----------------------------------------------------------------
+   // A total squash (flush, or reset) leaves SMAP holding uncommitted mappings in the dirty
+   // registers, and RMAP the committed state after the squash's own commits. From the squash's
+   // own cycle on, the sweep takes the IW lowest dirty registers each cycle and clears their bits,
+   // the k-th to lane k; a cycle later lane k's register is rewritten into SMAP copy k (newer :=
+   // k) from the RMAP copy rnewer names (any copy may hold any register). The picks come from
+   // flops (lane k isolates the lowest dirty register the lanes before it left), and the write's
+   // address is the registered pick (rule I6). Starting in the squash's cycle, the first writes
+   // land while dispatch is frozen for the redirect anyway (redirect_q), so a squash with at most
+   // 2*IW dirty registers costs no cycle. Nothing commits meanwhile (the squash
+   // emptied the ROB) and nothing renames (the stall holds the queue's pop; a group popped
+   // before the squash is the squash's to drop), so neither map moves under it. x_busy drops
+   // after the last pick, so the queue may pop in the cycle the last write lands and the group
+   // renames after it.
+   localparam integer NG = (64 + IW - 1) / IW;       // a bound on the sweep's cycles
+   wire          x_on = (flush | x_busy) & ~reset;
+   reg  [IW-1:0] p_v;                                // lane k has a register...
+   reg  [6*IW-1:0] p_a;                              // ...the k-th lowest dirty one
+   reg  [63:0]   p_m;                                // the picked registers
+   // lane k isolates the lowest set bit of what the lanes before it left (d & -d: one carry
+   // chain a lane), so the picks are IW short chains, not a count across all 64 registers
+   wire [63:0]   p_d [0:IW];                         // what lane k picks from
+   wire [63:0]   p_1 [0:IW-1];                       // lane k's pick, one-hot
+   assign p_d[0] = dirty;
+   genvar gx;
+   generate for (gx = 0; gx < IW; gx = gx + 1) begin: xp
+      assign p_1[gx]     = p_d[gx] & (~p_d[gx] + 64'd1);
+      assign p_d[gx + 1] = p_d[gx] & ~p_1[gx];
+   end endgenerate
+   integer       xl, xr;
+   always @* begin
+      p_m = dirty & ~p_d[IW];  p_v = {IW{1'b0}};  p_a = {(6*IW){1'b0}};
+      for (xl = 0; xl < IW; xl = xl + 1) begin
+         p_v[xl] = |p_1[xl];
+         for (xr = 0; xr < 64; xr = xr + 1)
+            if (p_1[xl][xr]) p_a[xl*6 +: 6] = p_a[xl*6 +: 6] | xr[5:0];
+      end
+   end
+   integer xk;
+   always @(posedge clk)
+      for (xk = 0; xk < IW; xk = xk + 1) begin
+         x_v[xk] <= x_on & p_v[xk];
+         x_a[xk] <= p_a[xk*6 +: 6];
+      end
+
+   // ---- the dirty registers: what the sweep must rewrite ------------------------------
+   // Set by a rename and by the walk (the walk's restored mapping may still be uncommitted);
+   // cleared as the sweep picks, and a cycle after a commit when the committed register is still
+   // the register's newest mapping (no younger rename of it in flight). A stale set bit costs a
+   // sweep step, never a wrong mapping; reset marks every register (the total squash's sweep
+   // then restores the map whatever a runtime reset interrupted).
+   reg  [63:0]   dirty_n;
+   integer       dk;
+   always @* begin
+      dirty_n = dirty;
+      if (x_on) dirty_n = dirty_n & ~p_m;
+      for (dk = 0; dk < IW; dk = dk + 1)
+         if (cc_hit[dk]) dirty_n[cc_rd[dk]] = 1'b0;
+      for (dk = 0; dk < IW; dk = dk + 1)
+         if (r_valid[dk] & r_rd_v[dk]) dirty_n[r_rd[dk*6 +: 6]] = 1'b1;
+      for (dk = 0; dk < IW; dk = dk + 1)
+         if (w_v[dk]) dirty_n[w_rd[dk*6 +: 6]] = 1'b1;
+      if (reset) dirty_n = {{63{1'b1}}, 1'b0};        // x0 is never renamed
+   end
+   always @(posedge clk) begin
+      dirty  <= dirty_n;
+      x_busy <= reset | (x_on & (|dirty_n));          // dirty registers left after this cycle's picks
+      for (dk = 0; dk < IW; dk = dk + 1) begin
+         cc_v[dk]   <= ~reset & c_valid[dk] & c_rd_v[dk];
+         cc_rd[dk]  <= c_rd[dk*6 +: 6];
+         cc_prd[dk] <= c_prd[dk*PBITS +: PBITS];
+      end
+   end
 
    // ---- free lists, one per shard ---------------------------------------------------
    // Shard s's list is the generate block fl[s]: a circular FIFO of the shard's free indices,
@@ -423,7 +524,9 @@ module smolrv64_rename
    initial low = {NSH{1'b0}};
    always @(posedge clk) low <= low_n;
    assign shard_low = low;
-   assign stall = |low;
+   // ...and while the sweep runs: x_busy is a register too, and it drops after the sweep's last
+   // pick, so a group popped then renames after the last write lands.
+   assign stall = |low | x_busy;
 
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: pr
       wire [2:0] sh = r_shard[gk*3 +: 3];
@@ -433,8 +536,8 @@ module smolrv64_rename
    // THE FREE LISTS AND THE MAPS ARE INITIALISED BY THE BITSTREAM AND NEVER RESET. No RAM can be
    // written at every address in one cycle, and every one of them is one-write/few-read once
    // running: the free lists are circular FIFOs read at the head and written at the tail, and the
-   // maps are read at the sources (+rmap[c_rd]) and written at one index. On an FPGA the contents
-   // come from configuration for free (rule I7).
+   // maps are read at a few indices (the sources, rmap[c_rd], the sweep's) and written at one per
+   // copy. On an FPGA the contents come from configuration for free (rule I7).
    //
    // THE VALUES ONLY HAVE TO BE A PERMUTATION of the shard's indices; which permutation is
    // irrelevant, because a free list only ever moves entries around. Identity is used.
@@ -445,41 +548,86 @@ module smolrv64_rename
    // [h, t) still hold exactly the free set. The pointers are therefore not reset either --
    // resetting them over stale slots would republish already-allocated registers as free,
    // handing out DUPLICATE physical registers. Reset instead does what `flush` does (h := hc),
-   // which reclaims everything renamed but uncommitted, so nothing leaks across a restart.
+   // which reclaims everything renamed but uncommitted, so nothing leaks across a restart, and
+   // the sweep then restores SMAP from RMAP (every register dirty).
    //
-   // x0 is safe across all of this: x0 destinations are excluded from rename (r_rd_v), so
-   // rmap[0]/smap[0] are never written and keep the {SH_IE,0} that smolrv64_prf hardwires to
-   // read zero.
+   // x0 is safe across all of this: x0 destinations are excluded from rename (r_rd_v) and x0 is
+   // never dirty, so rmap[0]/smap[0] are never written and keep the {SH_IE,0} that smolrv64_prf
+   // hardwires to read zero.
    integer j;
    initial begin
-      lv = 64'd0;
+      dirty = 64'd0;  x_busy = 1'b0;  x_v = {IW{1'b0}};  cc_v = {IW{1'b0}};
       for (j = 0; j < 64; j = j + 1) begin newer[j] = {NB{1'b0}}; rnewer[j] = {NB{1'b0}}; end
    end
 
-   always @(posedge clk) begin
-      // RESET IS A TOTAL SQUASH, which is exactly what `flush` already means here: drop the
-      // speculative map (lv) and roll the allocation heads back (in fl[*] above).
-      if (reset) begin
-         lv <= 64'd0;
-      end else begin
-         // ---- commit: the copy each commit wrote is current; a later commit of the same
-         // register this cycle wins (the loop's order)
-         for (j = 0; j < IW; j = j + 1)
-            if (c_w[j]) rnewer[c_rd[j*6 +: 6]] <= j[NB-1:0];
-         // ---- rename: likewise for the speculative map. A flush in the same cycle squashes
-         // the group; lv is cleared wholesale so the map write becomes invisible either way.
-         for (j = 0; j < IW; j = j + 1)
-            if (alloc[j]) begin newer[r_rd[j*6 +: 6]] <= j[NB-1:0];  lv[r_rd[j*6 +: 6]] <= 1'b1; end
-         // ---- the walk: pold is speculative state like any rename (lv set), the oldest
-         // column's winning within a row (the loop runs youngest first)
-         for (j = IW - 1; j >= 0; j = j - 1)
-            if (w_v[j]) begin newer[w_rd[j*6 +: 6]] <= j[NB-1:0];  lv[w_rd[j*6 +: 6]] <= 1'b1; end
-         // ---- rollback
-         if (flush) lv <= 64'd0;
-      end
+   // which copy holds each register's current mapping (dirty and the sweep are above)
+   always @(posedge clk) if (!reset) begin
+      // ---- commit: the copy each commit wrote is current; a later commit of the same
+      // register this cycle wins (the loop's order)
+      for (j = 0; j < IW; j = j + 1)
+         if (c_w[j]) rnewer[c_rd[j*6 +: 6]] <= j[NB-1:0];
+      // ---- rename: likewise for the speculative map. A flush in the same cycle squashes the
+      // group; its registers are dirty, and the sweep rewrites them.
+      for (j = 0; j < IW; j = j + 1)
+         if (alloc[j]) newer[r_rd[j*6 +: 6]] <= j[NB-1:0];
+      // ---- the walk: the oldest column's winning within a row (the loop runs youngest first)
+      for (j = IW - 1; j >= 0; j = j - 1)
+         if (w_v[j]) newer[w_rd[j*6 +: 6]] <= j[NB-1:0];
+      // ---- the sweep: lane k wrote copy k
+      for (j = 0; j < IW; j = j + 1)
+         if (x_v[j]) newer[x_a[j]] <= j[NB-1:0];
    end
 
+`ifndef SYNTHESIS
+   // SWEEP-SIM: at each total squash, in its cycle (what the sweep starts from): the dirty
+   // registers, the exactly dirty ones (newest mapping not the committed one after the squash's
+   // commits), the dirty ones only the walk set and not exactly dirty; the cycles the sweep picks
+   // in, and those it stalls rename.
+   wire [63:0] sw_or [0:IW];
+   assign sw_or[0] = 64'd0;
+   generate for (gc = 0; gc < IW; gc = gc + 1) begin: swo
+      assign sw_or[gc + 1] = sw_or[gc] | cp[gc].sw_neq;
+   end endgenerate
+   reg [63:0] ws;                       // set by the walk, not since by a rename or a pick
+   reg        fl_q;
+   reg [63:0] sw_n, sw_d, sw_x, sw_w, sw_g, sw_c;
+   integer    sq, sg;
+   reg [7:0]  pd, px, pw;
+   initial begin ws = 64'd0; fl_q = 1'b0; sw_n = 0; sw_d = 0; sw_x = 0; sw_w = 0; sw_g = 0; sw_c = 0; end
+   always @* begin
+      pd = 0; px = 0; pw = 0;
+      for (sq = 0; sq < 64; sq = sq + 1) begin
+         pd = pd + {7'd0, dirty[sq]};
+         px = px + {7'd0, sw_or[IW][sq]};
+         pw = pw + {7'd0, dirty[sq] & ws[sq] & ~sw_or[IW][sq]};
+      end
+   end
+   always @(posedge clk) begin
+      fl_q <= ~reset & flush;
+      if (x_on) ws <= ws & ~p_m;
+      for (sq = 0; sq < IW; sq = sq + 1) if (r_valid[sq] & r_rd_v[sq]) ws[r_rd[sq*6 +: 6]] <= 1'b0;
+      for (sq = 0; sq < IW; sq = sq + 1) if (w_v[sq]) ws[w_rd[sq*6 +: 6]] <= 1'b1;
+      if (!reset && flush) begin
+         sw_n <= sw_n + 1;  sw_d <= sw_d + pd;  sw_x <= sw_x + px;  sw_w <= sw_w + pw;
+      end
+      if (x_on && (|p_v)) sw_g <= sw_g + 1;
+      if (!reset && x_busy) sw_c <= sw_c + 1;
+   end
+`endif
    // ---- invariants: ALWAYS ON, per docs/rtl-rules.md ---------------------------------
+   // The sweep holds the map: nothing renames or walks while it runs, and it ends within a pick
+   // per group (nothing sets a dirty bit meanwhile).
+   reg [7:0] x_age;
+   initial x_age = 8'd0;
+   always @(posedge clk) x_age <= (reset | ~x_busy) ? 8'd0 : x_age + 8'd1;
+   always @(posedge clk) if (!reset) begin
+      if ((|alloc) & x_busy)
+         $fatal(1, "smolrv64_rename: a group renames while the sweep runs (dirty %h)", dirty);
+      if ((|w_v) & x_busy)
+         $fatal(1, "smolrv64_rename: the walk writes the map while the sweep runs");
+      if (x_age > NG + 2)
+         $fatal(1, "smolrv64_rename: the sweep has run %0d cycles (dirty %h)", x_age, dirty);
+   end
    integer ik;
    always @(posedge clk) if (!reset) begin
       for (ik = 0; ik < IW; ik = ik + 1) begin
