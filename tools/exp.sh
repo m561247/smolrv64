@@ -7,6 +7,7 @@
 #   BASE=<tag> tools/exp.sh ...     # compare against another tag (default: main-<main's hash>)
 #   tools/exp.sh -t <tag> [<base>]  # print a finished experiment's table again
 #   SET=sp tools/exp.sh <tag> ...   # GB5's single-core section as SimPoints instead (fastmac only)
+#   RUNS='pdf boot60m' tools/exp.sh <tag> ...   # only the named runs of the set
 #
 # The set: the 60 M Linux lockstep (retires; the lockstep is the correctness check), Dhrystone and
 # CoreMark in lockstep (workloads/rvbench, cycles), the four pi checkpoint slices and the five GB5
@@ -88,6 +89,10 @@ fm_runs="nav:gb5:140000000000 html5:gb5:154500000000 sqlite:gb5:161000000000 pdf
 if [ "${SET:-}" = sp ]; then   # a point's checkpoint is sp/<instret>.ckpt
    m5_runs=""
    fm_runs=$(awk -F'\t' '$1 == "point" {printf " sp%s:gb5:sp/%s", $5, $5}' "$here/workloads/gb5/simpoints.txt")
+fi
+if [ -n "${RUNS:-}" ]; then   # only the runs named
+   keep() { local r o=""; for r in $1; do [[ " $RUNS " == *" ${r%%:*} "* ]] && o="$o $r"; done; echo "$o"; }
+   m5_runs=$(keep "$m5_runs");  fm_runs=$(keep "$fm_runs")
 fi
 runner "\$HOME/$M5_ROOT/$tag" "\$HOME/$M5_ROOT/$tag.out" "$M5_CK" 9 $m5_runs |
    ssh $M5_OPT $M5_IP "rm -rf $M5_ROOT/$tag.out; cat > $M5_ROOT/$tag.sh; chmod +x $M5_ROOT/$tag.sh; (nohup $M5_ROOT/$tag.sh > /dev/null 2>&1 < /dev/null &)" || exit 1
