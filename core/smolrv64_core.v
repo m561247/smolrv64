@@ -110,6 +110,7 @@ module smolrv64_core
     input  wire [63:0]             dmem_rdata_c,
     input  wire                    dmem_rbusy,      // the last read awaits the cache's accept
     output wire                    dmem_wen,
+    output wire                    dmem_wfsm,    // the LSU's state machine writes: the device address is the write's
     output wire [AW-1:0]           dmem_waddr,
     output wire [AW-1:0]           dmem_wabase,  // access base PA (device decode)
     output wire [63:0]             dmem_wdata,
@@ -627,7 +628,7 @@ module smolrv64_core
    // FP result had to be held whenever a load landed in the same cycle -- with several FP
    // ops in flight that collision stops being rare, and holding stops being cheap.
    // A plain store leaves M with no result AND no memory effect yet -- the buffer owns both.
-   // Its ROB slot is completed by sq_c_take above, in the cycle memory is actually written.
+   // Its ROB slot completes at its commit (sq_k_take), and the store queue writes memory after.
    wire m_st_nb   = m_is_store & ~m_is_amo & ~m_is_cbo;
    wire m_dead    = dead(m_rob_idx);             // the kill: M's op is younger than a mispredict
    wire m_sq_fill = m_valid & m_st_nb & lsu_xo_v & ~m_dead;
@@ -1628,7 +1629,8 @@ module smolrv64_core
    // gated by head_block, so a redirect fires only when the redirecting instruction is at
    // the ROB head -- every older instruction has therefore already retired, and a store
    // retires only when this buffer has written it. Everything still live is younger.
-   wire                sq_d_ready, sq_c_v, sq_c_unc, sq_ld_older;
+   wire                sq_d_ready, sq_c_v, sq_c_unc, sq_c_fast, sq_ld_older;
+   wire                lsu_sp_busy, lsu_sp_done;   // the LSU's store register: holds a store / the D$ takes it
    wire                sq_ld_block;      // instrumentation: candidate held by an alias
    wire [LQ_N-1:0]     sq_l_older;       // per load, registered: an older store is live
    wire [LQ_N-1:0]     sq_l_block_live;  // the live alias block, the oracle for the registered copy the queue reads
@@ -1687,14 +1689,21 @@ module smolrv64_core
    // A committed store drains whenever the port is free: it was released by the ROB's
    // irrevocable pointer (sq_k_take below), not by reaching the head, so the head no
    // longer sits on every store for the ~6 cycles the cache takes.
-   wire sq_go     = sq_c_v;
+   // A PLAIN STORE TO MEMORY does not take the port: the LSU's store register takes it from the
+   // queue (sq_sp_go) and writes it to the D$ while loads use the port. Any other store (uncached,
+   // a device's, one straddling two doublewords) takes the port and the LSU's state machine, once
+   // the store register is empty, so stores reach memory in program order.
+   wire sq_go     = sq_c_v & ~sq_c_fast & ~lsu_sp_busy;
+   wire sq_sp_go  = sq_c_v &  sq_c_fast & (~lsu_sp_busy | lsu_sp_done);
    wire                sq_kc_v;   wire [ROB_IDXB-1:0] sq_kc_rob;  wire [55:0] sq_kc_addr;
    wire [63:0]         sq_kc_data; wire [1:0] sq_kc_size;   // the cosim's store-data check
    wire [ROB_IDXB-1:0] rob_irr_idx;  wire rob_irr_v;
    wire sq_k_take = sq_kc_v & rob_irr_v & (sq_kc_rob == rob_irr_idx);
-   // The queue pops at the HANDOFF to the LSU (pt_ack for a store), which registers the data;
-   // the LSU holds the store until the D$ takes it and nothing can pass it there.
-   wire sq_c_take = lsu_pt_ack & pt_store;
+   // The queue HANDS a store OFF to the store register or the port, and FREES it when memory has
+   // it: at the store register's write, so until then younger loads are ordered against a live
+   // entry; at the port's handoff, since the state machine holds the store and nothing passes it.
+   wire sq_c_take = sq_sp_go | (lsu_pt_ack & pt_store);
+   wire sq_c_done = lsu_sp_done | (lsu_pt_ack & pt_store);
 
    // ---- THE WALKER: a queue entry M handed over untranslated ----
    // The store queue's first uncommitted entry, else the load queue's candidate, whichever has no
@@ -1750,10 +1759,10 @@ module smolrv64_core
       .uf_any(sq_uf_any), .ar(sa_v), .pk_v(sq_pk_v), .pk_idx(sq_pk_idx), .pk_seq(sq_pk_seq),
       .a_v(m_sq_fill), .a_idx(m_sq_tag), .a_addr(lsu_xo_pa), .a_va(m_addr[38:0]), .a_tv(lsu_xo_tv | lsu_xo_flt),
       .a_flt(lsu_xo_flt), .a_fc(lsu_xo_fc), .a_size(m_mem_size),
-      .a_unc(lsu_xo_unc), .r_v(sq_r_v), .r_preg(sq_r_preg), .r_data(prf_sq),
+      .a_unc(lsu_xo_unc), .a_mem(lsu_xo_mem), .r_v(sq_r_v), .r_preg(sq_r_preg), .r_data(prf_sq),
       .wb_v(wkv), .wb_preg(wkp), .wb_data({wb_fe, wb_ld, l_wbv}),
       .c_v(sq_c_v), .c_rob(sq_c_rob), .c_addr(sq_c_addr), .c_data(sq_c_data),
-      .c_size(sq_c_size), .c_unc(sq_c_unc), .c_take(sq_c_take),
+      .c_size(sq_c_size), .c_unc(sq_c_unc), .c_fast(sq_c_fast), .c_take(sq_c_take), .c_done(sq_c_done),
       .kc_v(sq_kc_v), .kc_rob(sq_kc_rob), .kc_addr(sq_kc_addr), .kc_data(sq_kc_data), .kc_size(sq_kc_size), .k_take(sq_k_take),
       // THE ALIAS TEST LIVES HERE, not at issue: smolrv64_lq exports its entries, smolrv64_sq keeps
       // a conflict matrix updated wherever an address arrives, and issue reads a flop.
@@ -1767,7 +1776,7 @@ module smolrv64_core
       .l_vpn(lq_e_vpn), .l_fill_vpn({m_bare, m_addr[38:12]}), .a_bare(m_bare), .l_fwd(sq_l_fwd),
       .f_go(lq_x_take & lq_x_fwd), .f_lix(lq_x_idx), .f_data(sq_f_data),
       .k_v(sq_k_v), .k_idx(sq_k_idx), .k_va(sq_k_va),
-      .w_v(lsu_wk_done & wk_st), .w_idx(sq_k_idx), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc),
+      .w_v(lsu_wk_done & wk_st), .w_idx(sq_k_idx), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
       .f_v(sq_f_v), .f_rob(sq_f_rob), .f_fc(sq_f_fc), .f_pc(sq_f_pc), .f_seq(sq_f_seq),
       .occupancy(sq_occ), .flush(redirect), .kd_v(rob_kd_v), .kh(rob_kh), .kb(rob_kb), .kmask(sq_kmask));
@@ -2272,6 +2281,8 @@ module smolrv64_core
       .req_xlate(m_st_nb | m_ld_nb), .req_early(lq_b_early), .xo_pa(lsu_xo_pa), .xo_unc(lsu_xo_unc), .xo_mem(lsu_xo_mem), .xo_v(lsu_xo_v), .xo_flt(lsu_xo_flt), .xo_fc(lsu_xo_fc),
       .xo_early(lsu_xo_early),
       .pt_v(pt_v), .pt_store(pt_store),
+      .sp_go(sq_sp_go), .sp_pa(sq_c_addr), .sp_size(sq_c_size), .sp_data(sq_c_data),
+      .sp_busy(lsu_sp_busy), .sp_done(lsu_sp_done),
       .pt_pa(pt_store ? sq_c_addr : lq_x_pa), .pt_size(pt_store ? sq_c_size : lq_x_size),
       .pt_data(sq_c_data), .pt_signed(lq_x_signed), .pt_fp(lq_x_fp),
       .pt_unc(pt_store ? sq_c_unc : lq_x_unc), .pt_done(lsu_pt_done),
@@ -2299,7 +2310,7 @@ module smolrv64_core
       .mem_rdata(dmem_rdata), .mem_rvalid(dmem_rvalid),
       .mem_rfast(dmem_rfast), .mem_rtag(dmem_rtag), .mem_rvalid_c(dmem_rvalid_c),
       .mem_rtag_resp(dmem_rtag_resp), .mem_rdata_c(dmem_rdata_c), .mem_rbusy(dmem_rbusy),
-      .mem_wen(dmem_wen), .mem_waddr(dmem_waddr), .mem_wabase(dmem_wabase), .mem_wdata(dmem_wdata),
+      .mem_wen(dmem_wen), .mem_wfsm(dmem_wfsm), .mem_waddr(dmem_waddr), .mem_wabase(dmem_wabase), .mem_wdata(dmem_wdata),
       .mem_wmask(dmem_wmask), .mem_wuncached(dmem_wuncached),
       .mem_cbo(dmem_cbo), .mem_cbo_zero(dmem_cbo_zero), .mem_cbo_keep(dmem_cbo_keep),
       .mem_wready(dmem_wready), .mem_waccept(dmem_waccept), .mem_wroom(dmem_wroom),

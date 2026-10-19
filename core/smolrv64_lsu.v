@@ -68,6 +68,16 @@ module smolrv64_lsu
     input  wire            pt_signed,      // load formatting
     input  wire            pt_fp,
     input  wire            pt_unc,         // the uncached bit decided at translate time
+    // THE STORE REGISTER: a committed plain store to memory (cached, inside one doubleword), handed
+    // off by smolrv64_sq (sp_go) and written to the D$ without the state machine, so the port stays
+    // free for loads. It writes when the state machine does not and the D$'s store queue has room
+    // (sp_done, when smolrv64_sq frees the entry: until then the store is still a live entry there).
+    input  wire            sp_go,
+    input  wire [55:0]     sp_pa,
+    input  wire [1:0]      sp_size,
+    input  wire [63:0]     sp_data,
+    output wire            sp_busy,        // it holds a store
+    output wire            sp_done,        // ...and the D$ takes it this cycle
     // STORE-TO-LOAD FORWARDING: the port's load takes its bytes from an older queued store that
     // covers them (fw_data, read in the start cycle), not from the D$. It starts as a fast load
     // and lands as one, in the first cycle the D$ returns nothing; two wait at most (fw_busy).
@@ -151,6 +161,7 @@ module smolrv64_lsu
     input  wire [63:0]     mem_rdata_c,
     input  wire            mem_rbusy,      // a read before this cycle's is not yet accepted by the cache
     output wire            mem_wen,
+    output wire            mem_wfsm,       // ...and the state machine writes (a device's write is only ever this)
     output wire [AW-1:0]   mem_waddr,
     output wire [AW-1:0]   mem_wabase,   // the access base PA (pa_q), NOT the per-beat address
     output wire [63:0]     mem_wdata,
@@ -527,8 +538,38 @@ module smolrv64_lsu
    // nb_q, NOT nb: the queue pops at the handoff, so the port's size names the NEXT entry
    // while this store is presented (the first version wrote an `sd` with a one-byte mask).
    wire [7:0] st_mask = (8'd1 << nb_q) - 8'd1;
-   assign mem_wen       = st_go | amo_go;
-   assign mem_waddr     = {{(AW-56){1'b0}}, (st2_go ? pa2_q : pa_q)};
+   // the store register (see its ports): a store a cycle, one at a time behind the state machine's
+   reg         sp_v;  reg [55:0] sp_a;  reg [63:0] sp_wd;  reg [7:0] sp_wm;
+   initial sp_v = 1'b0;
+   wire        sp_on = sp_v & ~(st_go | amo_go);
+   assign sp_busy = sp_v;
+   assign sp_done = sp_on & mem_wroom;
+   always @(posedge clk) begin
+      if (reset) sp_v <= 1'b0;
+      else if (sp_go) sp_v <= 1'b1;
+      else if (sp_done) sp_v <= 1'b0;
+      if (sp_go) begin
+         sp_a  <= sp_pa & ~56'd7;
+         sp_wd <= sp_data << {sp_pa[2:0], 3'b000};
+         case (sp_size)
+            2'd0: sp_wm <= 8'h01 << sp_pa[2:0];
+            2'd1: sp_wm <= 8'h03 << sp_pa[2:0];
+            2'd2: sp_wm <= 8'h0f << sp_pa[2:0];
+            default: sp_wm <= 8'hff;
+         endcase
+      end
+   end
+   always @(posedge clk) if (!reset) begin
+      if (sp_go & sp_v & ~sp_done)
+         $fatal(1, "smolrv64_lsu: a store handed to the store register while it still holds one (pa %h)", sp_a);
+      if (sp_go & ((({1'b0, sp_pa[2:0]} + (4'd1 << sp_size)) > 4'd8) | ~((sp_pa >= LSU_DRAM_BASE) | (sp_pa[55:LRAM_LG2] == LRAM_BASE[55:LRAM_LG2]))))
+         $fatal(1, "smolrv64_lsu: the store register takes only a store to memory inside one doubleword (pa %h size %0d)", sp_pa, sp_size);
+      if (sp_v & ((st == S_ARD) | amo_go | (st_go & run_cbo)))
+         $fatal(1, "smolrv64_lsu: the store register holds a store under an atomic or a CBO (state %0d)", st);
+   end
+   assign mem_wen       = st_go | amo_go | sp_on;
+   assign mem_wfsm      = st_go | amo_go;
+   assign mem_waddr     = {{(AW-56){1'b0}}, (sp_on ? sp_a : st2_go ? pa2_q : pa_q)};
    // The access BASE, distinct from mem_waddr's per-beat address. A straddling store's second
    // beat addresses pa2_q, but straddling requires xl_can, which requires pa_dram -- so a
    // DEVICE access is NEVER in S_ST2. soc_top decodes devices from this base, which keeps
@@ -536,17 +577,19 @@ module smolrv64_lsu
    // was the startpoint of the worst path in the design at 6 ns,
    //   FSM_onehot_st[3] -> st2_go -> is_uart_w -> dmem_wready -> lsu_done -> redirect
    //                    -> iMMU tag compare -> u_bp/ycorr_qv
-   assign mem_wabase    = {{(AW-56){1'b0}}, pa_q};
+   assign mem_wabase    = {{(AW-56){1'b0}}, pa_q};   // the state machine's: only its writes reach a device
    // Store data is placed at its byte offset inside the aligned word; the straddling
    // remainder starts at byte 0 of the next word.
-   assign mem_wdata     = amo_go ? a_wdata
+   assign mem_wdata     = sp_on  ? sp_wd
+                        : amo_go ? a_wdata
                         : st2_go ? (eff_st_data >> sh_up)
                                  : (eff_st_data << sh_dn);
-   assign mem_wmask     = amo_go ? a_wmask
+   assign mem_wmask     = sp_on  ? sp_wm
+                        : amo_go ? a_wmask
                         : run_cbo ? 8'd0                              // CBO carries no data
                         : st2_go  ? (st_mask >> (4'd8 - {1'b0, boff_q}))
                                   : (st_mask << boff_q);
-   assign mem_wuncached = nc_q & ~run_cbo;
+   assign mem_wuncached = nc_q & ~run_cbo & ~sp_on;
    assign mem_cbo       = st_go & run_cbo;
    assign mem_cbo_zero  = mem_cbo & req_cbo_zero;
    assign mem_cbo_keep  = mem_cbo & req_cbo_keep;
@@ -911,7 +954,7 @@ module smolrv64_lsu
          // sequence may not contain a store, so the only way to clear a live reservation is
          // an OLDER buffered store draining after the LR executed -- and that store is one
          // dynamic instruction, gone once it commits, so the retry succeeds.
-         if (st_go && st_fin && rsv_v && (own_pt_st || (req_vaddr[38:3] == rsv_w)))
+         if (rsv_v && ((st_go && st_fin && (own_pt_st || (req_vaddr[38:3] == rsv_w))) || sp_done))
             rsv_v <= 1'b0;
       end
    end

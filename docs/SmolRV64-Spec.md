@@ -1193,13 +1193,24 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   cycles; `rv_dcache` takes a read every cycle and has 8 MSHRs.
 - **A plain store and a plain load leave M without touching memory.** Their M pass only
   TRANSLATES; the PA is filled into `smolrv64_sq` (stores) or `smolrv64_lq` (loads) and M is released
-  on `xo_v`. Memory is reached later through the one pre-translated port `pt_*`, shared by
-  the draining store and the load queue, the store winning: a store drains only once the ROB
-  has COMMITTED it (§6, the irrevocable pointer), which means every older op is done, so it
-  is older than any load still queued and it frees the port immediately. The store queue is
-  thus SENIOR to retirement (2026-09-04): a committed store's ROB slot completes and retires
-  while its bytes are still in the queue, and the queue keeps the entry until the LSU drains
-  it (`c_take`). Two consequences, both asserted: a redirect flushes only the UNCOMMITTED
+  on `xo_v`. Memory is reached later. A load goes through the one pre-translated port `pt_*`; a
+  plain store to memory (cached, inside one doubleword: the entry's `c_fast`, a flop set when its
+  address arrives) goes to the LSU's **store register**, which writes it to the D$ beside the
+  port's loads; any other store (uncached, a device's, one straddling two doublewords) takes the
+  port and the LSU's state machine, the store winning, once the store register is empty, so stores
+  reach memory in program order. A store drains only once the ROB has COMMITTED it (§6, the
+  irrevocable pointer), which means every older op is done. The store queue is thus SENIOR to
+  retirement (2026-09-04): a committed store's ROB slot completes and retires while its bytes are
+  still in the queue, and the queue keeps the entry until memory has it. It HANDS a store OFF
+  (`c_take`, at its handoff pointer) and FREES it (`c_done`, at its head): at the store register's
+  write, so a younger load is ordered against a live entry until the D$ holds the store (the D$
+  then holds a load to the line of any store it has queued); at the port's handoff, since nothing
+  passes a store the state machine holds. At most one store waits between the two (asserted).
+  Measured on the GB5 checkpoint slices (§11.2; Navigation, HTML5, SQLite, PDF Rendering, Camera,
+  50 M retires after 20 M of warm-up) against the port shared by both: **-5.48%** of their cycles
+  (PDF -16.77%, HTML5 -4.53%, SQLite -2.63%, Navigation -1.42%, Camera -1.43%), pi -0.69%, the
+  60 M Linux lockstep +1.86% retires; a load ready for the port had waited behind a store in 16%
+  (SQLite) to 52% (PDF) of the cycles. Two consequences, both asserted: a redirect flushes only the UNCOMMITTED
   tail of the queue (`tailc <= kcc`; a committed store is architecturally done and survives),
   and "every older store is visible" is no longer implied by the ROB head or by `rob_empty`
   -- the serialization drain (`drained`), the CBO start in M (`m_cbo_wait`) and a load's
@@ -1240,9 +1251,10 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   registered `mem_q`: a plain store to a device (bare M-mode has no PBMT, so no NC bit) ends at
   the device's own accept instead. In the cycle a store is taken the LSU loads the next queued
   store straight into `S_ST` (`take_next`), so stores stream at one a cycle.
-  The queue pops at the HANDOFF (`c_take` = `pt_ack` for a store) and the LSU registers the
-  data (`st_data_q`); nothing can pass a store parked in the LSU, since every access goes
-  through its FSM. Two classes wait for COMPLETION instead, `wr_cpl`, which
+  The store register takes its store the same way (`wr_room`), one a cycle, and writes only
+  when the state machine does not; its writes are only ever memory, so the SoC's device address,
+  decode and write strobes follow the state machine's write (`dmem_wfsm`) and its own base. Two
+  classes wait for COMPLETION instead, `wr_cpl`, which
   the D$ raises only for them: a CBO, whose flush must be in memory before the doorbell store
   behind it, and an uncached write, whose bytes must be in DDR before a later device write
   starts the DMA that reads them. The plain write's `wr_ack` is a counter pulse nobody waits
@@ -1686,8 +1698,8 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `u_pa` `wb[0..1].mem` | `smolrv64_mwram` (in `smolrv64_lq`) | 16 a bank | 56 | 1 792 | LUTRAM | the load queue's PA, a bank per writer (M's fill, the walker's answer), 3R (the start's entry, the landing's two candidates); `lvt` (a bit an entry, flops) names the writer |
 | `pcm` | `smolrv64_lq` | 16 | 39 | 624 | LUTRAM | a load's PC: 1W dispatch, 1R the fault pick; `pch` (16 × 8 flops) keeps its wait-table bits, which every entry reports |
 | `om` | `smolrv64_lq` | 16 | 16 | 256 | flops | the load queue's program order: an entry's row names the entries older than it, written at its allocation (the row the live entries, its column cleared); every "oldest of these" reads it |
-| `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the drain's head, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
-| `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the drain's head; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
+| `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the handoff entry, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
+| `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the handoff entry; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
 | `u_q` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_frontend`) | 8 x 2 | 279 | 4 464 | LUTRAM | a decoder a bank: the bundle register's slot landing in the bank is rotated to it raw and decoded there, so each bank writes its own decoder's record (`BYBANK`); the three heads read. The decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 2*PCW+PDW+SEQW+158`, the immediate and a fault's address stored as the payload stores them), its dispatch class (`gc`) included, so the queue head feeds the IR with no logic but the record |
 
 Each PRF shard now has **its own write address** (`wa_ie`/`wa_ld`/`wa_fe`), which is §7 of

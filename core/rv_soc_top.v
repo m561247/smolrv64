@@ -142,6 +142,7 @@ module rv_soc_top #(
    wire                dmem_cbo, dmem_cbo_zero, dmem_cbo_keep;  // Zicbom/Zicboz cache maintenance
    wire [63:0]         dmem_rdata;
    wire [63:0]         dmem_wabase;   // store base PA, unmuxed by the straddle beat
+   wire                dmem_wfsm;     // the LSU's state machine writes (its store register writes only memory)
    wire                dmem_rvalid, dmem_wready, dmem_waccept, dmem_idle, ifence;
    wire                dc_wr_room;
    wire                dmem_rfast, dmem_rvalid_c, dmem_rbusy;      // the tagged fast load path (C4a)
@@ -166,7 +167,7 @@ module rv_soc_top #(
       .dmem_rdata(dmem_rdata), .dmem_rvalid(dmem_rvalid),
       .dmem_rfast(dmem_rfast), .dmem_rtag(dmem_rtag), .dmem_rvalid_c(dmem_rvalid_c),
       .dmem_rtag_resp(dmem_rtag_resp), .dmem_rdata_c(dmem_rdata_c), .dmem_rbusy(dmem_rbusy),
-      .dmem_wen(dmem_wen), .dmem_waddr(dmem_waddr), .dmem_wabase(dmem_wabase),
+      .dmem_wen(dmem_wen), .dmem_wfsm(dmem_wfsm), .dmem_waddr(dmem_waddr), .dmem_wabase(dmem_wabase),
       .dmem_wdata(dmem_wdata), .dmem_wmask(dmem_wmask),
       .dmem_wuncached(dmem_wuncached),
       .dmem_cbo(dmem_cbo), .dmem_cbo_zero(dmem_cbo_zero), .dmem_cbo_keep(dmem_cbo_keep),
@@ -197,21 +198,23 @@ module rv_soc_top #(
    //     (dmem_wen & is_<dev>_w) ? dmem_waddr : dmem_raddr
    // which put a 64-bit masked compare between the LSU's combinational store address
    // (dmem_waddr, straight off pa2_q) and the device's address port -- three times over,
-   // for CLINT, PLIC and virtio.  The LSU is SINGLE-OUTSTANDING: mem_ren is asserted only
-   // in S_LD/S_LD2/S_ARD and mem_wen only in S_ST/S_ST2/S_AWR, so a read and a write are
-   // never in flight together and the write-qualification was never carrying information.
-   // Selected once, applied at one site; the invariant is asserted below, not assumed.
+   // for CLINT, PLIC and virtio.  The LSU's STATE MACHINE is single-outstanding: mem_ren is
+   // asserted only in S_LD/S_LD2/S_ARD and its writes (dmem_wfsm) only in S_ST/S_ST2/S_AWR, so
+   // its read and its write are never in flight together. The LSU's store register writes too,
+   // beside a read, but only memory (never a device, asserted where it takes a store), so the
+   // device address, the decode and every device's write strobe follow the state machine's write
+   // (dmem_wfsm) and its own base. Selected once, applied at one site; asserted below.
    // dmem_wabase, NOT dmem_waddr: the per-beat address is (st2_go ? pa2_q : pa_q), and that
    // mux select was the startpoint of the design's worst path at 6 ns -- it reached the device
    // decode's 64-bit compares, then dmem_wready -> lsu_done -> redirect -> iMMU -> u_bp/ycorr.
    // A straddling second beat requires xl_can, which requires pa_dram, so a DEVICE access can
    // never be in S_ST2 and the base is the same address the beat would have used. Asserted below.
-   wire [63:0] dev_addr = dmem_wen ? dmem_wabase : dmem_raddr;
-   always @(posedge clk) if (!reset & dmem_ren & dmem_wen)
-      $fatal(1, "rv_soc_top: dmem_ren & dmem_wen asserted together -- dev_addr select is ambiguous");
+   wire [63:0] dev_addr = dmem_wfsm ? dmem_wabase : dmem_raddr;
+   always @(posedge clk) if (!reset & dmem_ren & dmem_wfsm)
+      $fatal(1, "rv_soc_top: dmem_ren & the state machine's write asserted together -- dev_addr select is ambiguous");
    // ...and a device write is never the straddling second beat, which is what makes decoding
    // from the base equivalent. If this ever fires, the decode above is addressing the wrong word.
-   always @(posedge clk) if (!reset & dmem_wen & is_dev_w & (dmem_waddr != dmem_wabase))
+   always @(posedge clk) if (!reset & dmem_wfsm & is_dev_w & (dmem_waddr != dmem_wabase))
       $fatal(1, "rv_soc_top: device write straddled a word (beat %h base %h)", dmem_waddr, dmem_wabase);
    wire is_clint_r = (dmem_raddr & ~64'hffff)     == CLINT_BASE;
    wire is_uart_r  = (dmem_raddr & ~64'hf)        == UART_BASE;
@@ -246,7 +249,7 @@ module rv_soc_top #(
    // serialises device ops), so the single virtio_rvalid completes whichever of read/write is pending.
    reg  vio_pending, vio_wpending;  initial begin vio_pending = 1'b0; vio_wpending = 1'b0; end
    wire vio_req  = dmem_ren & is_virtio_r & ~vio_pending & ~vio_wpending;
-   wire vio_wreq = dmem_wen & is_virtio_w & ~vio_wpending & ~vio_pending;
+   wire vio_wreq = dmem_wfsm & is_virtio_w & ~vio_wpending & ~vio_pending;
    always @(posedge clk)
       if (reset) begin vio_pending <= 1'b0; vio_wpending <= 1'b0; end
       else begin
@@ -263,7 +266,7 @@ module rv_soc_top #(
    reg  dev_rvalid, dev_wack;
    always @(posedge clk) if (reset) begin dev_rvalid<=1'b0; dev_wack<=1'b0; end
       else begin dev_rvalid <= dmem_ren & is_dev_r & ~is_virtio_r;
-                 dev_wack <= dmem_wen & is_dev_w & ~is_virtio_w & ~dev_wack; end   // virtio: own req/rsp
+                 dev_wack <= dmem_wfsm & is_dev_w & ~is_virtio_w & ~dev_wack; end   // virtio: own req/rsp
    wire [63:0] clint_rdata;  wire clint_mtip, clint_msip;  wire [63:0] clint_mtime;
    // SCALE_DIV is DERIVED from the probe clock so it tracks a PROBE_CLK_DIV8 sweep: the DTB
    // declares timebase-frequency = 501253, so the CLINT must tick at that rate at ANY
@@ -277,7 +280,7 @@ module rv_soc_top #(
    // the sweep should PREFER frequencies where this divides cleanly.
    clint #(.SCALE_DIV(`PROBE_CLK_HZ / 501_253)) u_clint
      (.clk(clk), .reset(reset),
-      .we(dmem_wen & is_clint_w & ~dev_wack),
+      .we(dmem_wfsm & is_clint_w & ~dev_wack),
       .addr(dev_addr[15:0]),
       .wdata(dmem_wdata), .wmask(dmem_wmask), .rdata(clint_rdata),
       .mtip(clint_mtip), .msip(clint_msip), .o_mtime(clint_mtime));
@@ -288,13 +291,13 @@ module rv_soc_top #(
    wire        uart_irq;
    plic u_plic
      (.clk(clk), .reset(reset),
-      .we(dmem_wen & is_plic_w & ~dev_wack), .re(dmem_ren & is_plic_r),
+      .we(dmem_wfsm & is_plic_w & ~dev_wack), .re(dmem_ren & is_plic_r),
       .addr(plic_addr[23:0]), .wdata(dmem_wdata), .wmask(dmem_wmask), .rdata(plic_rdata),
       .src({51'd0, virtio_net_irq, virtio_irq, uart_irq, 5'd0, virtio_kbd_irq, 4'd0}), .meip(plic_meip), .seip(plic_seip),
       .dbg(plic_dbg));
    // interrupt-path debug bus out to the wrapper's ILA: {plic src-11 lifecycle (12), a plic MMIO
    // access strobe + its low addr nibble to time claim(0x004)/complete}.
-   assign irq_dbg = {dmem_ren & is_plic_r, dmem_wen & is_plic_w, plic_addr[3:0], plic_dbg};
+   assign irq_dbg = {dmem_ren & is_plic_r, dmem_wfsm & is_plic_w, plic_addr[3:0], plic_dbg};
 
    // ---- cache data-array integrity taps (see the port comment; -DCACHE_PARITY) ----
 `ifdef CACHE_PARITY
@@ -374,7 +377,7 @@ module rv_soc_top #(
    reg [14:0] stim_ctr;  initial stim_ctr = 15'd0;
    always @(posedge clk) begin
       stim_ctr <= stim_ctr + 1'b1;
-      if (dmem_wen & is_uart_w & ~dev_wack & (core.mmu_priv == 2'd1)) stim_on <= 1'b1;
+      if (dmem_wfsm & is_uart_w & ~dev_wack & (core.mmu_priv == 2'd1)) stim_on <= 1'b1;
    end
    assign    uart_irq = uart_rx_ip | uart_thre_ip | (stim_on & (stim_ctr[14:8] == 7'd0));
 `else
@@ -407,7 +410,7 @@ module rv_soc_top #(
                                     uart_ier, uart_iir, uart_mcr, uart_scr);
             if (uart_iir_rd & uart_iir_thre) uart_thre_pending <= 1'b0;
          end
-         if (dmem_wen & is_uart_w & ~dev_wack)
+         if (dmem_wfsm & is_uart_w & ~dev_wack)
             for (ub=0; ub<8; ub=ub+1) if (dmem_wmask[ub])
                case ((dmem_waddr[2:0] + ub) & 3'h7)   // 16-aligned base, window bounded by is_uart_w: the low bits ARE the offset
                   3'd0: if (!uart_lcr[7]) begin // THR
@@ -642,9 +645,9 @@ module rv_soc_top #(
    //
    // The select carried no information. Each term is already gated by its own device class
    // AT ITS SOURCE, so at most one can ever be asserted:
-   //   dev_wack      <= dmem_wen & is_dev_w & ~is_virtio_w & ~dev_wack
-   //   cache .wr_req  = dmem_wen & ~dc_wr_cpl & ~is_dev_w      (a device store never reaches it)
-   //   vio_wpending  <= set only by dmem_wen & is_virtio_w
+   //   dev_wack      <= dmem_wfsm & is_dev_w & ~is_virtio_w & ~dev_wack
+   //   cache .wr_req  = dmem_wen & ~dc_wr_cpl & ~(dmem_wfsm & is_dev_w)   (a device store never reaches it)
+   //   vio_wpending  <= set only by dmem_wfsm & is_virtio_w
    // So an OR is equivalent -- and it is an OR of registered signals, with no compare in it.
    // The exclusivity is asserted rather than assumed.
    wire         vio_wack = virtio_rvalid & vio_wpending;
@@ -654,6 +657,11 @@ module rv_soc_top #(
    // raises wr_cpl only for the writes whose requester waits (CBO, uncached), which the LSU
    // serializes, so the three terms stay exclusive (asserted).
    assign       dmem_wready = vio_wack | dev_wack | dc_wr_cpl;
+   // The D$ takes no write in a cycle it completes one (its wr_req), and the LSU's store register
+   // counts its store taken on dc_wr_room alone: a completion comes only while the state machine
+   // waits for it, so the store register is never writing then.
+   always @(posedge clk) if (!reset & dmem_wen & ~dmem_wfsm & dc_wr_cpl)
+      $fatal(1, "rv_soc_top: a D$ write completion while the LSU's store register writes (the D$ would not take it)");
    // The DEVICE ACCEPT, for the LSU's plain store to a device: done at the device's own ack.
    // A device store carries no NC bit when there are no page tables (bare M-mode has no PBMT),
    // so the LSU classes it as plain, and without the ack here the device path would re-execute
@@ -698,7 +706,7 @@ module rv_soc_top #(
       .rd_valid(dc_rd_valid), .rd_data(dc_rd_data), .rd_resp_tag(dc_rd_resp_tag), .rd_resp_addr(dc_rd_resp_addr),
       // ~dc_wr_cpl: a CBO or uncached write holds its request through the cycle its completion
       // is registered, and the D$ is idle again in that cycle -- without this it is taken twice.
-      .wr_req(dmem_wen & ~dc_wr_cpl & ~is_dev_w), .wr_va(dmem_waddr), .wr_pa(dmem_waddr),
+      .wr_req(dmem_wen & ~dc_wr_cpl & ~(dmem_wfsm & is_dev_w)), .wr_va(dmem_waddr), .wr_pa(dmem_waddr),
       .wr_data(dmem_wdata), .wr_mask(dmem_wmask), .wr_nc(dmem_wuncached),
       .cbo_req(dmem_cbo & ~dc_wr_cpl & ~is_dev_w), .cbo_zero(dmem_cbo_zero), .cbo_keep(dmem_cbo_keep),
       .wr_room(dc_wr_room), .wr_acc(dc_wr_acc), .wr_cpl(dc_wr_cpl),
@@ -1035,7 +1043,7 @@ module rv_soc_top #(
       .r_done(ddr_r_valid & ddr_r_ready & ddr_r_last), .r_id(ddr_r_id),
       .w_done(ddr_w_valid & ddr_w_ready), .w_id(ddr_w_id),
       .raddr(dmem_raddr[7:0]), .rdata(hpm_rdata),
-      .clr(dmem_wen & is_hpm_w & ~dev_wack));
+      .clr(dmem_wfsm & is_hpm_w & ~dev_wack));
 endmodule
 
 `default_nettype wire

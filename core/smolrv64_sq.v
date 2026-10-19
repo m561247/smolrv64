@@ -78,20 +78,27 @@ module smolrv64_sq
     input  wire [3:0]            a_fc,
     input  wire [1:0]            a_size,     // 0=B 1=H 2=W 3=D
     input  wire                  a_unc,      // uncached, decided at translate time
+    input  wire                  a_mem,      // the PA is memory (DRAM or the local SRAM), not a device
 
     // ---- snoop the writeback ports for the data operand ----
     input  wire [NWB-1:0]        wb_v,
     input  wire [NWB*PBITS-1:0]  wb_preg,
     input  wire [NWB*64-1:0]     wb_data,
 
-    // ---- commit: the head, once its data has arrived ----
+    // ---- drain: the oldest committed store not yet handed off, once its data has arrived ----
+    // A store is HANDED OFF (c_take) to the LSU and FREED (c_done) when memory has it. A store the
+    // LSU's state machine writes is both in one cycle; a plain store to memory goes to the LSU's
+    // store register at its handoff and is freed when the D$ takes it, so until then it is still
+    // a live entry here and every younger load is ordered against it as before.
     output wire                  c_v,
     output wire [ROBB-1:0]       c_rob,       // core commits only when this IS the ROB head
     output wire [PAW-1:0]        c_addr,
     output wire [63:0]           c_data,
     output wire [1:0]            c_size,
     output wire                  c_unc,
+    output wire                  c_fast,      // ...a plain store to memory inside one doubleword: the LSU's store register takes it
     input  wire                  c_take,
+    input  wire                  c_done,      // the oldest entry handed off is in memory: free it
     // ---- the RELEASE: the ROB says the first uncommitted entry can no longer be undone ----
     // A store is COMMITTED when the ROB's irrevocable pointer reaches it (smolrv64_core computes
     // k_take = kc_v & (kc_rob == rob_irr_idx)); its ROB slot completes then, the head retires
@@ -173,6 +180,7 @@ module smolrv64_sq
     input  wire [IDXB-1:0]       w_idx,
     input  wire [PAW-1:0]        w_pa,
     input  wire                  w_unc,
+    input  wire                  w_mem,
     input  wire                  w_flt,
     input  wire [3:0]            w_fc,
     // ---- a translation that faulted, at the first uncommitted entry: it traps at the ROB head ----
@@ -207,6 +215,7 @@ module smolrv64_sq
    (* ram_style = "distributed" *) reg [63:0] data [0:NENT-1];   // one write a cycle: the landing below
    reg [1:0]             sz   [0:NENT-1];
    reg [NENT-1:0]        unc;
+   reg [NENT-1:0]        mem, dw;            // the PA is memory / the access stays inside one doubleword
    reg [PBITS-1:0]       dpr  [0:NENT-1];
    reg [NENT-1:0]        rd;                 // the data is in a register file: the read port fetches it
    reg [ROBB-1:0]        rob  [0:NENT-1];
@@ -224,6 +233,9 @@ module smolrv64_sq
    // is exact up to NENT; the index is their low bits, as before.
    reg [IDXB:0]          headc, tailc;
    wire [IDXB-1:0]       head = headc[IDXB-1:0], tail = tailc[IDXB-1:0];
+   reg [IDXB:0]          hoc;                // the next entry to hand off; head <= ho <= kc
+   wire [IDXB-1:0]       ho = hoc[IDXB-1:0];
+   wire [IDXB:0]         ho_n = hoc - headc, kc_n = kcc - headc;   // handed off and not freed / committed
    reg [IDXB:0]          cnt;
    integer               k;
    // the kill's entries, and how many
@@ -291,7 +303,7 @@ module smolrv64_sq
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; dv = {NENT{1'b0}}; rd = {NENT{1'b0}}; cmt = {NENT{1'b0}};
                  headc = {(IDXB+1){1'b0}}; tailc = {(IDXB+1){1'b0}}; kcc = {(IDXB+1){1'b0}};
-                 cnt = {(IDXB+1){1'b0}}; end
+                 hoc = {(IDXB+1){1'b0}}; cnt = {(IDXB+1){1'b0}}; end
 
    assign d_ready   = (cnt != NENT[IDXB:0]);
    assign d_ready2  = (cnt <= NENT[IDXB:0] - 2);
@@ -334,14 +346,14 @@ module smolrv64_sq
    assign f_pc  = pc[kc];
    assign f_seq = sqn[kc];
 
-   // c_v says the head is READY (address and data present). Committing in program order
+   // c_v says the next entry to hand off is READY (address and data present). Committing in program order
    // is the core's job: it takes the entry only when c_rob is the ROB head, so a store
    // reaches memory exactly where the cosim's retire stream expects it.
    // Only a committed store drains -- including one committed THIS cycle at the head, so the
    // release costs no cycle on a store the LSU is waiting for (stbench FWD: 12.75 -> 11.75
    // cycles per store-load pair without it). k_take is a compare of registered values in
    // smolrv64_core, the same shape as the old head-index compare this replaced.
-   assign c_v    = v[head] & av[head] & dv[head] & (cmt[head] | (k_take & (kcc == headc)));
+   assign c_v    = v[ho] & av[ho] & dv[ho] & (cmt[ho] | (k_take & (kcc == hoc)));
    assign kc_v   = (kcc != tailc) & v[kc] & av[kc] & dv[kc] & tv[kc] & ~flt[kc];
    assign kc_rob = rob[kc];
    wire [PAW-1:0] kc_am = addr_m[kc], kc_aw = addr_w[kc];
@@ -350,13 +362,14 @@ module smolrv64_sq
    // in wb_q, and data[kc] holds the previous occupant's until the next edge.
    assign kc_data= (ln_v & (ln_idx == kc)) ? ln_data : data[kc];
    assign kc_size= sz[kc];
-   assign c_rob  = rob[head];
-   wire [PAW-1:0] hd_am = addr_m[head], hd_aw = addr_w[head];
-   assign c_addr = addr_lv[head] ? hd_aw : hd_am;
+   assign c_rob  = rob[ho];
+   wire [PAW-1:0] hd_am = addr_m[ho], hd_aw = addr_w[ho];
+   assign c_addr = addr_lv[ho] ? hd_aw : hd_am;
    // the landing bypass: the cycle dv rose, the bytes are still in wb_q
-   assign c_data = (ln_v & (ln_idx == head)) ? ln_data : data[head];
-   assign c_size = sz[head];
-   assign c_unc  = unc[head];
+   assign c_data = (ln_v & (ln_idx == ho)) ? ln_data : data[ho];
+   assign c_size = sz[ho];
+   assign c_unc  = unc[ho];
+   assign c_fast = mem[ho] & ~unc[ho] & dw[ho];
    // THE FORWARD'S READ, in its start cycle: the load's store, named by the flag's own register (so
    // the store the flag was computed for), through the same landing bypass as c_data, placed at its
    // doubleword offset as the D$ write places it (smolrv64_lsu's mem_wdata).
@@ -503,7 +516,7 @@ module smolrv64_sq
          wire [NENT-1:0] kov = oldm & conf[gl];
          wire            k1  = (kov != {NENT{1'b0}}) & ((kov & (kov - 1'b1)) == {NENT{1'b0}});
          wire            fwn = l_av[gl] & k1 & (|(kov & cov[gl] & dv & tv & ~flt & ~unc))
-                             & ~(l_wt[gl] & (|(oldm & ~av))) & ~(c_take & kov[head]);
+                             & ~(l_wt[gl] & (|(oldm & ~av))) & ~(c_done & kov[head]);
          reg             fw_q;  reg [IDXB-1:0] fws_q;
          initial begin fw_q = 1'b0; fws_q = {IDXB{1'b0}}; end
          always @(posedge clk) begin
@@ -598,7 +611,7 @@ module smolrv64_sq
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; dv <= {NENT{1'b0}}; cmt <= {NENT{1'b0}};
          ln_v <= 1'b0;
          headc <= {(IDXB+1){1'b0}}; tailc <= {(IDXB+1){1'b0}}; kcc <= {(IDXB+1){1'b0}};
-         cnt <= {(IDXB+1){1'b0}};
+         hoc <= {(IDXB+1){1'b0}}; cnt <= {(IDXB+1){1'b0}};
          for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
       end else begin
          // A STORE's address arrives: its COLUMN, against every queued load.
@@ -619,9 +632,10 @@ module smolrv64_sq
             cmt[kc] <= 1'b1;
             kcc <= kcc + 1'b1;
          end
-         // drain the head (the LSU took it) -- AFTER the commit arm: when both name the same
-         // entry (released and drained in one cycle) the clear must win
-         if (c_v & c_take) begin
+         // hand off, and free the head (memory has it) -- AFTER the commit arm: when both name
+         // the same entry (released and drained in one cycle) the clear must win
+         if (c_v & c_take) hoc <= hoc + 1'b1;
+         if (c_done) begin
             v[head] <= 1'b0; av[head] <= 1'b0; dv[head] <= 1'b0; cmt[head] <= 1'b0;
             headc <= headc + 1'b1;
          end
@@ -632,8 +646,8 @@ module smolrv64_sq
             rd[tail] <= d_rdy;
             tailc <= tailc + 1'b1;
          end
-         if ((d_alloc & d_ready) & ~(c_v & c_take)) cnt <= cnt + 1'b1;
-         else if (~(d_alloc & d_ready) & (c_v & c_take)) cnt <= cnt - 1'b1;
+         if ((d_alloc & d_ready) & ~c_done) cnt <= cnt + 1'b1;
+         else if (~(d_alloc & d_ready) & c_done) cnt <= cnt - 1'b1;
          // A FLUSH KEEPS THE COMMITTED ENTRIES. They are the oldest, so the queue is cut at
          // the first uncommitted one; a drain in this same cycle still counts (the arm above
          // ran). An allocation in the redirect cycle (dispatch is not gated on the redirect
@@ -642,7 +656,7 @@ module smolrv64_sq
             for (k = 0; k < NENT; k = k + 1)
                if (~cmt[k]) begin v[k] <= 1'b0; av[k] <= 1'b0; dv[k] <= 1'b0; end
             tailc <= kcc;
-            cnt   <= (kcc - headc) - {{IDXB{1'b0}}, (c_v & c_take)};
+            cnt   <= (kcc - headc) - {{IDXB{1'b0}}, c_done};
             for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
          end
 
@@ -650,6 +664,7 @@ module smolrv64_sq
          if (a_v) begin
             addr_lv[a_idx] <= 1'b0;  va[a_idx] <= a_va;  sz[a_idx] <= a_size;  av[a_idx] <= 1'b1;  bare[a_idx] <= a_bare;
             unc[a_idx]  <= a_unc;  tv[a_idx] <= a_tv;  flt[a_idx] <= a_flt;  fc[a_idx] <= a_fc;
+            mem[a_idx]  <= a_mem;  dw[a_idx] <= ({1'b0, a_va[2:0]} + (4'd1 << a_size)) <= 4'd8;
          end
          // the data read: the pick is a register, the value is in the cycle it is read (dv) and
          // lands from wb_q the cycle after (the landing, below)
@@ -659,7 +674,7 @@ module smolrv64_sq
          if (flush) rq_v <= 1'b0;                      // flush last (rule I11)
          // the walker's answer: the PA and NC bit, or the fault the store traps with at the head
          if (w_v) begin
-            addr_lv[w_idx] <= 1'b1;  unc[w_idx] <= w_unc;  flt[w_idx] <= w_flt;  fc[w_idx] <= w_fc;
+            addr_lv[w_idx] <= 1'b1;  unc[w_idx] <= w_unc;  flt[w_idx] <= w_flt;  fc[w_idx] <= w_fc;  mem[w_idx] <= w_mem;
             tv[w_idx]   <= 1'b1;
          end
 
@@ -712,7 +727,7 @@ module smolrv64_sq
          // so a dying entry need not be the one just picked.
          if (rp_v & kmk[rp_idx]) rq_v <= 1'b0;
          tailc <= tailc - k_n;
-         cnt   <= cnt - k_n - {{IDXB{1'b0}}, (c_v & c_take)};
+         cnt   <= cnt - k_n - {{IDXB{1'b0}}, c_done};
       end
    end
 
@@ -757,7 +772,14 @@ module smolrv64_sq
          $fatal(1, "smolrv64_sq: a store allocated into entry %0d with its value in a register file sees p%0d written back",
                 tail, d_dpreg);
       if (c_take & ~c_v)
-         $fatal(1, "smolrv64_sq: drain taken with no committed, ready head");
+         $fatal(1, "smolrv64_sq: handoff with no committed, ready entry");
+      // the freed entry is one handed off, now or before; at most one waits for memory
+      if (c_done & (headc == hoc) & ~(c_v & c_take))
+         $fatal(1, "smolrv64_sq: entry %0d freed before its handoff", head);
+      if (ho_n > 1)
+         $fatal(1, "smolrv64_sq: %0d entries handed off and not in memory (the LSU holds one)", ho_n);
+      if (ho_n > kc_n)
+         $fatal(1, "smolrv64_sq: the handoff pointer is outside [head, the first uncommitted entry]");
       if (k_take & ~kc_v)
          $fatal(1, "smolrv64_sq: commit with no uncommitted, ready entry");
       if (k_take & flush)
@@ -785,7 +807,7 @@ module smolrv64_sq
          $fatal(1, "smolrv64_sq: store entry %0d at va %h crosses a page", a_idx, a_va);
       if (l_fill & ~l_fill_flt & (({1'b0, l_fill_off} + (13'd1 << l_fill_size)) > 13'h1000))
          $fatal(1, "smolrv64_sq: load entry %0d at offset %h crosses a page", l_fill_ix, l_fill_off);
-      if (c_take & ~tv[head])
+      if (c_take & ~tv[ho])
          $fatal(1, "smolrv64_sq: a store drained without a translation");
    end
 endmodule
