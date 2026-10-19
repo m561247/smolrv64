@@ -170,6 +170,37 @@ on write done, the store port's one store per cycle, the integrity log and the Z
   is in DRAM. NC accesses bypass both levels. The virtio rings are NC today, so the protocol does
   not change; what changes is that a CBO has a second level to push through.
 
+
+## Ports: a store beside every load, then a second load (2026-10-18)
+
+**Where the memory path stands.** The load queue takes any free entry, a committed plain store
+goes to the D$ through the LSU's store register instead of the load port, and the D$ lookup takes
+a load before a queued store unless the store is urgent (SmolRV64-Spec §8, §9; wip/memport). On
+the GB5 checkpoint slices that is -7.27% of their cycles. What is left is the D$'s one lookup a
+cycle, shared by loads and stores: every cycle a ready load now waits for memory is a D$ door
+cycle, 12% (Navigation, HTML5, Camera) to 40% (PDF Rendering) of the slices' cycles, and a store
+that waits behind loads fills the store queue (PDF's `be:sq-full` 12%).
+
+**What more ports would find to do** (the testbench's `PORTS-SIM`, GB5's 77 SimPoints weighted per
+subtest, main 6f2bbf1f): two or more loads ready for memory in 19-25% of the cycles of HTML5,
+Ray Tracing, PDF Rendering, SQLite, AES-XTS and Navigation, 8-16% of most of the rest, 3-6% of
+Machine Learning, Face Detection and Image Inpainting; a ready load and a committed store together
+in 6-12% of the integer subtests' cycles.
+
+**The L1's ports.**
+- **A store lookup beside the load lookup** (step 1 of the revised order below): the store tag copy (above) answers the
+  committed store's way at its PA's set; the store writes its chunk with byte enables into the one
+  array that holds it (the diagonal layout puts a line's chunks in eight arrays), so it never reads
+  the data and never takes a load's cycle. A fill beat writes two arrays through the same write
+  ports; a store to one of them waits that cycle. A load to a line with a store not yet written
+  waits for it, as today.
+- **A second load port** (step 4 of the revised order): a second copy of the 32 data arrays (32 more RAMB36; the chip
+  uses about a quarter of its 480), each copy's read port a load's and its write port taking the
+  same stores and fill beats as the first; a third tag copy and a second dTLB read port (LUTRAM
+  read ports are copies). In the core: the load queue offers its two oldest ready entries, the LSU
+  starts two fast loads a cycle, and two land a cycle through the lanes' write slots (a load lands
+  in its own lane's slot, so two from one lane take two cycles).
+
 ## Order
 
 Every step is measured or modelled first, then gated by riscv-tests, the unit benches, lint, the
@@ -202,6 +233,18 @@ Every step is measured or modelled first, then gated by riscv-tests, the unit be
    asks, refusal, the walk only after a refusal, the re-ask) is the starting point. M's translate
    pass for loads goes, and with it the cycle. It lands with or before the lanes' memory unit
    (lanes step 5.2), whichever is first.
+
+## Order (revised 2026-10-18)
+
+The store path comes before the L2, since the D$'s shared lookup is now the integer subtests'
+largest memory stall:
+
+1. **The VIPT geometry with a store lookup** -- steps 2 above and the store port at once: `rv_dcache`
+   at 32 ways of 4 KiB, the diagonal data, the 32 tag compares, the store tag copy, byte-enabled
+   one-array store writes. Translation stays where it is.
+2. **The dTLB in the access cycle** (step 3 above).
+3. **The L2** (step 1 above), below both caches.
+4. **The second load port**, measured on the SimPoints against the end state, not today's.
 
 ## Open
 
