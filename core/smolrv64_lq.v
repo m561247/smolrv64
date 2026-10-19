@@ -193,17 +193,17 @@ module smolrv64_lq
     output wire [SEQW-1:0]       pk_seq,
     input  wire [ROBB-1:0]       rob_head,    // head-gate an uncached (device) load's access (non-speculative)
     input  wire                  flush,
-    // the kill (smolrv64_rob kd): the entries of ops younger than a mispredicted branch die.
-    // They are the youngest, so the tail steps back to the oldest of them. kmask names every
-    // slot whose op is dead while the kill holds, live or not (nothing allocates meanwhile): the
-    // LSU drops their responses by tag, a load among them starting now included.
+    // the kill (smolrv64_rob kd): the entries of ops younger than a mispredicted branch die and
+    // their slots free. kmask names every slot whose op is dead while the kill holds, live or not
+    // (nothing allocates meanwhile): the LSU drops their responses by tag, a load among them
+    // starting now included.
     input  wire                  kd_v,
     input  wire [ROBB-1:0]       kh,
     input  wire [ROBB-1:0]       kb,
     output wire [NENT-1:0]       kmask);
 
-   // A tail pointer and a per-entry `sent` bit. Entries wait to go to memory in any order they
-   // become ready; what is sent is outstanding or already landed. Pointers are what make flush a reset.
+   // An age matrix and a per-entry `sent` bit. Entries wait to go to memory in any order they
+   // become ready; what is sent is outstanding or already landed. Flush is a reset of `v`.
    reg [NENT-1:0]        v, av;              // live / address known
    // pa: M's fill and the walker's answer each write it, three ports read it -- a bank per writer
    // (u_pa below). pc: read at one entry, but its wait-table bits at every one -- those are flops.
@@ -238,29 +238,41 @@ module smolrv64_lq
    reg [NENT-1:0]        lnd;                 // landed, and still here: an older store's address is unknown
    reg [NENT-1:0]        rpl;                 // sticky: it read before an older store that overlaps it
    reg [NENT-1:0]        fwd;                 // sent as a forward: it read a store, not memory
-   reg [IDXB-1:0]        tail;
+   reg [NENT*NENT-1:0]   om;                  // om[i*NENT + j]: entry j is older than entry i
    reg [IDXB:0]          cnt;
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; sent = {NENT{1'b0}};
                  wt = {NENT{1'b0}}; lnd = {NENT{1'b0}}; rpl = {NENT{1'b0}}; fwd = {NENT{1'b0}};
-                 tail = {IDXB{1'b0}}; cnt = {(IDXB+1){1'b0}}; end
+                 om = {(NENT*NENT){1'b0}}; cnt = {(IDXB+1){1'b0}}; end
 
-   // PROGRAM ORDER IS THE RING READ FROM THE TAIL: the slot at the tail is the oldest position,
-   // the one before it the youngest. Every "oldest of these" below is ring_oldest(.., tail), with
-   // no pointer to keep in step with entries that land and free out of order.
-`include "smolrv64_ring.vh"
+   // PROGRAM ORDER IS AN AGE MATRIX. An allocation sets its row to the live entries (all older)
+   // and clears its column (younger than every one of them); a freed entry's bits are never read,
+   // since every set asked about is live. The oldest of a set is the member no other member is
+   // older than: one per set, by construction, so the index is the OR of the one-hot.
 `include "smolrv64_kill.vh"
+   function [IDXB-1:0] oldest(input [NENT-1:0] m, input [NENT*NENT-1:0] o);
+      integer i;
+      begin
+         oldest = {IDXB{1'b0}};
+         for (i = 0; i < NENT; i = i + 1)
+            if (m[i] && ~|(m & o[i*NENT +: NENT])) oldest = oldest | i[IDXB-1:0];
+      end
+   endfunction
 
-   // THE SLOT AT THE TAIL MUST BE FREE, not merely "the queue is not full". Loads land out of
-   // order once they are pipelined (the tagged fast path; the random bench lands them in any
-   // order), so the ring can wrap round to a slot whose load is still in flight while cnt
-   // says there is room. Allocating there overwrote the entry and its landing then found
-   // "an entry that was never sent" (2026-09-04). Waiting on that one slot is head-of-line
-   // blocking at a miss; at NENT=4 the pointer ring is the right size for it.
-   assign d_ready   = (cnt != NENT[IDXB:0]) & ~v[tail];
-   wire [IDXB-1:0] tail1 = tail + 1'b1;
-   assign d_ready2  = (cnt <= NENT[IDXB:0] - 2) & ~v[tail] & ~v[tail1];
-   assign d_idx     = tail;
+   // ANY FREE SLOT, the lowest. Loads land out of order (the tagged fast path; the random bench
+   // lands them in any order), so the next slot of a ring can hold a load still in flight while
+   // others are free; the age matrix keeps program order whichever slot an entry takes. A slot
+   // whose killed load is still in flight is free here: the LSU starts nothing on a tag whose
+   // response is still due (its o_v).
+   reg [IDXB-1:0] fs;
+   integer        fk;
+   always @* begin
+      fs = {IDXB{1'b0}};
+      for (fk = NENT - 1; fk >= 0; fk = fk - 1) if (~v[fk]) fs = fk[IDXB-1:0];
+   end
+   assign d_ready   = (cnt != NENT[IDXB:0]);
+   assign d_ready2  = (cnt <= NENT[IDXB:0] - 2);
+   assign d_idx     = fs;
    assign occupancy = cnt;
    assign av_any    = |(v & av & ~lnd);
    genvar gd;
@@ -272,7 +284,7 @@ module smolrv64_lq
    assign uf_any    = |(v & ~av);
    wire [NENT-1:0] pk_m = v & ~av & ar;
    assign pk_v      = |pk_m;
-   assign pk_idx    = ring_oldest(pk_m, tail);
+   assign pk_idx    = oldest(pk_m, om);
    assign pk_seq    = sqn[pk_idx];
 
    // THE ACCESS CANDIDATE is the oldest entry that may go to memory now: filled and translated,
@@ -312,9 +324,9 @@ module smolrv64_lq
    wire [NENT-1:0] wlk_m = v & av & ~sent & ~tv;
    wire [NENT-1:0] flt_m = (v & av & ~sent & tv & flt) | (v & rpl);
    assign k_v   = |wlk_m;
-   assign k_idx = ring_oldest(wlk_m, tail);
+   assign k_idx = oldest(wlk_m, om);
    assign k_va  = va[k_idx];
-   wire [IDXB-1:0] fi = ring_oldest(flt_m, tail);
+   wire [IDXB-1:0] fi = oldest(flt_m, om);
    assign f_v   = |flt_m;
    assign f_idx = fi;
    assign f_rp  = rpl[fi];
@@ -326,7 +338,7 @@ module smolrv64_lq
    assign b_ok = v[b_idx] & ~av[b_idx];
    // the older-store query is about M's load when it holds an unfilled one, else the oldest filled
    // entry still waiting to go to memory
-   wire [IDXB-1:0] qi = b_ok ? b_idx : ring_oldest(v & av & ~sent, tail);
+   wire [IDXB-1:0] qi = b_ok ? b_idx : oldest(v & av & ~sent, om);
    assign q_tag   = sqt[qi];
    genvar ge;
    generate
@@ -346,7 +358,7 @@ module smolrv64_lq
    // and overlaps it flags it for replay. Its forwarding store does not (the store queue sets that
    // overlap aside while the load stands forwarded).
    assign e_acc = v & sent;
-   wire [IDXB-1:0] xi = ring_oldest(rdy_m, tail);
+   wire [IDXB-1:0] xi = oldest(rdy_m, om);
    assign x_head  = hd[xi];
    assign x_v     = |rdy_m;
    assign x_block = |(cand_m & e_block);   // instrumentation only
@@ -371,11 +383,7 @@ module smolrv64_lq
    assign l_pa   = l_rsp ? pa_rd[PAW +: PAW] : pa_rd[2*PAW +: PAW];
 
 
-   // THE KILL. The dead entries are the youngest live ones (the ring is program order), so the
-   // tail steps back to the oldest of them, kd0: the slots after it are dead or landed. The
-   // candidate pointer goes there too unless it names a live, unsent entry that survives (an
-   // older load still waiting): at the tail with nothing waiting it can name an earlier lap's
-   // load in flight, which is not one.
+   // THE KILL. The dead entries are the youngest live ones; their slots free.
    reg  [NENT-1:0] kmk, kds;
    integer         kq, kw;
    always @* begin
@@ -384,8 +392,6 @@ module smolrv64_lq
          kmk[kq] = kds[kq] & v[kq];
       end
    end
-   // the oldest dead entry
-   wire [IDXB-1:0]   kd0 = ring_oldest(kmk, tail);
    assign kmask = kds;
    wire          k_any = |kmk;
    // WATCHING. A load that landed while an older store's address was still unknown stays (lnd,
@@ -408,11 +414,9 @@ module smolrv64_lq
       if (reset) begin
          v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
          lnd <= {NENT{1'b0}}; rpl <= {NENT{1'b0}};
-         tail <= {IDXB{1'b0}};
          cnt <= {(IDXB+1){1'b0}};
       end else begin
-         // Retiring the entry frees its slot; slot REUSE is governed by cnt and tail, so an
-         // out-of-order response simply leaves the slot dead until tail comes round to it.
+         // Landing frees the entry's slot, unless it stays to be watched.
          if (l_v & ~lwatch) begin v[l_idx] <= 1'b0; av[l_idx] <= 1'b0; sent[l_idx] <= 1'b0; fwd[l_idx] <= 1'b0; end
          if (l_v & lwatch)  lnd[l_idx] <= 1'b1;
          for (kw = 0; kw < NENT; kw = kw + 1) begin
@@ -421,11 +425,12 @@ module smolrv64_lq
          end
          if (x_v & x_take) begin sent[x_idx] <= 1'b1;  fwd[x_idx] <= x_fwd; end
          if (d_alloc & d_ready) begin
-            v[tail] <= 1'b1; av[tail] <= 1'b0; sent[tail] <= 1'b0;  lnd[tail] <= 1'b0;  rpl[tail] <= 1'b0;  wt[tail] <= d_wt;
-            fwd[tail] <= 1'b0;
-            rob[tail] <= d_rob; prd[tail] <= d_prd; rdn[tail] <= d_rd;
-            rdv[tail] <= d_rd_v; sqt[tail] <= d_sqtag;  pch[tail] <= d_pc[PCHB:1];  sqn[tail] <= d_seq;
-            tail <= tail + 1'b1;
+            v[fs] <= 1'b1; av[fs] <= 1'b0; sent[fs] <= 1'b0;  lnd[fs] <= 1'b0;  rpl[fs] <= 1'b0;  wt[fs] <= d_wt;
+            fwd[fs] <= 1'b0;
+            rob[fs] <= d_rob; prd[fs] <= d_prd; rdn[fs] <= d_rd;
+            rdv[fs] <= d_rd_v; sqt[fs] <= d_sqtag;  pch[fs] <= d_pc[PCHB:1];  sqn[fs] <= d_seq;
+            for (kw = 0; kw < NENT; kw = kw + 1) om[kw*NENT + fs] <= 1'b0;
+            om[fs*NENT +: NENT] <= v;
          end
          cnt <= cnt + {{IDXB{1'b0}}, (d_alloc & d_ready)} - gone_n;
 
@@ -449,7 +454,6 @@ module smolrv64_lq
          if (k_any) begin
             for (kw = 0; kw < NENT; kw = kw + 1)
                if (kmk[kw]) begin v[kw] <= 1'b0;  av[kw] <= 1'b0;  sent[kw] <= 1'b0;  lnd[kw] <= 1'b0;  rpl[kw] <= 1'b0;  fwd[kw] <= 1'b0; end
-            tail <= kd0;
          end
          // The flush, ordered LAST: it wins over an allocation made in its cycle (dispatch
          // is not gated on the redirect since gate V3, 2026-09-05). Nothing older than the
@@ -457,13 +461,12 @@ module smolrv64_lq
          if (flush) begin
             v <= {NENT{1'b0}}; av <= {NENT{1'b0}}; sent <= {NENT{1'b0}};
             lnd <= {NENT{1'b0}}; rpl <= {NENT{1'b0}}; fwd <= {NENT{1'b0}};
-            tail <= {IDXB{1'b0}};
             cnt <= {(IDXB+1){1'b0}};
          end
       end
    end
 
-   always @(posedge clk) if (!reset & d_alloc & d_ready) pcm[tail] <= d_pc;
+   always @(posedge clk) if (!reset & d_alloc & d_ready) pcm[fs] <= d_pc;
 
    // D12 (2026-09-17): the "DRAM, idempotent, may issue speculatively" bit names the entry's OWN
    // address. smolrv64_lsu derives it from the translate; here it is recomputed from the PA the
@@ -485,13 +488,27 @@ module smolrv64_lq
    // Invariants (docs/rtl-rules.md A1). Every one of these is something the queue would
    // otherwise do silently and wrongly.
    integer ia;
+   reg [NENT-1:0] v_first;               // the live entries no live entry is older than: one
+   reg [IDXB:0]   v_n, f_n;              // ...counted, and the live entries
+   always @* begin
+      v_n = {(IDXB+1){1'b0}};  f_n = {(IDXB+1){1'b0}};
+      for (ia = 0; ia < NENT; ia = ia + 1) begin
+         v_first[ia] = v[ia] & ~|(v & om[ia*NENT +: NENT]);
+         v_n = v_n + {{IDXB{1'b0}}, v[ia]};
+         f_n = f_n + {{IDXB{1'b0}}, v_first[ia]};
+      end
+   end
    always @(posedge clk) if (!reset) begin
       if (d_alloc & ~d_ready)
          $fatal(1, "smolrv64_lq: allocate into a full queue");
       if (d_alloc & kd_v & ~flush)
          $fatal(1, "smolrv64_lq: an allocation while the kill holds");
-      if (d_alloc & d_ready & v[tail])
-         $fatal(1, "smolrv64_lq: allocate into slot %0d while its load is in flight", tail);
+      if (d_alloc & d_ready & v[fs])
+         $fatal(1, "smolrv64_lq: allocate into live slot %0d", fs);
+      if (cnt != v_n)
+         $fatal(1, "smolrv64_lq: the count %0d is not the live entries' %0d", cnt, v_n);
+      if ((|v) && (f_n != {{IDXB{1'b0}}, 1'b1}))
+         $fatal(1, "smolrv64_lq: the age matrix names %0d oldest live entries (v=%b)", f_n, v);
       if (a_v & ~v[a_idx])
          $fatal(1, "smolrv64_lq: address written to a slot with no live entry (idx %0d)", a_idx);
       if (a_v & av[a_idx])

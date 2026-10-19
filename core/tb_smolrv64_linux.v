@@ -504,6 +504,7 @@ module tb;
    // it (`meas`), so a run restored from a checkpoint reports its warm window, not the cold
    // start; the report at the end divides by the window's cycles and retires (mc, mr).
    reg [63:0] meas_from, meas_c, meas_ret, mc, mr;
+   reg [63:0] lq_n;
    reg        meas;
    // FPORT-SIM: retired instructions by the register-file reader their integer operands take --
    // a divide's, the lane it issues in (it hands them to the MD stage); an FP op with an integer
@@ -557,6 +558,34 @@ module tb;
       if (dut.core.fe.u_bp.t_hit)                           bt_car   <= bt_car + 1;
       if (dut.core.fe.u_bp.tw_v & ~dut.core.fe.u_bp.tr_hit & (|bt_now))   bt_dup   <= bt_dup + 1;
       if (dut.core.fe.u_bp.tr_hit & ~|(dut.core.fe.u_bp.tm & bt_now))     bt_stale <= bt_stale + 1;
+   end
+   // LQ-SIM: the load queue's occupancy summed per cycle, and the cycles the queue head has no
+   // load-queue credit (smolrv64_core st_lq) by why: a head op in flight or in the IR (cbo_any: cbo),
+   // every entry live (full),
+   // or one free but the IR's load takes it (two); and the entries live in those cycles by state: no address yet, an address but
+   // not sent (of them: an older store aliases it, or it is not translated yet), at memory, landed
+   // and watched.
+   localparam integer LQS_N = 1 << `SMOLRV64_LQB;
+   reg [63:0] n_lqocc, lq_cbo, lq_full, lq_two, lq_noa, lq_wait, lq_blk, lq_utv, lq_mem, lq_lnd;
+   initial begin n_lqocc = 0; lq_cbo = 0; lq_full = 0; lq_two = 0; lq_noa = 0; lq_wait = 0; lq_blk = 0; lq_utv = 0;
+                 lq_mem = 0; lq_lnd = 0; end
+   wire [LQS_N-1:0] lq_v = dut.core.u_lq.v, lq_av = dut.core.u_lq.av, lq_sent = dut.core.u_lq.sent, lq_lnd_m = dut.core.u_lq.lnd;
+   wire [31:0]      lq_cnt = 32'(dut.core.u_lq.cnt);
+   always @(posedge clk) if (!reset && meas) begin
+      n_lqocc <= n_lqocc + 64'(lq_cnt);
+      if (dut.core.st_lq) begin
+         if (dut.core.cbo_any)     lq_cbo  <= lq_cbo + 1;
+         else if (lq_cnt == LQS_N) lq_full <= lq_full + 1;
+         else                      lq_two  <= lq_two + 1;
+         if (!dut.core.cbo_any && (lq_cnt < LQS_N - (dut.core.ir_ld ? 1 : 0)))
+            $fatal(1, "tb: the load queue refuses a credit with room by the count (%0d live, IR load %b)", lq_cnt, dut.core.ir_ld);
+         lq_noa  <= lq_noa  + 64'($countones(lq_v & ~lq_av));
+         lq_wait <= lq_wait + 64'($countones(lq_v & lq_av & ~lq_sent & ~lq_lnd_m));
+         lq_blk  <= lq_blk  + 64'($countones(lq_v & lq_av & ~lq_sent & ~lq_lnd_m & dut.core.u_lq.e_block));
+         lq_utv  <= lq_utv  + 64'($countones(lq_v & lq_av & ~lq_sent & ~lq_lnd_m & ~dut.core.u_lq.tv));
+         lq_mem  <= lq_mem  + 64'($countones(lq_v & lq_sent & ~lq_lnd_m));
+         lq_lnd  <= lq_lnd  + 64'($countones(lq_v & lq_lnd_m));
+      end
    end
    // SQ-DRAIN, the cycles a store waits between the queue and the D$: the LSU holds one at the D$
    // door, not accepted (n_stdoor); the queue's head can drain and the LSU is idle and does not
@@ -1155,13 +1184,13 @@ module tb;
    reg mq_tr_on;
    initial mq_tr_on = $test$plusargs("mq_trace");
    always @(posedge clk) if (!reset && mq_tr_on && trace_on)
-      $display("MQ c=%0d M v=%b ld=%b seq=%0d rob=%0d lqi=%0d dead=%b adv=%b | go=%b byp=%b rwin=%b uld=%b sli=%0d pk=%b/%0d/%0d | lm=%b%b%b lqi=%0d,%0d,%0d seq=%0d,%0d,%0d rob=%0d,%0d,%0d | la_v=%b | lq v=%b av=%b tail=%0d alloc=%b@%0d seq=%0d rob=%0d kmask=%b | kd=%b rel=%b frv=%b red=%b | land=%b@%0d",
+      $display("MQ c=%0d M v=%b ld=%b seq=%0d rob=%0d lqi=%0d dead=%b adv=%b | go=%b byp=%b rwin=%b uld=%b sli=%0d pk=%b/%0d/%0d | lm=%b%b%b lqi=%0d,%0d,%0d seq=%0d,%0d,%0d rob=%0d,%0d,%0d | la_v=%b | lq v=%b av=%b alloc=%b@%0d seq=%0d rob=%0d kmask=%b | kd=%b rel=%b frv=%b red=%b | land=%b@%0d",
                c, dut.core.m_valid, dut.core.m_ld_nb, dut.core.m_seq, dut.core.m_rob_idx, dut.core.m_lq_idx, dut.core.m_dead, dut.core.m_advance,
                dut.core.s_go, dut.core.s_byp, dut.core.r_win, dut.core.u_ld, dut.core.s_li, dut.core.lq_pk_v, dut.core.lq_pk_idx, dut.core.lq_pk_seq,
                dut.core.l_lm[0], dut.core.l_lm[1], dut.core.l_lm[2], dut.core.l_lqi[0], dut.core.l_lqi[1], dut.core.l_lqi[2],
                dut.core.l_seq[0], dut.core.l_seq[1], dut.core.l_seq[2], dut.core.l_rob[0], dut.core.l_rob[1], dut.core.l_rob[2],
                dut.core.la_v,
-               dut.core.u_lq.v, dut.core.u_lq.av, dut.core.u_lq.tail, dut.core.d_ld_alloc, dut.core.lq_d_idx, dut.core.gld_seq, dut.core.gld_rob, dut.core.lq_kmask,
+               dut.core.u_lq.v, dut.core.u_lq.av, dut.core.d_ld_alloc, dut.core.lq_d_idx, dut.core.gld_seq, dut.core.gld_rob, dut.core.lq_kmask,
                dut.core.rob_kd_v, dut.core.fr_rel, dut.core.fr_v, dut.core.redirect,
                dut.core.ld_land, dut.core.ld_land_idx);
 
@@ -1376,6 +1405,15 @@ module tb;
                n_ldstart ? ((1000*n_ldreord)/n_ldstart)%10 : 0,
                n_ldblk, (100*n_ldblk)/mc, ((1000*n_ldblk)/mc)%10,
                n_sqocc/mc, ((100*n_sqocc)/mc)%100, n_sqfull);
+      lq_n = lq_cbo + lq_full + lq_two;
+      $display("LQ-SIM mean occupancy=%0d.%02d entries | no-credit cycles=%0d: cbo=%0d full=%0d two=%0d | entries in them, mean: no-address=%0d.%02d not-sent=%0d.%02d (alias-held=%0d.%02d untranslated=%0d.%02d) at-memory=%0d.%02d landed-watched=%0d.%02d",
+               n_lqocc/mc, ((100*n_lqocc)/mc)%100, lq_n, lq_cbo, lq_full, lq_two,
+               lq_n ? lq_noa/lq_n : 0,  lq_n ? ((100*lq_noa)/lq_n)%100 : 0,
+               lq_n ? lq_wait/lq_n : 0, lq_n ? ((100*lq_wait)/lq_n)%100 : 0,
+               lq_n ? lq_blk/lq_n : 0,  lq_n ? ((100*lq_blk)/lq_n)%100 : 0,
+               lq_n ? lq_utv/lq_n : 0,  lq_n ? ((100*lq_utv)/lq_n)%100 : 0,
+               lq_n ? lq_mem/lq_n : 0,  lq_n ? ((100*lq_mem)/lq_n)%100 : 0,
+               lq_n ? lq_lnd/lq_n : 0,  lq_n ? ((100*lq_lnd)/lq_n)%100 : 0);
       $display("SQ-DRAIN cycles: door-unaccepted=%0d drainable-LSU-idle=%0d head-not-drainable=%0d", n_stdoor, n_sqidle, n_sqwait);
       // every cycle in one top-down cause, and the dispatching causes account for every dispatch
       // outside a redirect's cycle: a cycle the IR's group dispatches is a dispatching cycle

@@ -1304,6 +1304,15 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   - **The alias matrix compares page offsets,** VA[11:0] = PA[11:0]. No queued access crosses a
     page, so two in one page compare exactly; synonyms share the offset, so they never miss each
     other; and the test runs the cycle the VA arrives, whatever the walker does.
+- **A load takes any free entry; program order is an age matrix.** An allocation takes the lowest
+  free slot, sets its row to the live entries (all older) and clears its column; every "oldest of
+  these" (the access candidate, the walker's and the fault's picks, M's fill pick) is the member no
+  other member is older than. Loads land out of order, so a ring's next slot could hold a load
+  still in flight while others were free: on the GB5 checkpoint slices 76% (Navigation) to 88%
+  (SQLite) of the cycles the queue head had no load-queue credit had room by the count. Free-slot
+  allocation against the ring: those slices -0.62% of their cycles (Navigation -0.96%, HTML5
+  -0.98%, SQLite -0.38%, PDF Rendering -0.19%, Camera -0.59%), pi -1.24%, the 60 M Linux lockstep
+  +0.34% retires.
 - **A queued load's access is one cycle after its fill, unless nothing is ordering it.**
   `smolrv64_lq` registers the address, then selects the oldest entry no older store can alias,
   then accesses -- the oldest *ready* entry, in any order the loads become ready: filled and
@@ -1676,6 +1685,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `ipend`, `fpend` | `smolrv64_pending` | 192, 128 | 1 | 320 | flops | readiness, a table per file indexed by {shard, index}: 18R that read both and let the number's file pick (the slots' rs1/rs2, 6; the lanes' operands, 6), 6R of the FP table alone (the slots' rs3, 3; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 3 sets, 5 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
 | `u_pa` `wb[0..1].mem` | `smolrv64_mwram` (in `smolrv64_lq`) | 16 a bank | 56 | 1 792 | LUTRAM | the load queue's PA, a bank per writer (M's fill, the walker's answer), 3R (the start's entry, the landing's two candidates); `lvt` (a bit an entry, flops) names the writer |
 | `pcm` | `smolrv64_lq` | 16 | 39 | 624 | LUTRAM | a load's PC: 1W dispatch, 1R the fault pick; `pch` (16 × 8 flops) keeps its wait-table bits, which every entry reports |
+| `om` | `smolrv64_lq` | 16 | 16 | 256 | flops | the load queue's program order: an entry's row names the entries older than it, written at its allocation (the row the live entries, its column cleared); every "oldest of these" reads it |
 | `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the drain's head, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
 | `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the drain's head; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
 | `u_q` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_frontend`) | 8 x 2 | 279 | 4 464 | LUTRAM | a decoder a bank: the bundle register's slot landing in the bank is rotated to it raw and decoded there, so each bank writes its own decoder's record (`BYBANK`); the three heads read. The decoupling queue: one decoded record per instruction (`FE_IRV`, `IRW = 2*PCW+PDW+SEQW+158`, the immediate and a fault's address stored as the payload stores them), its dispatch class (`gc`) included, so the queue head feeds the IR with no logic but the record |
@@ -2009,7 +2019,9 @@ op or the CBO the head waits behind), `MEM-SIM` (the D$'s misses), `DISP-SIM` (w
 dispatch behind slot k-1: a group rule, or the credit it lacks), `FWD-SIM` (the loads the store
 queue holds, by whether they can forward; an older store at the same offset in another page,
 which the offset compare holds it behind, apart), `SQ-DRAIN` (the store queue's head: the door
-unaccepted, drainable with the LSU idle, not drainable), `PORT-SIM` (a ready queued load the port
+unaccepted, drainable with the LSU idle, not drainable), `LQ-SIM` (the load queue's occupancy, its no-credit
+cycles by why: a head op in flight or in the IR, full, or room for one beside the IR's load; and
+the entries then by state), `PORT-SIM` (a ready queued load the port
 does not take, by what holds it), `PORTS-SIM` (cycles with one or more and two or more loads ready
 for memory, a ready load beside a committed store, two or more loads waiting for M), `DTLB-SIM`
 (the dMMU walker's busy cycles, its second-level lookups and walks), `TRAP-SIM` (the traps by
