@@ -82,15 +82,14 @@ l2.tlb2 : the second level (mmu L2N) on the first level's miss path, block RAM: 
 tg0     : I$ way 0 tags, read at the lookup's set (port B) and by the fill (port A)
 tg1     : I$ way 1 tags
 
-# ---- the D$'s physical state: one LUTRAM per (way, colour), 64 rows, read at two rows -------
-# (32 at DC_KB=128: 2 ways x 16 colours)
-ptw[*].pt_k x32 : D$ physical tags (the line); the probe reads each way's at its set's row, one array each
-ptw[*].pv_k x32 : D$ pvalid
-ptw[*].pd_k x32 : D$ dirty
+# ---- the D$'s state: per way, 64 rows (the set), LUTRAM -----------------------------------
+way[*].ta x32 : D$ tags, the main lookup's copy, read at its set
+way[*].tb x32 : D$ tags, the store lookup's copy, read at the store's set
+way[*].va x32 : D$ valid
+way[*].da x32 : D$ dirty
+way[*].ua x32 : D$ not recently used
 mbd_e   : D$ merge buffers, even chunks (as flops they were 4.6k registers and their muxes)
 mbd_o   : D$ merge buffers, odd chunks
-nru0    : D$ way 0 line recently used, per set
-nru1    : D$ way 1 line recently used, per set
 spl_ld : a lane load's record by LQ entry, written at dispatch, read at M's fill
 spl_st : a lane store's record by SQ entry, written at dispatch, read at M's fill
 fva_l : a load entry's full VA, a trap's tval

@@ -13,12 +13,11 @@
 // gold. Both start as a pattern of the address.
 //
 // TRANSLATION. NVP virtual pages map onto NPP physical pages at random, so several virtual pages
-// -- of different colours, VA[15:12] -- share one physical page (synonyms). Every REMAP cycles
-// one mapping changes -- half the time a page among the last 8 accessed -- and the cache is told
-// (ep_bump), as an sfence.vma would; wraps included.
-// As in the core, where sfence.vma waits for the store queue to drain, a remap waits until no
-// store is presented and the cache's store queue is empty: a request's translation holds in the
-// epoch it is taken in.
+// share one physical page (synonyms), and the pages outnumber the cache's ways two to one, so
+// sets overflow and lines are evicted. Every REMAP cycles one mapping changes -- half the time a
+// page among the last 8 accessed. As in the core, where sfence.vma waits for the store queue to
+// drain, a remap waits until no store is presented and the cache's store queue is empty. The
+// cache sees only PAs: a remap changes which lines the accesses touch, nothing it holds.
 //
 // REQUESTERS. 16 load tags, each with at most one load outstanding -- a cached load, a page-table
 // walk (by PA) or an NC load -- and the store port: committed stores, one a cycle whenever wr_room
@@ -44,13 +43,10 @@
 // does, with nothing in flight and nothing presented until it is done: then memory must equal
 // gold, every word.
 `include "tb_rand.vh"
-`ifndef DC_VIRT
- `define DC_VIRT 1
-`endif
 module tb;
    reg clk = 0, reset = 1;
    always #5 clk = ~clk;
-   localparam NTAG = 16, NVP = 48, NPP = 24, NOUT = 8, NMSHR = 8;
+   localparam NTAG = 16, NVP = 96, NPP = 64, NOUT = 8, NMSHR = 8;
    localparam [63:0] PBASE = 64'h8000_0000;
    integer seed, cycles, reorder, latmin, latmax, remap, timeout, stpct, fence;
    localparam NCS = 10;                         // the NC slot's memory-port id (NMSHR + NWB)
@@ -63,21 +59,21 @@ module tb;
    wire        rd_ack, rd_valid;  wire [63:0] rd_data, rd_resp_addr;  wire [3:0] rd_resp_tag;
    reg         wr_req;  reg [63:0] wr_va, wr_pa, wr_data;  reg [7:0] wr_mask;  wire wr_room, wr_acc, wr_cpl;
    reg         wr_nc, cbo_req, cbo_zero, cbo_keep;
-   reg         ep_bump, inv_req;  wire inv_busy;
+   reg         inv_req;  wire inv_busy;
    reg         ic_req;  reg [63:0] ic_pa;  wire ic_ack;
    wire        cq_valid, cq_we;  reg cq_ready;  wire [3:0] cq_slot;  wire [57:0] cq_addr;
    wire [63:0] cq_wmask;  wire [511:0] cq_wdata;
    reg         cr_valid, cr_last;  reg [3:0] cr_slot;  reg [1:0] cr_beat;  reg [127:0] cr_data;
    reg         cw_valid;  reg [3:0] cw_slot;
    wire        perf_access, perf_miss;  wire [15:0] err;
-   rv_dcache #(.VIRT(`DC_VIRT)) dut (.clk(clk), .reset(reset),
-      .rd_req(rd_req), .rd_va(rd_va), .rd_pa(rd_pa), .rd_tag(rd_tag), .rd_phys(rd_phys), .rd_nc(rd_nc), .rd_ack(rd_ack),
+   rv_dcache dut (.clk(clk), .reset(reset),
+      .rd_req(rd_req), .rd_pa(rd_pa), .rd_tag(rd_tag), .rd_nc(rd_nc), .rd_ack(rd_ack),
       .rd_valid(rd_valid), .rd_data(rd_data), .rd_resp_tag(rd_resp_tag), .rd_resp_addr(rd_resp_addr),
-      .wr_req(wr_req), .wr_va(wr_va), .wr_pa(wr_pa), .wr_data(wr_data), .wr_mask(wr_mask),
+      .wr_req(wr_req), .wr_pa(wr_pa), .wr_data(wr_data), .wr_mask(wr_mask),
       .wr_nc(wr_nc), .cbo_req(cbo_req), .cbo_zero(cbo_zero), .cbo_keep(cbo_keep),
       .wr_room(wr_room), .wr_acc(wr_acc), .wr_cpl(wr_cpl),
       .ic_req(ic_req), .ic_pa(ic_pa), .ic_ack(ic_ack),
-      .ep_bump(ep_bump), .inv_req(inv_req), .inv_busy(inv_busy),
+      .inv_req(inv_req), .inv_busy(inv_busy),
       .cq_valid(cq_valid), .cq_ready(cq_ready), .cq_slot(cq_slot), .cq_we(cq_we), .cq_addr(cq_addr),
       .cq_wmask(cq_wmask), .cq_wdata(cq_wdata),
       .cr_valid(cr_valid), .cr_slot(cr_slot), .cr_beat(cr_beat), .cr_last(cr_last), .cr_data(cr_data),
@@ -114,8 +110,8 @@ module tb;
    integer    n_req, n_resp, n_st, n_remap, n_miss, n_access, errors;
    integer    hp [0:7], ho [0:7], hw;           // the last 8 accesses' page and offset: locality
    // coverage: every outcome the cache has occurs
-   integer    c_own, c_drop, c_merge, c_alloc, c_wait, c_wrap, c_swr, c_smg, c_sal, c_ro, c_blk, c_def, n_out;
-   integer    c_nc, c_cln, c_cdone, c_zero, c_sq1, c_sqbk, c_skew, c_age;
+   integer    c_hit, c_drop, c_merge, c_alloc, c_wait, c_sal, c_ro, c_blk, c_def, n_out;
+   integer    c_nc, c_cln, c_cdone, c_zero, c_sq1, c_sqbk, c_age, c_fpw, c_fpg, c_fpm, c_fpwt, c_w1, c_dvic;
    reg [1:0]  out_kind [0:NTAG-1];              // 0 a cached load, 1 a walk, 2 NC
    reg [63:0] expv, mask, pa;  integer t, p, off, sz, pick, best, w;
    // acceptance is decided at the edge, by the pre-edge handshake
@@ -186,19 +182,20 @@ module tb;
       end
       for (k = 0; k < NTAG; k = k + 1) out_v[k] = 1'b0;
       for (k = 0; k < NOUT; k = k + 1) mo_v[k] = 1'b0;
-      rd_req = 0; rd_va = 0; rd_pa = 0; rd_tag = 0; rd_phys = 0; rd_nc = 0; ep_bump = 0; inv_req = 0; cq_ready = 0;
+      rd_req = 0; rd_va = 0; rd_pa = 0; rd_tag = 0; rd_phys = 0; rd_nc = 0; inv_req = 0; cq_ready = 0;
       wr_req = 0; wr_va = 0; wr_pa = 0; wr_data = 0; wr_mask = 0; st_pend = 0; st_t = 0; rm_due = 0;
       wr_nc = 0; cbo_req = 0; cbo_zero = 0; cbo_keep = 0; st_acc = 0; st_kind = K_ST;
       ic_req = 0; ic_pa = 0; ic_pend = 0; ic_t = 0; n_icl = 0; c_icw = 0;
       fn_due = 0; fn_wait = 0; fn_final = 0; fn_done = 0; fn_t = 0;
       n_ncst = 0; n_cln = 0; n_fl = 0; n_z = 0; n_dma = 0; n_fence = 0; n_walk = 0; n_ncld = 0;
-      c_nc = 0; c_cln = 0; c_cdone = 0; c_zero = 0; c_sq1 = 0; c_sqbk = 0; c_skew = 0; c_age = 0;
+      c_nc = 0; c_cln = 0; c_cdone = 0; c_zero = 0; c_sq1 = 0; c_sqbk = 0; c_age = 0;
+      c_fpw = 0; c_fpg = 0; c_fpm = 0; c_fpwt = 0; c_w1 = 0; c_dvic = 0;
       cr_valid = 0; cr_last = 0; cr_slot = 0; cr_beat = 0; cr_data = 0; cw_valid = 0; cw_slot = 0;
       n_req = 0; n_resp = 0; n_st = 0; n_remap = 0; n_miss = 0; n_access = 0; errors = 0; n_rd = 0; n_wr = 0;
       for (k = 0; k < 8; k = k + 1) begin hp[k] = 0; ho[k] = 0; end
       hw = 0;  seqn = 0;  beating = -1;  bi = 0;  now = 0;
-      c_own = 0; c_drop = 0; c_merge = 0; c_alloc = 0; c_wait = 0; c_wrap = 0;
-      c_swr = 0; c_smg = 0; c_sal = 0; c_ro = 0; c_blk = 0; c_def = 0;
+      c_hit = 0; c_drop = 0; c_merge = 0; c_alloc = 0; c_wait = 0;
+      c_sal = 0; c_ro = 0; c_blk = 0; c_def = 0;
       repeat (3) @(posedge clk);
       reset = 0;
       while (dut.inv_busy) @(posedge clk);
@@ -206,6 +203,8 @@ module tb;
       n_out = 1;
       for (now = 0; now < cycles || ((n_out != 0 || !fn_done) && now < cycles + 4 * timeout + FN_BUDGET); now = now + 1) begin
          @(negedge clk);
+         // ---- the D$'s integrity log (rv_dcache.v's invariants): any bit is a defect
+         if (err != 16'd0) begin $display("FAIL c=%0d: the D$ integrity log raises %b", now, err); errors = errors + 1; end
          // ---- this cycle's load answer (registered by the DUT at the last edge), against gold
          if (rd_valid) begin
             t = rd_resp_tag;
@@ -225,15 +224,16 @@ module tb;
          end
          if (perf_access) n_access = n_access + 1;
          if (perf_miss)   n_miss = n_miss + 1;
-         c_own = c_own + dut.m_own;  c_drop = c_drop + dut.m_drop;  c_merge = c_merge + dut.m_merge;
-         c_alloc = c_alloc + dut.m_alloc;  c_wait = c_wait + dut.m_wait;  c_wrap = c_wrap + dut.ep_wrap;
-         c_swr = c_swr + dut.s_write;  c_smg = c_smg + dut.m_smerge;  c_sal = c_sal + (dut.m_alloc & dut.s1_st);
+         c_hit = c_hit + dut.ans;  c_drop = c_drop + dut.m_drop;  c_merge = c_merge + dut.m_join;
+         c_alloc = c_alloc + dut.m_alloc;  c_wait = c_wait + dut.m_wait;
+         c_sal = c_sal + (dut.m_alloc & dut.s1_st);
          c_ro = c_ro + (dut.ro_need & ~dut.ro_block & ~dut.wb_block);  c_blk = c_blk + dut.blk_st;  c_def = c_def + dut.m_defer;
          c_nc = c_nc + dut.m_nc;  c_cln = c_cln + dut.m_clean;  c_cdone = c_cdone + dut.m_cdone;
-         c_zero = c_zero + (dut.k_z & (dut.m_alloc | dut.m_smerge));
+         c_zero = c_zero + (dut.k_z & dut.m_alloc);
          c_sq1 = c_sq1 + (dut.st_go & dut.si);  c_sqbk = c_sqbk + dut.sq_bk;
-         c_skew = c_skew + (dut.m_alloc & dut.pick1 & (dut.s1_set1 != dut.s1_set));   // way 1 filled away from way 0's set
-         c_age = c_age + (dut.m_alloc & dut.nru_age);
+         c_age = c_age + ((dut.m_alloc & dut.vic_age) | dut.age_hit);
+         c_fpw = c_fpw + dut.fp_wr;  c_fpg = c_fpg + dut.fp_mg;  c_fpm = c_fpm + dut.fp_miss;  c_fpwt = c_fpwt + (dut.sb_hd & dut.bhit & dut.sb_wait);
+         c_w1 = c_w1 + dut.blk_w1;  c_dvic = c_dvic + (dut.m_alloc & dut.vic_dty);
          c_icw = c_icw + (dut.m_clean & dut.cp_dty & dut.sf_ic[dut.sq_hp]);   // an I$ clean found the line dirty
          // ---- the load taken at the last edge
          if (took) begin out_v[took_tag] = 1'b1; out_t[took_tag] = now; n_req = n_req + 1; end
@@ -320,21 +320,20 @@ module tb;
          for (k = 0; k < NTAG; k = k + 1) n_out = n_out + out_v[k];
          if (now > 0 && fence > 0 && (now % fence) == 0 && now < cycles) fn_due = 1;
          if (now >= cycles && n_out == 0 && !fn_final) begin fn_due = 1;  fn_final = 1; end
-         if (fn_due && !st_pend && !ic_pend && !fn_wait && n_out == 0 && !took && !rd_req) begin fn_due = 0;  fn_wait = 1;  fn_t = now;  inv_req = 1'b1;  n_fence = n_fence + 1; end
+         if (fn_due && !st_pend && !ic_pend && !fn_wait && n_out == 0 && !took && !rd_req && !wr_req) begin fn_due = 0;  fn_wait = 1;  fn_t = now;  inv_req = 1'b1;  n_fence = n_fence + 1; end
          else if (fn_wait && now > fn_t + 1 && !inv_busy) begin
             fn_wait = 0;
             for (w = 0; w < NWD; w = w + 8) check_line(PBASE + 64'(w) * 8, "the clean");
             if (fn_final) fn_done = 1;
          end
          if (fn_wait && now - fn_t > FN_BUDGET) begin $display("FAIL c=%0d: the clean not done", now); errors = errors + 1; fn_wait = 0; fn_done = 1; end
-         // ---- a remap: one mapping changes, and the cache hears of it
-         ep_bump = 1'b0;
+         // ---- a remap: one mapping changes
          if ((now % remap) == remap - 1) rm_due = 1;
          if (rm_due && !st_pend && !wr_req && dut.sc == 2'd0) begin
             rm_due = 0;
             p = (rnd(0) % 2) ? hp[rnd(0) % 8] : rnd(0) % NVP;   // half the time a page in use
             vp_pp[p] = rnd(0) % NPP;
-            ep_bump = 1'b1;  n_remap = n_remap + 1;
+            n_remap = n_remap + 1;
          end
          // ---- the memory model's response side: one beat and one write completion per cycle
          cr_valid = 1'b0;  cr_last = 1'b0;  cw_valid = 1'b0;
@@ -405,15 +404,15 @@ module tb;
       end
       if (n_req != n_resp) begin $display("FAIL: %0d loads, %0d answered after the drain", n_req, n_resp); errors = errors + 1; end
       if (!fn_done) begin $display("FAIL: the final clean never finished"); errors = errors + 1; end
-      if (c_own == 0 || c_drop == 0 || c_merge == 0 || c_alloc == 0 || c_wait == 0 || c_wrap == 0 ||
-          c_swr == 0 || c_smg == 0 || c_sal == 0 || c_ro == 0 || c_blk == 0 || c_def == 0 || n_wr == 0 ||
+      if (c_hit == 0 || c_drop == 0 || c_merge == 0 || c_alloc == 0 || c_wait == 0 ||
+          c_sal == 0 || c_ro == 0 || c_blk == 0 || c_def == 0 || n_wr == 0 ||
           c_nc == 0 || c_cln == 0 || c_cdone == 0 || c_zero == 0 || n_dma == 0 || n_walk == 0 || n_ncld == 0 || n_ncst == 0 ||
-          c_sq1 == 0 || c_sqbk == 0 || c_age == 0 || (`DC_VIRT == 0 && c_skew == 0) || n_icl == 0 || c_icw == 0) begin
+          c_age == 0 || n_icl == 0 || c_icw == 0 || c_fpw == 0 || c_fpg == 0 || c_fpm == 0 || c_fpwt == 0 || c_dvic == 0) begin
          $display("FAIL: an outcome never occurred"); errors = errors + 1;
       end
-      $display("DCACHE-TB %s seed=%0d %s: %0d loads (%0d walks, %0d NC), %0d stores, %0d NC stores, CBOs %0d clean %0d flush (%0d DMA) %0d zero, %0d cleans; %0d requests: %0d own-set, %0d drop, %0d merge, %0d alloc, %0d wait (%0d behind the store), %0d defer; stores %0d written, %0d merged, %0d allocated; %0d read-outs, %0d reads, %0d writes; %0d remaps, %0d wraps; store queue %0d issued behind the head, %0d sent back; %0d way-1 fills off way 0's set, %0d ageings; %0d I$ cleans (%0d found dirty)",
+      $display("DCACHE-TB %s seed=%0d %s: %0d loads (%0d walks, %0d NC), %0d stores, %0d NC stores, CBOs %0d clean %0d flush (%0d DMA) %0d zero, %0d cleans; %0d requests: %0d hits, %0d drop, %0d merge, %0d alloc (%0d dirty victims), %0d wait (%0d behind the store), %0d defer (%0d a row written as read); store lookup %0d written, %0d merged, %0d missed, %0d waited; main-lookup stores %0d allocated; %0d read-outs, %0d reads, %0d writes; %0d remaps; store queue %0d issued behind the head, %0d sent back; %0d ageings; %0d I$ cleans (%0d found dirty)",
                errors ? "FAIL" : "PASS", seed, reorder ? "reorder" : "in-order", n_resp, n_walk, n_ncld, n_st, n_ncst, n_cln, n_fl, n_dma, n_z, n_fence, n_access,
-               c_own, c_drop, c_merge, c_alloc, c_wait, c_blk, c_def, c_swr, c_smg, c_sal, c_ro, n_rd, n_wr, n_remap, c_wrap, c_sq1, c_sqbk, c_skew, c_age, n_icl, c_icw);
+               c_hit, c_drop, c_merge, c_alloc, c_dvic, c_wait, c_blk, c_def, c_w1, c_fpw, c_fpg, c_fpm, c_fpwt, c_sal, c_ro, n_rd, n_wr, n_remap, c_sq1, c_sqbk, c_age, n_icl, c_icw);
       $finish;
    end
 endmodule

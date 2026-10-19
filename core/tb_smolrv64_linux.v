@@ -877,6 +877,40 @@ module tb;
    end
 
    // ---- MEM-SIM: the D$'s misses, printed with TOPDOWN-SIM --------------------------------
+   // STLK-SIM: the D$'s store queue, by cycle: the store lookup's head writes or merges into a fill,
+   // or waits and why (a fill whose beat has landed; the main lookup's request in its set, a plain
+   // load or another kind; a fill beat in its array; a line installing in its way or another);
+   // misses, an entry behind the head sent back, the queue full, stores the main lookup completed,
+   // the queue not empty; and a plain store's outcome in the main lookup.
+   reg [63:0] sl_wr, sl_s1ld, sl_s1x, sl_fb, sl_flw, sl_flx, sl_miss, sl_back, sl_full, sl_main, sl_idle;
+   reg [63:0] sm_alloc, sm_wait, sm_defer, sl_mg, sl_fw;
+   initial begin sl_wr = 0; sl_s1ld = 0; sl_s1x = 0; sl_fb = 0; sl_flw = 0; sl_flx = 0; sl_miss = 0;
+                 sl_back = 0; sl_full = 0; sl_main = 0; sl_idle = 0;
+                 sm_alloc = 0; sm_wait = 0; sm_defer = 0; sl_mg = 0; sl_fw = 0; end
+   always @(posedge clk) if (!reset && meas) begin : stlk
+      reg hb, s1s, fbc;
+      hb  = dut.u_dcache.sb_hd & dut.u_dcache.bhit;
+      s1s = dut.u_dcache.s1_v & (dut.u_dcache.s1_set == dut.u_dcache.sb_set);
+      fbc = dut.u_dcache.fb_v;
+      if (dut.u_dcache.fp_mg)                  sl_mg   <= sl_mg + 1;
+      if (dut.u_dcache.sb_hd & ~dut.u_dcache.bhit & dut.u_dcache.sb_ms & ~dut.u_dcache.sb_mgok) sl_fw <= sl_fw + 1;
+      if (dut.u_dcache.fp_wr)                  sl_wr   <= sl_wr + 1;
+      else if (hb & s1s & dut.u_dcache.k_ld)   sl_s1ld <= sl_s1ld + 1;
+      else if (hb & s1s)                       sl_s1x  <= sl_s1x + 1;
+      else if (hb & fbc)                       sl_fb   <= sl_fb + 1;
+      else if (hb & dut.u_dcache.fl_v & dut.u_dcache.bhitv[dut.u_dcache.ms_way[dut.u_dcache.fl_m]]) sl_flw <= sl_flw + 1;
+      else if (hb & dut.u_dcache.fl_v)         sl_flx  <= sl_flx + 1;
+      if (dut.u_dcache.fp_miss)                sl_miss <= sl_miss + 1;
+      if (dut.u_dcache.sb_v & ~dut.u_dcache.sb_hd) sl_back <= sl_back + 1;
+      if (dut.u_dcache.sc == 2'd3)             sl_full <= sl_full + 1;
+      if (dut.u_dcache.st_done & ~dut.u_dcache.fp_wr) sl_main <= sl_main + 1;
+      if (dut.u_dcache.sc != 2'd0)             sl_idle <= sl_idle + 1;
+      if (dut.u_dcache.s1_v & dut.u_dcache.k_st & ~dut.u_dcache.sq_bk) begin
+         if (dut.u_dcache.m_alloc)        sm_alloc <= sm_alloc + 1;
+         else if (dut.u_dcache.m_defer)   sm_defer <= sm_defer + 1;
+         else                             sm_wait  <= sm_wait + 1;
+      end
+   end
    // Cycles any fill is in flight and the MSHRs live over them, fills started, cycles a request is
    // parked in the waiter table, cycles the write-back buffer is full, and of the ST_MEM event's
    // cycles (M holds a head op, or issue waits on an integer load's, AMO's or CSR read's result),
@@ -1374,6 +1408,9 @@ module tb;
       $display("MEM-SIM dcache fill-cycles=%0d fills=%0d mean-mshrs=%0.2f waiting-cycles=%0d wb-full-cycles=%0d | ST_MEM cycles=%0d with-fill=%0d with-waiting=%0d",
                ms_fill, ms_fills, (ms_fill != 0) ? $itor(ms_live) / $itor(ms_fill) : 0.0, ms_park, ms_wbfull,
                ms_stmem, ms_stmem_fill, ms_stmem_park);
+      $display("STLK-SIM store-queue cycles: lookup-writes=%0d lookup-merges=%0d | head waits: fill-landing=%0d main-lookup-load-in-set=%0d main-lookup-other-in-set=%0d fill-beat=%0d install-same-way=%0d install-other-way=%0d | misses=%0d sent-back-behind-head=%0d queue-full=%0d main-lookup-done=%0d queue-not-empty=%0d",
+               sl_wr, sl_mg, sl_fw, sl_s1ld, sl_s1x, sl_fb, sl_flw, sl_flx, sl_miss, sl_back, sl_full, sl_main, sl_idle);
+      $display("STLK-SIM a plain store in the main lookup: allocates=%0d deferred=%0d waits=%0d", sm_alloc, sm_defer, sm_wait);
       if (kan_on) begin kan_finish; $fclose(kf); end
       $display("perf-stat-sim: begin");
       $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run

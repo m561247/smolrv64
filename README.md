@@ -18,8 +18,8 @@ login prompt on the board with zero faults before it lands.
 |---|---|
 | Geekbench 5.4.1, board, 2026-10-18 | **17** single-core (Integer 20, Crypto 2, Floating Point 12), **16** multi-core ([result 24734381](https://browser.geekbench.com/v5/cpu/24734381), [every subtest](workloads/gb5/result-2026-10-18b.md)); the whole suite in 1 h 49 min at IPC 1.18 |
 | Geekbench 6.7.1, board (4 GiB), 2026-10-15 to 16 | **10** single-core, **10** multi-core ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041), [every subtest](workloads/gb6/result-2026-10-16.md)); the whole suite in 17 h 48 min at IPC 1.00 |
-| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-18 | **2.56** DMIPS/MHz: 222.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
-| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-18 | **4.15** CoreMark/MHz: 240,760 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; 4.03 at `-O3 -funroll-all-loops`; `make run B=coremark`) |
+| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-18 | **2.44** DMIPS/MHz: 233.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
+| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-18 | **4.15** CoreMark/MHz: 241,079 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; 4.03 at `-O3 -funroll-all-loops`; `make run B=coremark`) |
 | `sha256sum` of a 30 MB file, board, 2026-09-25 | IPC 1.56 to 1.63 over three runs, 43 cycles per byte |
 | Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed three-wide; DDR4 at 333 MHz |
 | Software | OpenSBI and mainline Linux; Ubuntu 25.04 boots over an NFS root through the core's own virtio-net |
@@ -28,8 +28,8 @@ login prompt on the board with zero faults before it lands.
 score 2, 4 and 1. They are SIMD-shaped kernels: Machine Learning executes about six billion
 scalar instructions per image, where Geekbench's reference machine uses SIMD, and this core has
 no vector extension. Its hot loop, a naive SGEMM, walks a column of a matrix at a 2048- or
-4096-byte stride; the data cache's skewed second way and the 2048-entry dTLB are what keep that
-walk out of DRAM and out of the page walker. A vector unit is the larger lever on all three,
+4096-byte stride, which puts every element of a column in one set of the data cache, whose 32
+ways hold 32 of them; the 2048-entry dTLB keeps the walk out of the page walker. A vector unit is the larger lever on all three,
 and whether one fits without giving up the clock is an open question below.
 
 ## Why it is interesting
@@ -88,18 +88,18 @@ is read off the RTL or measured with the workload named):
 - **Caches built from what the part has.** A 128 KiB two-way instruction cache that is
   virtually indexed and hits on its virtual tag and an epoch, reconciling by physical tag
   only on a miss, so a hit needs no translation; it reads a 16-byte pair every cycle, and its
-  valid bits are banked into 64-row LUTRAMs so `fence.i` clears them in 64 cycles. A 128 KiB
-  two-way write-back data cache that never blocks on a miss: one lookup a cycle, answered by
-  tag two cycles later; a store queue that takes a store every cycle; eight miss registers
-  whose merge buffers let loads and stores join a line in flight; hits under misses; two
-  write-back lines; and a waiter table that replays each blocked requester, round robin, when
-  what it waits on frees. Its second way is indexed by a hash of the line address, so a
-  power-of-two stride that would crowd a few sets of one way spreads over all of the other;
-  a not-recently-used bit per line picks the way to fill. Its tags, valid and dirty bits
-  live per page colour in LUTRAM, so one read finds every place a line can live; it is built
-  to be virtually indexed and runs physically indexed. Both caches use 64-byte
-  lines in even/odd 64-bit block-RAM banks. Page-table walks read through the data cache, so
-  a walk always sees dirty page-table entries.
+  valid bits are banked into 64-row LUTRAMs so `fence.i` clears them in 64 cycles; its 64-byte
+  lines sit in even/odd 64-bit block-RAM banks. A 128 KiB, 32-way write-back data cache, its
+  set inside the page offset so no line can have a synonym, that never blocks on a miss: two
+  lookups a cycle, one for a load, answered by tag two cycles later, and one for a committed
+  store, which writes its bytes into the one block RAM that holds them or merges them into its
+  line's fill; a store queue that takes a store every cycle; eight miss registers whose merge
+  buffers let loads and stores join a line in flight; hits under misses; two write-back lines;
+  and a waiter table that replays each blocked requester, round robin, when what it waits on
+  frees. A not-recently-used bit per line picks the way to fill. Its data lies diagonally over
+  32 block RAMs, so a load reads one 64-bit word of each and a dirty line comes out whole in
+  one cycle. Page-table walks read through the data cache, so a walk always sees dirty
+  page-table entries.
 - **Virtual memory as Linux expects it.** Sv39 with hardware page-table walkers, a
   2048-entry direct-mapped dTLB (8 MiB of reach) and a 64-entry iTLB, superpages, Ssvnapot leaves, Svpbmt non-cacheable mappings plus Zicbom
   and Zicboz cache-management operations, so the kernel drives non-coherent virtio DMA
@@ -297,8 +297,8 @@ explains each line and the `cpi` and `mem` sets that go under it.
 ## What comes next
 
 - The data cache's end state ([docs/PLAN-2026-10-03-dcache-vipt-l2.md](docs/PLAN-2026-10-03-dcache-vipt-l2.md)):
-  a 1.5 MiB L2 in UltraRAM, in the memory controller's 333 MHz domain; then a virtually indexed,
-  physically tagged L1 of 32 ways of 4 KiB, free of aliases, its dTLB read beside the data.
+  its dTLB read beside the data; a 1.5 MiB L2 in UltraRAM, in the memory controller's 333 MHz
+  domain; then a second load lookup.
 - One out-of-order load/store pipe: loads and stores issued out of order, translated in
   their queues, with memory speculation and replay.
 - A review of the clock: 250 MHz would be worth 50%, with the memory controller's 333 MHz

@@ -675,14 +675,14 @@ module rv_soc_top #(
          $fatal(1, "rv_soc_top: two write acks at once (vio=%b dev=%b dc=%b) -- wready ambiguous",
                 vio_wack, dev_wack, dc_wr_cpl);
 
-   // The D$ (rv_dcache, docs/PLAN-2026-09-25-dcache-vhpr.md) is write-back and non-blocking: a
-   // miss parks in its waiter table and hits behind it answer first, by tag. It is a client of
-   // rv_mem_arbiter in its own right, up to 8 fills, 2 write-backs and an NC access in flight.
-   // VIRT=0: the core translates before it asks, so every request is presented by PA. PTW reads
-   // are routed THROUGH the D$ (the dcr_* read-port arbiter below), so a page-table walk always
-   // sees dirty PTEs -- the D$ is the coherency point. sfence.vma therefore needs NO D$ flush
-   // (just a TLB flush); only fence.i still clean-flushes (the I$ reads memory directly) -- see
-   // the df_* FSM below.
+   // The D$ (rv_dcache, docs/PLAN-2026-10-03-dcache-vipt-l2.md) is an alias-free VIPT L1,
+   // write-back and non-blocking: a miss parks in its waiter table and hits behind it answer
+   // first, by tag. It is a client of rv_mem_arbiter in its own right, up to 8 fills, 2
+   // write-backs and an NC access in flight. The core translates before it asks, so every request
+   // is presented by PA (its set, PA[11:6], is the VA's too). PTW reads are routed THROUGH the D$
+   // (the dcr_* read-port arbiter below), so a page-table walk always sees dirty PTEs -- the D$ is
+   // the coherency point. sfence.vma needs NO D$ flush (just a TLB flush), and fence.i none either:
+   // the I$ asks the D$ to clean each line before it fills it (ic_req), so dc_inv_req stays low.
    wire        dcr_req;  wire [63:0] dcr_addr;     // muxed D$ read port (LSU + 3 PTW), assigned below
    wire dc_inv_req, dc_inv_busy;
    wire dc_ic_req, dc_ic_ack, dc_ic_dty;          // the I$'s line clean beside each fill
@@ -697,21 +697,21 @@ module rv_soc_top #(
    wire [MC*512-1:0]   mc_q_wdata;
    wire [MSW-1:0]      mc_r_slot, mc_w_slot;
    wire [1:0]          mc_r_beat;  wire mc_r_last;  wire [127:0] mc_r_data;
-   rv_dcache #(.SIZE_KB(DC_KB), .RTW(DRTW), .PABITS(PABITS), .SW(MSW), .VIRT(0)) u_dcache
+   rv_dcache #(.SIZE_KB(DC_KB), .RTW(DRTW), .PABITS(PABITS), .SW(MSW)) u_dcache
      (.clk(clk), .reset(reset),
-      .rd_req(dcr_req), .rd_va(dcr_addr), .rd_pa(dcr_addr), .rd_tag(dcr_tag), .rd_ack(dc_rd_ack),
+      .rd_req(dcr_req), .rd_pa(dcr_addr), .rd_tag(dcr_tag), .rd_ack(dc_rd_ack),
       // Svpbmt: only a LSU load read can be NC (PTW reads share dcr but are always cacheable -> 0
       // when c_rd_req is low). The store's NC bit qualifies the write port.
-      .rd_phys(1'b1), .rd_nc(c_rd_req & c_rd_unc),
+      .rd_nc(c_rd_req & c_rd_unc),
       .rd_valid(dc_rd_valid), .rd_data(dc_rd_data), .rd_resp_tag(dc_rd_resp_tag), .rd_resp_addr(dc_rd_resp_addr),
       // ~dc_wr_cpl: a CBO or uncached write holds its request through the cycle its completion
       // is registered, and the D$ is idle again in that cycle -- without this it is taken twice.
-      .wr_req(dmem_wen & ~dc_wr_cpl & ~(dmem_wfsm & is_dev_w)), .wr_va(dmem_waddr), .wr_pa(dmem_waddr),
+      .wr_req(dmem_wen & ~dc_wr_cpl & ~(dmem_wfsm & is_dev_w)), .wr_pa(dmem_waddr),
       .wr_data(dmem_wdata), .wr_mask(dmem_wmask), .wr_nc(dmem_wuncached),
       .cbo_req(dmem_cbo & ~dc_wr_cpl & ~is_dev_w), .cbo_zero(dmem_cbo_zero), .cbo_keep(dmem_cbo_keep),
       .wr_room(dc_wr_room), .wr_acc(dc_wr_acc), .wr_cpl(dc_wr_cpl),
       .ic_req(dc_ic_req), .ic_pa({ic_l2_addr, 6'd0}), .ic_ack(dc_ic_ack), .ic_dty(dc_ic_dty),
-      .ep_bump(1'b0), .inv_req(dc_inv_req), .inv_busy(dc_inv_busy),
+      .inv_req(dc_inv_req), .inv_busy(dc_inv_busy),
       .cq_valid(mc_q_valid[0]), .cq_ready(mc_q_ready[0]), .cq_slot(mc_q_slot[0*MSW +: MSW]),
       .cq_we(mc_q_we[0]), .cq_addr(mc_q_addr[0*LAW +: LAW]), .cq_wmask(mc_q_wmask[0*64 +: 64]),
       .cq_wdata(mc_q_wdata[0*512 +: 512]),
