@@ -2007,8 +2007,14 @@ overlapping store, a device load at the head, forwarding, a D$ waiter, in the D$
 in a landing buffer; a CSR read in the SYSQ; an AMO in M), `SER-SIM` (the serialising op, the CSR
 op or the CBO the head waits behind), `MEM-SIM` (the D$'s misses), `DISP-SIM` (why slot k does not
 dispatch behind slot k-1: a group rule, or the credit it lacks), `FWD-SIM` (the loads the store
-queue holds, by whether they can forward), `SQ-DRAIN` (the store queue's head: the door
-unaccepted, drainable with the LSU idle, not drainable), `XLATE-SIM` (dTLB hits, address faults,
+queue holds, by whether they can forward; an older store at the same offset in another page,
+which the offset compare holds it behind, apart), `SQ-DRAIN` (the store queue's head: the door
+unaccepted, drainable with the LSU idle, not drainable), `PORT-SIM` (a ready queued load the port
+does not take, by what holds it), `PORTS-SIM` (cycles with one or more and two or more loads ready
+for memory, a ready load beside a committed store, two or more loads waiting for M), `DTLB-SIM`
+(the dMMU walker's busy cycles, its second-level lookups and walks), `TRAP-SIM` (the traps by
+cause and mode, the cycles and retires in each mode, the PCs of the M-mode traps), `XLATE-SIM`
+(dTLB hits, address faults,
 the walker), `FRING-SIM` (the fetch stream, its taken and not-taken marks) and `FPORT-SIM`/
 `TRAIN-SIM` (the register-file readers, the predictor's training).
 

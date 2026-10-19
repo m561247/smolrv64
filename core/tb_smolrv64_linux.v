@@ -768,6 +768,85 @@ module tb;
       end
    end
 
+   // ---- TRAP-SIM: the traps csr_file takes, by cause and by the mode they go to (an interrupt's
+   // cause is 16 + its number), and the cycles and retires in each privilege mode -------------
+   reg [63:0] trc_n [0:31][0:1];
+   reg [63:0] trc_cyc [0:3], trc_ret [0:3];
+   integer    tri_, trj_;
+   initial begin
+      for (tri_ = 0; tri_ < 32; tri_ = tri_ + 1) begin trc_n[tri_][0] = 0; trc_n[tri_][1] = 0; end
+      for (tri_ = 0; tri_ < 4; tri_ = tri_ + 1) begin trc_cyc[tri_] = 0; trc_ret[tri_] = 0; end
+   end
+   // ...and the first 16 distinct (pc, cause) of the M-mode traps, each with its count and last tval
+   reg [39:0] trp_pc [0:15];  reg [4:0] trp_k [0:15];  reg [63:0] trp_n [0:15], trp_tv [0:15];
+   integer    trp_used;
+   initial trp_used = 0;
+   always @(posedge clk) if (!reset && meas && dut.core.u_csr.trap_v && !dut.core.u_csr.trap_to_s) begin : trappc
+      integer k, j, hit;
+      k = (dut.core.u_csr.trap_is_intr ? 16 : 0) + 32'(dut.core.u_csr.trap_cause[3:0]);
+      hit = -1;
+      for (j = 0; j < trp_used; j = j + 1) if (trp_pc[j] == dut.core.u_csr.trap_epc && trp_k[j] == 5'(k)) hit = j;
+      if (hit >= 0) begin trp_n[hit] = trp_n[hit] + 1; trp_tv[hit] = dut.core.u_csr.trap_tval; end
+      else if (trp_used < 16) begin
+         trp_pc[trp_used] = dut.core.u_csr.trap_epc; trp_k[trp_used] = 5'(k); trp_n[trp_used] = 1;
+         trp_tv[trp_used] = dut.core.u_csr.trap_tval; trp_used = trp_used + 1;
+      end
+   end
+   always @(posedge clk) if (!reset && meas) begin : trapsim
+      integer k;
+      k = (dut.core.u_csr.trap_is_intr ? 16 : 0) + 32'(dut.core.u_csr.trap_cause[3:0]);
+      if (dut.core.u_csr.trap_v) trc_n[k][dut.core.u_csr.trap_to_s ? 1 : 0] <= trc_n[k][dut.core.u_csr.trap_to_s ? 1 : 0] + 1;
+      trc_cyc[dut.core.u_csr.priv] <= trc_cyc[dut.core.u_csr.priv] + 1;
+      trc_ret[dut.core.u_csr.priv] <= trc_ret[dut.core.u_csr.priv] + 64'($countones(retire));
+   end
+
+   // ---- PORT-SIM: the cycles the load queue offers a ready load and the port does not take it, by
+   // the first reason: a committed store drains (it has the port), the LSU's state machine is
+   // busy (a store at the D$ door, a slow access), M's walk holds it, a read waits at the D$'s
+   // door, the load's tag still has a response due ------------------------------------------
+   reg [63:0] pt_n [0:5];
+   integer    pti;
+   initial for (pti = 0; pti < 6; pti = pti + 1) pt_n[pti] = 0;
+   always @(posedge clk) if (!reset && meas && dut.core.lq_x_v && !dut.core.lq_x_take) begin
+      if (dut.core.sq_go)                                              pt_n[0] <= pt_n[0] + 1;
+      else if (dut.core.u_lsu.st != 3'd0)                              pt_n[1] <= pt_n[1] + 1;
+      else if (dut.core.u_lsu.mmu_walking && dut.core.u_lsu.pm_q)      pt_n[2] <= pt_n[2] + 1;
+      else if (dut.core.u_lsu.mem_rbusy)                               pt_n[3] <= pt_n[3] + 1;
+      else if (dut.core.u_lsu.o_v[dut.core.u_lsu.pt_tag])              pt_n[4] <= pt_n[4] + 1;
+      else                                                             pt_n[5] <= pt_n[5] + 1;
+   end
+
+   // ---- PORTS-SIM: what more memory ports would find to do, cycles: a load ready to go to the D$
+   // (a queue candidate, or M's early start), two or more such loads, a ready load and a committed
+   // store wanting the port together, a committed store alone, and two or more loads whose
+   // address has arrived waiting for M's single translate pass -----------------------------
+   reg [63:0] po_ld1, po_ld2, po_ldst, po_st, po_ar2;
+   initial begin po_ld1 = 0; po_ld2 = 0; po_ldst = 0; po_st = 0; po_ar2 = 0; end
+   always @(posedge clk) if (!reset && meas) begin : portssim
+      integer nl, na;
+      nl = $countones(dut.core.u_lq.rdy_m) + ((dut.core.m_lq_fill && dut.core.lsu_xo_early) ? 1 : 0);
+      na = $countones(dut.core.u_lq.v & ~dut.core.u_lq.av & dut.core.u_lq.ar);
+      if (nl >= 1) po_ld1 <= po_ld1 + 1;
+      if (nl >= 2) po_ld2 <= po_ld2 + 1;
+      if (nl >= 1 && dut.core.sq_c_v) po_ldst <= po_ldst + 1;
+      if (nl == 0 && dut.core.sq_c_v) po_st <= po_st + 1;
+      if (na >= 2) po_ar2 <= po_ar2 + 1;
+   end
+
+   // ---- DTLB-SIM: the dMMU walker's cycles busy (a second-level lookup or a walk), its lookups,
+   // those the second level answers, the full walks after them and their PTE reads ---------
+   reg [63:0] dt_busy, dt_lk, dt_l2, dt_walk, dt_pte;
+   initial begin dt_busy = 0; dt_lk = 0; dt_l2 = 0; dt_walk = 0; dt_pte = 0; end
+   always @(posedge clk) if (!reset && meas) begin
+      if (dut.core.u_lsu.u_mmu.st != 2'd0)  dt_busy <= dt_busy + 1;
+      if (dut.core.u_lsu.u_mmu.st == 2'd3) begin
+         dt_lk <= dt_lk + 1;
+         if (dut.core.u_lsu.u_mmu.l2_fill) dt_l2 <= dt_l2 + 1;
+      end
+      if ((dut.core.u_lsu.u_mmu.st == 2'd3) && dut.core.u_lsu.u_mmu.req_match && !dut.core.u_lsu.u_mmu.l2_hit) dt_walk <= dt_walk + 1;
+      if ((dut.core.u_lsu.u_mmu.st == 2'd2) && dut.core.u_lsu.u_mmu.ptw_rvalid) dt_pte <= dt_pte + 1;
+   end
+
    // ---- MEM-SIM: the D$'s misses, printed with TOPDOWN-SIM --------------------------------
    // Cycles any fill is in flight and the MSHRs live over them, fills started, cycles a request is
    // parked in the waiter table, cycles the write-back buffer is full, and of the ST_MEM event's
@@ -858,14 +937,16 @@ module tb;
    // it waits for, more than one older store overlapping it, the one not holding all its bytes
    // (partial, or the page offsets alias another page), the one's data not in, or the rest (that
    // store untranslated, faulting or uncached or draining now, the load uncached, or a block that
-   // clears a cycle late). Load-cycles, so a cycle with two held loads counts two.
-   localparam integer FW_LQ = 1 << `SMOLRV64_LQB, FW_SQ = 1 << `SMOLRV64_SQB, FW_IB = `SMOLRV64_SQB, FW_N = 11;
+   // clears a cycle late). Load-cycles, so a cycle with two held loads counts two. The one store not
+   // holding all its bytes splits by its page: the load's (partial) or another (page-alias: the
+   // store queue's overlap test reads page offsets, so it waits for that store's drain all the same).
+   localparam integer FW_LQ = 1 << `SMOLRV64_LQB, FW_SQ = 1 << `SMOLRV64_SQB, FW_IB = `SMOLRV64_SQB, FW_N = 12;
    wire [FW_LQ-1:0] fw_nx;                    // each load's fwn: it forwards from the next cycle
    genvar gfw;
    generate for (gfw = 0; gfw < FW_LQ; gfw = gfw + 1) begin : fwn_g
       assign fw_nx[gfw] = dut.core.u_sq.g_lblk[gfw].fwn;
    end endgenerate
-   reg [63:0] fw_go_n, fw_c [0:FW_N-1];      // busy, drain, LSU, older, start; next, unknown, several, partial, no-data, other
+   reg [63:0] fw_go_n, fw_c [0:FW_N-1];      // busy, drain, LSU, older, start; next, unknown, several, partial, no-data, other, page-alias
    integer    fwi;
    initial begin fw_go_n = 0; for (fwi = 0; fwi < FW_N; fwi = fwi + 1) fw_c[fwi] = 0; end
    always @(posedge clk) if (!reset && meas && dut.core.lq_x_take && dut.core.lq_x_fwd) fw_go_n <= fw_go_n + 1;   // forwards started
@@ -890,7 +971,9 @@ module tb;
                end
             end
             k = (unk && dut.core.u_lq.wt[l]) ? 6 : (nov > 1) ? 7
-              : (nov == 1 && !dut.core.u_sq.cov[l][ys]) ? 8 : (nov == 1 && !dut.core.u_sq.dv[ys]) ? 9 : 10;
+              : (nov == 1 && !dut.core.u_sq.cov[l][ys])
+                ? (({dut.core.u_sq.bare[ys], dut.core.u_sq.va[ys][38:12]} == {dut.core.u_lq.bare[l], dut.core.u_lq.va[l][38:12]}) ? 8 : 11)
+              : (nov == 1 && !dut.core.u_sq.dv[ys]) ? 9 : 10;
          end
          fw_c[k] = fw_c[k] + 1;
       end
@@ -1225,8 +1308,8 @@ module tb;
       $display("XLATE-SIM M's translate passes: dtlb-hits=%0d address-faults=%0d to-the-walker=%0d | walker answers=%0d (faults %0d) | queue-entry traps=%0d",
                xs_hit, xs_aflt, xs_nopa, xs_wk, xs_wkf, xs_trap);
       $display("ITLB-SIM walks=%0d unused=%0d (a walked page nothing retired from before 32 more walks)", iw_n, iw_waste);
-      $display("FWD-SIM forwards=%0d | held load-cycles, forwardable: busy=%0d drain=%0d lsu=%0d older-load=%0d start=%0d | not forwardable: next-cycle=%0d unknown-address=%0d several-stores=%0d partial=%0d no-data=%0d other=%0d",
-               fw_go_n, fw_c[0], fw_c[1], fw_c[2], fw_c[3], fw_c[4], fw_c[5], fw_c[6], fw_c[7], fw_c[8], fw_c[9], fw_c[10]);
+      $display("FWD-SIM forwards=%0d | held load-cycles, forwardable: busy=%0d drain=%0d lsu=%0d older-load=%0d start=%0d | not forwardable: next-cycle=%0d unknown-address=%0d several-stores=%0d partial=%0d page-alias=%0d no-data=%0d other=%0d",
+               fw_go_n, fw_c[0], fw_c[1], fw_c[2], fw_c[3], fw_c[4], fw_c[5], fw_c[6], fw_c[7], fw_c[8], fw_c[11], fw_c[9], fw_c[10]);
       for (dsi = 1; dsi < IW; dsi = dsi + 1)
          $display("DISP-SIM slot %c cut behind a dispatching slot %c, cycles: alone=%0d rule=%0d resteer=%0d | credit: lane=%0d load=%0d store=%0d fp=%0d divide=%0d",
                   8'("A" + dsi), 8'("A" + dsi - 1), ds_cut[dsi][0], ds_cut[dsi][1], ds_cut[dsi][2],
@@ -1247,6 +1330,18 @@ module tb;
       $display("ICMISS-SIM misses=%0d unused=%0d (a missing line nothing retired from before 64 more misses)", im_n, im_waste);
       $display("TRAIN-SIM trainings=%0d dropped-CTIs=%0d", tr_n, tr_drops);
       $display("WALK-SIM squashes-at-the-head=%0d checked-after-the-walk=%0d rows-walked=%0d checked-after-the-kill=%0d releases=%0d", dut.core.wk_sq, dut.core.wk_chk, dut.core.wk_rows, dut.core.wk_kchk, dut.core.wk_rel);
+      $display("TRAP-SIM cycles/retires by mode: U=%0d/%0d S=%0d/%0d M=%0d/%0d", trc_cyc[0], trc_ret[0], trc_cyc[1], trc_ret[1], trc_cyc[3], trc_ret[3]);
+      $write("TRAP-SIM traps, cause:to-M/to-S (16+n: interrupt n):");
+      for (tri_ = 0; tri_ < 32; tri_ = tri_ + 1)
+         if (trc_n[tri_][0] != 0 || trc_n[tri_][1] != 0) $write(" %0d:%0d/%0d", tri_, trc_n[tri_][0], trc_n[tri_][1]);
+      $display("");
+      for (tri_ = 0; tri_ < trp_used; tri_ = tri_ + 1)
+         $display("TRAP-SIM to-M pc=%h cause=%0d count=%0d last-tval=%h", trp_pc[tri_], trp_k[tri_], trp_n[tri_], trp_tv[tri_]);
+      $display("PORT-SIM a ready queued load not taken, cycles: store-drain=%0d lsu-busy=%0d m-walk=%0d dcache-door=%0d tag-due=%0d other=%0d",
+               pt_n[0], pt_n[1], pt_n[2], pt_n[3], pt_n[4], pt_n[5]);
+      $display("PORTS-SIM cycles: ready-loads>=1=%0d >=2=%0d | a ready load and a committed store=%0d, a store alone=%0d | two or more arrived loads waiting for M=%0d",
+               po_ld1, po_ld2, po_ldst, po_st, po_ar2);
+      $display("DTLB-SIM walker busy=%0d cycles | second-level lookups=%0d answered=%0d | walks=%0d pte-reads=%0d", dt_busy, dt_lk, dt_l2, dt_walk, dt_pte);
       $display("MEM-SIM dcache fill-cycles=%0d fills=%0d mean-mshrs=%0.2f waiting-cycles=%0d wb-full-cycles=%0d | ST_MEM cycles=%0d with-fill=%0d with-waiting=%0d",
                ms_fill, ms_fills, (ms_fill != 0) ? $itor(ms_live) / $itor(ms_fill) : 0.0, ms_park, ms_wbfull,
                ms_stmem, ms_stmem_fill, ms_stmem_park);
