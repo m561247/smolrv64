@@ -58,6 +58,7 @@ module tb;
    localparam TX_DRAIN = 222;
    reg  [7:0] txcnt = 8'd0;
    wire       uart_tx_v;
+   wire [7:0] uart_tx_d;
    wire       uart_tx_rdy = (txcnt == 8'd0);
    always @(posedge clk)
       if (reset)                        txcnt <= 8'd0;
@@ -125,7 +126,7 @@ module tb;
       .ddr_r_last(ddr_r_last), .ddr_r_data(ddr_r_data),
       .ddr_w_valid(ddr_w_valid), .ddr_w_ready(ddr_w_ready), .ddr_w_id(ddr_w_id),
       .uart_rx_we(uin_we), .uart_rx_data(uin_d), .uart_rx_ready(rx_ready),
-      .uart_tx_valid(uart_tx_v), .uart_tx_ready(uart_tx_rdy),
+      .uart_tx_valid(uart_tx_v), .uart_tx_data(uart_tx_d), .uart_tx_ready(uart_tx_rdy),
       .virtio_addr(virtio_addr), .virtio_read(virtio_read), .virtio_write(virtio_write),
       .virtio_wdata(virtio_wdata), .virtio_be(virtio_be),
       .virtio_rdata(virtio_rd_q), .virtio_rvalid(virtio_rvalid), .virtio_irq(virtio_irq | dma_irq), .virtio_net_irq(1'b0), .virtio_kbd_irq(1'b0), .dma_wr(tb_dma_wr), .irq_dbg());
@@ -577,6 +578,30 @@ module tb;
 
    reg [8*256-1:0] fw, dtb, initrd, disk, ckpt, lramf;
    reg [63:0] ncyc, c, nret, last_ret, max_ret;
+
+   // +stop_after=<text>: the run ends +stop_margin cycles (default 1,000,000) after the console
+   // prints <text> -- a userspace test's PASS line -- instead of at +cycles: the lockstep has
+   // checked every instruction up to there, and what follows is an idle system. The text is
+   // matched against the bytes the UART sends, at most 64 of them.
+   reg [8*64-1:0] stop_txt, stop_tail, stop_mask;
+   reg [63:0]     stop_margin, stop_at, stop_c, stop_ret;
+   reg            stop_on, stop_hit;
+   integer        stop_k;
+   initial begin
+      stop_txt = {(8*64){1'b0}};  stop_tail = {(8*64){1'b0}};  stop_mask = {(8*64){1'b0}};
+      stop_on = $value$plusargs("stop_after=%s", stop_txt);  stop_hit = 1'b0;
+      stop_at = 64'd0;  stop_c = 64'd0;  stop_ret = 64'd0;
+      if (!$value$plusargs("stop_margin=%d", stop_margin)) stop_margin = 64'd1000000;
+      for (stop_k = 0; stop_k < 64; stop_k = stop_k + 1)
+         if (stop_txt[8*stop_k +: 8] != 8'd0) stop_mask[8*stop_k +: 8] = 8'hFF;
+      if (stop_on) $display("[stop_after: '%0s', then %0d cycles]", stop_txt, stop_margin);
+   end
+   always @(posedge clk) if (!reset && stop_on && !stop_hit && uart_tx_v && uart_tx_rdy) begin
+      stop_tail = {stop_tail[8*63-1:0], uart_tx_d};
+      if (((stop_tail ^ stop_txt) & stop_mask) == {(8*64){1'b0}}) begin
+         stop_hit = 1'b1;  stop_c = c;  stop_ret = nret;  stop_at = c + stop_margin;
+      end
+   end
    integer    nrk;
    wire       trace_on = (c >= trace_from) && (c < trace_to);   // the tb-side trace window
 
@@ -1127,7 +1152,8 @@ module tb;
 
       reset = 1; @(negedge clk); @(negedge clk); reset = 0;
       // +cycles=0 runs unbounded (stop with an external interrupt / timeout wrapper)
-      for (c = 0; ((ncyc == 0) || (c < ncyc)) && !tohost_done && ((max_ret == 0) || (nret < max_ret)); c = c + 1) begin
+      for (c = 0; ((ncyc == 0) || (c < ncyc)) && !tohost_done && ((max_ret == 0) || (nret < max_ret))
+                  && !(stop_hit && (c >= stop_at)); c = c + 1) begin
          @(negedge clk);
                   for (nrk = 0; nrk < `SMOLRV64_IW; nrk = nrk + 1) nret = nret + retire[nrk];
                   if (meas && dut.core.sq_r_v) fx_rd = fx_rd + 1;   // the store queue's data read
@@ -1164,6 +1190,9 @@ module tb;
       end
       if (tohost_done)
          $display("TOHOST exit=%0d after %0d cycles (retires=%0d pc~%h)", tohost_code, c, nret, dut.imem_addr);
+      else if (stop_hit && (c >= stop_at))
+         $display("\nSTOP-AFTER '%0s' at cycle %0d (retires=%0d), stopped at cycle %0d (retires=%0d pc~%h)",
+                  stop_txt, stop_c, stop_ret, c, nret, dut.imem_addr);
       else if ((max_ret != 0) && (nret >= max_ret))
          $display("RETIRE-LIMIT after %0d cycles (retires=%0d pc~%h)", c, nret, dut.imem_addr);
       else

@@ -7,8 +7,9 @@
 # yardstick: iteration=1 414556, iteration=2 131459 on main 12029862.
 #   ./run-cosim.sh                 # 1.8 G cycles: init plus the 4 default iterations
 #   CYC=0 ./run-cosim.sh           # unbounded
+# The run ends a million cycles after the test's PASS line (STOP_AFTER= to run the full CYC).
 set -u
 cd "$(dirname "$0")"
 make -s || exit 1
 INITRD=$(pwd)/tiny128-glibc.cpio OFF_INITRD=1f000000 DTB=$(pwd)/../tiny128/tiny128-cosim-glibc.dtb \
-CYC=${CYC:-1800000000} ../../core/run-cosim-linux.sh
+STOP_AFTER=${STOP_AFTER-"GLIBC-TEST PASS"} CYC=${CYC:-1800000000} ../../core/run-cosim-linux.sh

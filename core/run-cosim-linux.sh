@@ -16,6 +16,9 @@
 #                  (writes stay in RAM) unless DISK_RW=1. The console must print BLKCHECK-OK
 #                  (workloads/tiny128/blkcheck.sh) and never BLKCHECK-FAIL; no retire-count row
 #                  applies (a disk boot retires a different count).
+#   STOP_AFTER=<text>  end the run STOP_MARGIN cycles (default 1,000,000) after the console prints
+#                  <text> -- a userspace test's PASS line -- instead of at CYC, which becomes the
+#                  bound: a run that reaches CYC without the text FAILS. No retire-count row applies.
 #   CKPT=<dir>     start from an architectural checkpoint (simmerv-cli --ckpt-at): the DUT
 #                  restores <dir>/mem.zst and runs the generated restore stub from the boot SRAM,
 #                  simmerv loads <dir>/sim.snap, and the lockstep starts at the checkpoint's
@@ -172,7 +175,7 @@ fi
 # happened three times -- see cosim-expected.txt. The retire count at a fixed cycle budget is
 # the only instrument that sees it.
 set -o pipefail
-"$BIN" $IMAGES +cycles=$CYC ${PLUSARGS:-} \
+"$BIN" $IMAGES +cycles=$CYC ${PLUSARGS:-} ${STOP_AFTER:+"+stop_after=$STOP_AFTER"} ${STOP_MARGIN:++stop_margin=$STOP_MARGIN} \
      ${DISK:+ +disk="$DISK"} $( [ -n "${DISK:-}" ] && [ -z "${DISK_RW:-}" ] && echo +disk_ro ) 2>&1 | tee "$RUNOUT"
 rc=$?
 # The disk workload's own verdict: its init mounts the disk, checks every byte, writes a copy
@@ -186,6 +189,15 @@ if [ -n "${DISK:-}" ]; then
    if console | grep -q 'BLKCHECK-FAIL' || ! console | grep -q 'BLKCHECK-OK'; then
       echo "BLKCHECK FAIL: the disk check did not pass on the console (DISK=$DISK)"; rc=1
    else echo "blkcheck: BLKCHECK-OK on the console (dma beats: $(grep -o 'dma rd=[0-9]* wr=[0-9]*' "$RUNOUT" | tail -1))"; fi
+fi
+
+# A run told to stop after a console line passes only when it saw the line; the lockstep held
+# up to there (rc), and no retire-count row applies to a run of that length.
+if [ -n "${STOP_AFTER:-}" ]; then
+   if ! grep -q '^STOP-AFTER ' "$RUNOUT"; then
+      echo "STOP-AFTER FAIL: the console never printed '$STOP_AFTER' within $CYC cycles"; rc=1
+   fi
+   exit $rc
 fi
 
 # SMOLRV64_HW, not INO_HW: the define was renamed with the core and this line was not, so it
