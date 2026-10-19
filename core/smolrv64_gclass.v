@@ -59,8 +59,8 @@ module smolrv64_gclass
    wire cls_l  = ord & ~cls_f & ~cls_c & ~cls_m & ~cls_s & ~mul_l & ~mem_l;   // a head op (AMO, LR/SC, CBO)
    wire cls_i  = ~ord | cls_c | mul_l | cls_m | cls_s | mem_l | cls_l | i2f;   // the slot's lane
    wire cls_fc = cls_f & ~i2f;                                                  // the FP pipe (u_iq_f)
-   // a serialising op, fence.i, CBO, AMO, CSR, a trap at dispatch or the irqop goes alone
-   wire plain = ~(is_serialize | is_fencei | is_cbo | is_amo | is_csr | illegal | fault | irqop);
+   // a SYS-class op and a head op go alone; everything else may go beside others
+   wire plain = ~(cls_s | cls_l);
    wire dcr   = (is_jump & ~is_jalr & mis_taken)
               | ((DCR_BACK != 0) & is_branch & imm_neg & mis_taken & ~btb_hit);
 

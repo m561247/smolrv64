@@ -837,9 +837,11 @@ moves the wall.
 stage deadlock (`Area-Efficient-Scalar-OoO.md` 12.2): an op reaches the shared stage, finds
 it must be ROB head to retire, and an older op in a different scheduler cannot issue to
 free it. Stage F removes the condition rather than arbitrating it -- **an FP arith op never
-enters M**. It cannot head-block because it cannot trap: a bad encoding is `~d_fp_valid`,
-and `mstatus.FS=Off` routes FP to M as before (a write to FS redirects and refetches, so
-the value read at dispatch is what every in-flight FP op retires under).
+enters M**. It cannot head-block because it cannot trap: an encoding `decode_fp` does not
+know (an unlisted funct5, the H or Q format, an FP load or store other than W or D) and any FP
+op under `mstatus.FS=Off` is illegal at decode, so a SYS-class op that traps alone in slot A
+(`core/directed/fpill.S`). A write to FS redirects and refetches, so the value read at decode
+is what every in-flight FP op retires under.
 
 **Only `u_iq_l` is in-order, and it should not be at all.** In-order ISSUE is not what
 memory ordering requires (`Area-Efficient-Scalar-OoO.md` 11.1): an address calculation is

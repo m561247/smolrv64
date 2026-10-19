@@ -47,6 +47,12 @@ module decode_exec
    wire [2:0] f3  = insn[14:12];
    wire [6:0] f7  = insn[31:25];
    wire [5:0] f6  = insn[31:26];
+   // decode_fp holds the one list of the FP operations this core implements: an OP-FP or
+   // FMADD-family word it does not recognise is illegal
+   wire       fp_known;
+   decode_fp u_fpk
+     (.insn(insn), .fp_valid(fp_known), .use_fpu(), .fp_class(), .op(), .op_mod(), .src_fmt(),
+      .dst_fmt(), .int_fmt(), .rnd(), .op0_sel(), .op1_sel(), .op2_sel(), .op0_int(), .wr_fp());
 
    always @* begin
       // defaults: a harmless ADD rs1,rs2
@@ -187,11 +193,12 @@ module decode_exec
            mem_size=f3[1:0]; mem_signed=1'b1;   // .W=2/.D=3; rd sign-extends (.W)
            if (f3!=3'b010 && f3!=3'b011) illegal=1;
         end
-        5'b10100: is_fp=1;                                              // OP-FP (deferred)
+        5'b10100, 5'b10000, 5'b10001, 5'b10010, 5'b10011: begin          // OP-FP, FMADD/FMSUB/FNMSUB/FNMADD
+                        is_fp=1; if (!fp_known) illegal=1; end
         5'b00001, 5'b01001: begin is_fp=1; is_mem=1; is_store=opc[3];   // F/D LOAD/STORE-FP
                                   op2_imm=1; alu_op=`ALU_ADD;
-                                  mem_size=f3[1:0]; mem_signed=1'b0; end // FLW=W FLD=D; no sign-ext
-        5'b10000,5'b10001,5'b10010,5'b10011: is_fp=1;                   // FMADD/FMSUB/FNMSUB/FNMADD
+                                  mem_size=f3[1:0]; mem_signed=1'b0;    // FLW=W FLD=D; no sign-ext
+                                  if (f3!=3'b010 && f3!=3'b011) illegal=1; end
         default: illegal=1;
       endcase
 

@@ -86,6 +86,7 @@ module decode_fp
            default:  fp_valid=1'b0;                                     // unrecognized OP-FP
          endcase
       end
+      if (insn[26]) fp_valid=1'b0;   // the format is insn[26:25]: S and D only, no H or Q
    end
 endmodule
 
