@@ -3701,7 +3701,7 @@ module smolrv64_core
    // not retired, except the restart's own CTI at its squash: it is the ROB head, so nothing older
    // is left and it is architecturally done. One entry trains per cycle; a CTI arriving at a full
    // queue is dropped (training is a hint; tr_drop counts them).
-   localparam integer TQN = 16, TQB = 4;
+   localparam integer TQN = 32, TQB = 5;
    localparam integer RKB = $clog2(NL);          // a rank: 0..NL-1
    reg  [NL-1:0]  tr_ok;
    reg  [RKB-1:0] rk [0:NL-1];                  // each enqueuing lane's rank among this cycle's: the older ones
@@ -3763,7 +3763,8 @@ module smolrv64_core
    end
    wire [NL-1:0] l_call = lr_jmp & l_lrd, l_ret = lr_jalr & l_lrs & ~l_lrd;
    integer tk;
-   wire [3:0] tq_wn = ones_nl(tq_w);                 // the lanes' CTIs enqueuing this cycle
+   wire [3:0] tq_wn4 = ones_nl(tq_w);                // the lanes' CTIs enqueuing this cycle
+   wire [TQB:0] tq_wn = {{(TQB-3){1'b0}}, tq_wn4};
    always @(posedge clk) begin
       if (reset) begin
          tq_h <= 0;  tq_t <= 0;  tq_n <= 0;
@@ -3787,7 +3788,7 @@ module smolrv64_core
          end
          tq_t <= tq_t + tq_wn[TQB-1:0];
          tq_h <= tq_h + {{(TQB-1){1'b0}}, tq_out};
-         tq_n <= tq_n + {{(TQB+1-4){1'b0}}, tq_wn} - {{TQB{1'b0}}, tq_out};
+         tq_n <= tq_n + tq_wn - {{TQB{1'b0}}, tq_out};
       end
    end
    wire [3:0]   tq_dn = ones_nl(tr_ok & ~tq_w);

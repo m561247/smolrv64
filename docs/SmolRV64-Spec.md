@@ -436,11 +436,14 @@ order on its own pipe, and a wrong-path call or return resolves before its squas
 **Training.** Every CTI trains the predictor once, mispredicted or not, and only once it is
 NON-SPECULATIVE: when the ROB's irrevocable point (§6) has reached it, so everything older is done
 and nothing can squash it, or it has retired. Up to three resolve per cycle; each enters a
-16-entry queue in age order from its lane's resolve register (`lr_*`), carrying a copy of all
+32-entry queue in age order from its lane's resolve register (`lr_*`), carrying a copy of all
 training reads (rule D16; the copy is a banked distributed RAM read only at the head, the
 fields every entry is compared on are flops), and the queue's head trains one per cycle once
 non-speculative. A CTI
-arriving at a full queue is dropped (training is a hint). A CTI younger than a pending restart
+arriving at a full queue is dropped (training is a hint). The queue is 32 entries: at 16, with the
+store register and loads first (§8, §9), Dhrystone (`workloads/rvbench`, lockstep) dropped 8.5%
+of its CTIs, the same two taken branches on every run, which never reached the BTB and
+mispredicted every run (253.2 cycles a run); at 32 it drops none and runs in 222.2. A CTI younger than a pending restart
 queues nothing; an entry the kill marks dead, or one past the pending restart, is discarded at
 the head. A redirect discards every entry that has not retired, except the restart's own CTI at
 its squash (the ROB head). Training is a read-modify-write of the tables' current counters (the
@@ -1690,8 +1693,8 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `u_iq_i` entry | `smolrv64_iq` | 10 | 2+2×9 = 20 | 200 | flops | integer, slot A's, `NSRC`=2 (§6.1) |
 | `u_iq_i2`, `u_iq_i3` entry | `smolrv64_iq` | 10 each | 2+2×10 = 22 | 220 each | flops | integer, slot B's and slot C's, `NSRC`=2 (§6.1) |
 | `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/282/1 | 411 | flops | the head-op register (§8) |
-| `u_tq` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_core`) | 4 x 4 | 117 | 1 872 | LUTRAM | the training queue's payload (a CTI's PC, RVC bit, taken-target, predict details, kind and outcome): one write a bank (a lane's CTI at the tail plus its rank), read at the head into `res_*_q` (§4.2) |
-| `tq_seq`, `tq_rob`, `tq_dk`, `tq_rt` | `smolrv64_core` | 16 | 9/8/1/1 | 304 | flops | the training queue's entries as every one is compared: the redirect's seq, the retire ports' and the kill's ROB index |
+| `u_tq` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_core`) | 4 x 8 | 117 | 3 744 | LUTRAM | the training queue's payload (a CTI's PC, RVC bit, taken-target, predict details, kind and outcome): one write a bank (a lane's CTI at the tail plus its rank), read at the head into `res_*_q` (§4.2) |
+| `tq_seq`, `tq_rob`, `tq_dk`, `tq_rt` | `smolrv64_core` | 32 | 9/9/1/1 | 640 | flops | the training queue's entries as every one is compared: the redirect's seq, the retire ports' and the kill's ROB index |
 | `rob_ffr` | `smolrv64_core` | 256 (192 used) | 5 | 960 | LUTRAM | an FP op's exception flags by ROB slot: 1W (the landing result), 1R per retire port |
 | `rob_ffv` | `smolrv64_core` | 256 (192 used) | 1 | 192 | flops | the slot's FP result landed: cleared by its allocation, set by the landing |
 | `mdw` | `smolrv64_core` | 256 | 2 | 512 | LUTRAM | the memory-dependence wait table: read at dispatch by the load's PC and by training, 1W (a replay, else one training event, else the forget's step; §8) |
