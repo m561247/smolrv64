@@ -113,3 +113,7 @@ core/obj_dir_smolrv64_clinux*
 
 # cargo build output of the in-tree Rust tools (tools/pipeview, tools/rvdisasm)
 tools/*/target/
+# Vivado writes these into the platform directory as it routes
+platforms/*/clockInfo.txt
+platforms/*/cong/
+platforms/*/iter_*_CongestedCLBsAndNets.txt
