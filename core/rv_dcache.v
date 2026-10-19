@@ -31,8 +31,11 @@
 // instead of wr_cpl. It queues behind every store taken before it, so memory holds their bytes when
 // ic_ack says so, and the I$ never fills code the D$ still holds dirty.
 //
-// THE LOOKUP takes one request a cycle: a released waiter (replay), else a queued store, else a
-// load. A request taken at T reads the banks; at T+1 its way's vvalid, virtual tag and epoch are
+// THE LOOKUP takes one request a cycle: a released waiter (replay), else a load, else a queued
+// store -- the store ahead of a load when it is urgent: the store queue is full, its head is a CBO,
+// an NC store or the I$'s clean (a requester waits on each), or the head has waited ST_WAIT cycles
+// (a load parked behind a queued store replays only when that store completes). A request taken
+// at T reads the banks; at T+1 its way's vvalid, virtual tag and epoch are
 // compared, and the probe compares the 32 candidates' physical tags with its PA. A request never
 // spans an 8-byte chunk.
 //   - a virtual hit, or the line physically in the request's own set (its data was read with the
@@ -320,7 +323,18 @@ module rv_dcache #(
    wire           s1_hd  = s1_v & s1_tag[RTW] & s1_head;
    wire           sq_i0  = (sc != 2'd0) & ~sf_iss[sq_hp];
    wire           sq_i1  = (sc > 2'd1) & sf_iss[sq_hp] & ~sf_iss[sq_h1] & s1_hd;
-   wire           st_go  = ~(rm_v | ra_v) & ~hold & sdoor & (sq_i0 | sq_i1);
+   // LOADS FIRST: a load presented now takes the lookup ahead of the queued stores, which take the
+   // cycles no load wants -- unless one is urgent: the queue is full (no store could be taken), its
+   // head is a CBO, an NC store or the I$'s clean (each has a requester waiting on it), or the head
+   // has waited ST_WAIT cycles (a load parked behind a queued store replays only when that store
+   // completes, so the store must get through).
+   localparam [2:0] ST_WAIT = 3'd3;
+   reg  [2:0]     st_age;
+   initial st_age = 3'd0;
+   wire           st_urgent = (sc == SD) | sf_cbo[sq_hp] | sf_nc[sq_hp] | sf_ic[sq_hp] | (st_age >= ST_WAIT);
+   wire           st_go  = ~(rm_v | ra_v) & ~hold & sdoor & (sq_i0 | sq_i1) & (~(door & rd_req) | st_urgent);
+   always @(posedge clk)
+      st_age <= (reset | st_go | ~(sq_i0 | sq_i1)) ? 3'd0 : (st_age == 3'd7) ? st_age : st_age + 3'd1;
    wire           si     = ~sq_i0;                // the entry issued
    wire [1:0]     sq_ps  = si ? sq_h1 : sq_hp;     // ...its slot
    wire           new_go = ~(rm_v | ra_v) & ~hold & door & ~st_go & rd_req;

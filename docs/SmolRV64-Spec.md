@@ -1150,7 +1150,9 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   older op while the LQ or SQ starts one. Asserted: the port's access never runs an AMO's states,
   and a fast load's read is word-aligned.
 - **The D$ is non-blocking** (`rv_dcache.v`, 2026-09-27; its header is the full description).
-  One lookup a cycle -- a released waiter, else the store-port op, else a load -- reads the
+  One lookup a cycle -- a released waiter, else a load, else the store-port op, the store first
+  when it is urgent (its queue full, a CBO, an NC store or the I$'s clean at its head, or the head
+  waiting `ST_WAIT` = 3 cycles) -- reads the
   banks at T and resolves at T+1; a load's answer is `rd_valid` at T+2, by its tag, and a hit
   behind a miss answers first. A miss never holds the lookup: it parks in the **waiter table**
   (one entry per requester tag, one for the store) on the MSHR filling its line, or on the next
@@ -1422,7 +1424,11 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   in the compare; only the head resolves, so an entry that reaches the compare while the head
   is parked in the waiter table leaves no trace and goes back to the queue (the store's waiter
   entry is only ever the head's). A CBO or an NC store is taken once and held by the LSU until
-  its `wr_cpl`, with nothing presented behind it.
+  its `wr_cpl`, with nothing presented behind it. The queue takes the lookup in a cycle no load
+  wants it, or when its store is urgent (above): on the GB5 checkpoint slices against stores
+  first, -1.31% of their cycles (Navigation -3.07%, HTML5 -2.67%, SQLite -0.74%, PDF Rendering
+  -0.84%, Camera +1.15%), pi -0.99%, the 60 M Linux lockstep +2.16% retires. `ST_WAIT` = 1
+  measured +0.03%, the integer slices 0.4 to 1.0% slower.
 - **NC, CBOs and page-table walks are looked up by PA**, in the PA's own colour, and never
   stamp. An NC access drops any cached copy (a dirty one written back first) and then goes to
   memory alone through the NC slot, a store with only its bytes -- coherent with a cacheable
@@ -2228,15 +2234,24 @@ closure above is real; the branch cannot ship until that defect is found (handof
   among them: `NFLIGHT`=4 and results return by tag, out of issue order (§7). `LQ_N = 1 << LQ_IB`;
   `LQ_IB` = `SMOLRV64_LQB` = 4 (`smolrv64_tags.vh`, which the core, `rv_soc_top` and the benches
   read), and the D$ read tag is `{client[1:0], lq_idx}`, `DRTW = LQ_IB + 2`. 8 -> 16 entries:
-  Dhrystone 1,660,876 -> 1,585,889 cycles (lockstep, IW=3). 16 -> 32, measured at the 64-row ROB
-  on the GB5 slices: PDF Rendering's `be:lq-full` (38% of its cycles) goes, yet its cycles rise
-  0.48% (Navigation +0.82%, SQLite -0.81%, HTML5 -0.26%), and the D$'s mean busy MSHRs stay at
-  1.05: PDF waits on misses that do not overlap, not on the queue, so it stays at 16. A
+  Dhrystone 1,660,876 -> 1,585,889 cycles (lockstep, IW=3). 16 -> 32 at the lane rotation
+  (6f2bbf1f, the GB5 checkpoint slices): -0.37% of their cycles, PDF Rendering +1.21%. PDF's full
+  queue was 13.1 loads of 16 ready and waiting for the port in its no-credit cycles, behind the
+  stores that shared it; the store register and loads first at the D$ (§8, §9) took PDF's
+  `be:lq-full` from 22.2% to 2.3% of its cycles at 16 entries, so it stays at 16. A
   sequential stream of 8-byte loads holds a line in eight entries, so sixteen keep under two of
   its lines in flight: scalar `MemoryBandwidth` over 64 MiB (`tools/board/membench`, 2ed18026)
   reads 2.4 bytes a cycle from DRAM, 26.7 cycles a line, with under two of the 8 MSHRs busy;
   counted over the whole run, its 64 MiB fill included, the queue holds 13.3 entries on average
   and its head waits for a credit in 60% of the cycles.
+- **One D$ lookup a cycle, for loads and stores together.** With the store register and loads
+  first (§8, §9), every cycle a ready load waits for the port is a D$ door cycle: on the GB5
+  checkpoint slices 12% (Navigation, HTML5, Camera) to 40% (PDF Rendering) of their cycles. Two
+  or more loads are ready to go to memory in 66% of PDF's cycles and 20% of Navigation's and
+  HTML5's, and a ready load and a committed store want the D$ together in 30% of PDF's and 12 to
+  13% of Navigation's and HTML5's (the testbench's `PORTS-SIM`, at the store register). The VIPT
+  L1 (`docs/PLAN-2026-10-03-dcache-vipt-l2.md`) gives a store its own tag copy and one-array write;
+  a second load port is a second copy of its data arrays.
 - **One page walker per MMU.** Walks run one at a time (hits keep the lookup port, §8): a
   footprint that walks on every load (`chase2` over 32 MiB, `tools/board/membench`, 2ed18026) keeps 2.4 loads in flight
   at any number of independent chains, the walker busy 30 of a load's 33.8 cycles, against 7 to
