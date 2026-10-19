@@ -152,7 +152,8 @@ floorplan:
 	python3 ../../tools/floorplan.py '$(or $(OUT),floorplan)'
 
 # Synthesise ONE module alone and report its intrinsic Fmax and logic depth.
-#   make ooc MODULE=smolrv64_iq [PERIOD=6.0] [GENERICS="P=V ..."] [REPORT=/path/to/write] [HIER=1]
+#   make ooc MODULE=smolrv64_iq [PERIOD=6.0] [GENERICS="P=V ..."] [REPORT=/path/to/write] [HIER=1] [DCP=<file>]
+#   DCP= keeps the routed checkpoint, for `make weigh INST=. DCP=<file>` (the module's own cells).
 #   HIER=1 is the weight census: synthesis only, each submodule's LUTs/LUTRAM/flops (ooc.tcl).
 #   GENERICS is the INSTANCE's parameters -- without it the module DEFAULTS are measured,
 #   which for rv_cache is a 128 KB / PAW=34 cache nothing instantiates (see ooc.tcl).
@@ -161,7 +162,7 @@ floorplan:
 # first, then confirm in the full build.
 ooc:
 	@test -n "$(MODULE)" || { echo "usage: make ooc MODULE=<module> [PERIOD=6.0]"; exit 2; }
-	OOC_MODULE=$(MODULE) OOC_PERIOD=$(PERIOD) OOC_GENERICS="$(GENERICS)" OOC_REPORT="$(REPORT)" OOC_HIER="$(HIER)" \
+	OOC_MODULE=$(MODULE) OOC_PERIOD=$(PERIOD) OOC_GENERICS="$(GENERICS)" OOC_REPORT="$(REPORT)" OOC_HIER="$(HIER)" OOC_DCP="$(DCP)" \
 	  $(VIVADO) $(VFLAGS) -source ooc.tcl
 
 # What an instance's LUTs and flops ARE: every cell grouped by the signal it drives (report_weigh.tcl).

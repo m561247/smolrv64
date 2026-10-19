@@ -1,5 +1,6 @@
 # report_weigh.tcl -- what an instance's LUTs and flops ARE, by the signal each one drives.
 # Usage: make weigh INST="<hier path> ..." [DCP=<checkpoint>] [OUT=<file>] [TOP=40]
+#        (INST=. weighs the checkpoint's top: `make ooc ... DCP=<file>` keeps one)
 #        (one checkpoint open, every instance listed weighed in turn, all into OUT)
 #
 # A per-instance utilization row says how much, not what: the core's own logic is one row of
@@ -36,7 +37,7 @@ proc key_of {n pfx} {
 }
 set fh [open $out w]
 foreach inst $insts {
-    set pfx "$inst/"
+    set pfx [expr {$inst eq "." ? "" : "$inst/"}]    ;# "." is the top: an out-of-context module
     set lut [dict create]; set ff [dict create]; set ram [dict create]
     set nl 0; set nf 0; set nr 0
     foreach c [get_cells -hierarchical -quiet -filter "NAME =~ $pfx* && IS_PRIMITIVE"] {

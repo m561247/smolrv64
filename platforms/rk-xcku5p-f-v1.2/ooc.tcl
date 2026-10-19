@@ -74,6 +74,7 @@ create_clock -name clk -period $per [get_ports -quiet clk]
 opt_design -quiet
 place_design -quiet
 route_design -quiet
+if {[info exists ::env(OOC_DCP)] && $::env(OOC_DCP) ne ""} { write_checkpoint -force $::env(OOC_DCP) }
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1]]
 puts "-----------------------------------------------------------------"
 puts [format "OOC %-16s period %.3f ns   WNS %+0.3f ns   Fmax %.1f MHz" \
