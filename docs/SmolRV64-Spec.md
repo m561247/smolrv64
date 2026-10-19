@@ -1967,6 +1967,19 @@ crash exonerates the whole logged set in one read. Simulation keeps the log hone
 
 ### 11.2 Simulation cycle accounting and the pipe view
 
+**An experiment is one command.** `tools/exp.sh <tag> [<tree>]` copies a tree as it stands to the
+simulation hosts and runs the standard set: the 60 M Linux lockstep, Dhrystone and CoreMark in
+lockstep (`workloads/rvbench`), the four pi checkpoint slices and the five GB5 checkpoint slices
+(Navigation, HTML5, SQLite, PDF Rendering, Camera: 20 M retires of warm-up, 50 M measured); the
+table (`tools/exp-table.py`) compares each with a baseline tag, by default main's. `SET=sp` runs
+GB5's single-core section as SimPoints instead: `workloads/gb5/simpoints.txt` holds 77 points of
+50 M instructions (Simmerv's `--bbv` basic-block vectors, `tools/simpoint.py`'s k-means per
+subtest), each restored from its own checkpoint, and the table totals each subtest's cycles as its
+instructions times its points' weighted CPI. Against the board's per-subtest times at d7fd88f3
+(the same RTL) the integer subtests come within 5% but for AES-XTS (+7%), PDF Rendering (+16%)
+and Clang (+18%), while the floating-point ones run 7 to 44% faster in simulation (Machine Learning
+-44%): the testbench's memory answers a D$ fill in about 32 cycles, the board in 46.6 (§9.2).
+
 `tb_smolrv64_linux` puts every cycle into exactly one cause: the Top-Down Variant A partition,
 split down to the core's own stall taps. The classifier is `smolrv64_core`'s `td_k`, the one the
 `TD_*` counters count (§11), and the run's `perf-stat-sim` block (the event bus counted per
