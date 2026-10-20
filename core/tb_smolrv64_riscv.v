@@ -76,6 +76,9 @@ module tb;
       // the cycle it is presented, with the tag it carries
       .dmem_rfast(dmem_rfast), .dmem_rtag(dmem_rtag), .dmem_rvalid_c(dmem_ren & dmem_rfast),
       .dmem_rtag_resp(dmem_rtag), .dmem_rdata_c(dmem_rdata), .dmem_rbusy(1'b0),
+      // M's own start needs a memory that answers two cycles on and drops a cancelled read; this
+      // one answers in the request's cycle, so every load goes the queue's way here
+      .dmem_fv(), .dmem_fpa(), .dmem_ftag(), .dmem_fhint(), .dmem_fcancel(), .dmem_fok(1'b0),
       .dmem_wen(dmem_wen), .dmem_waddr(dmem_waddr), .dmem_wdata(dmem_wdata),
       .dmem_wmask(dmem_wmask), .dmem_wuncached(),
       .dmem_cbo(), .dmem_cbo_zero(), .dmem_cbo_keep(), .dmem_wready(1'b1), .dmem_waccept(1'b1), .dmem_wroom(1'b1),

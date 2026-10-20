@@ -20,7 +20,9 @@
 // cache sees only PAs: a remap changes which lines the accesses touch, nothing it holds.
 //
 // REQUESTERS. 16 load tags, each with at most one load outstanding -- a cached load, a page-table
-// walk (by PA) or an NC load -- and the store port: committed stores, one a cycle whenever wr_room
+// walk (by PA) or an NC load; a cached load goes, half the time the cache would take it, by the
+// fast source instead (M's load in its own cycle: presented only while f_ok, and a quarter of
+// those cancelled in the next cycle, after which no answer may come) -- and the store port: committed stores, one a cycle whenever wr_room
 // is set (each presented for that cycle only, and taken then), or one NC store or cbo.clean,
 // cbo.flush or cbo.zero, held until its wr_cpl with nothing else presented meanwhile. An access
 // is 1, 2, 4 or 8 bytes, naturally aligned, at a random offset of a random virtual page -- half
@@ -66,8 +68,10 @@ module tb;
    reg         cr_valid, cr_last;  reg [3:0] cr_slot;  reg [1:0] cr_beat;  reg [127:0] cr_data;
    reg         cw_valid;  reg [3:0] cw_slot;
    wire        perf_access, perf_miss;  wire [15:0] err;
+   reg         rd_quiet, f_hint, f_req, f_cancel;  reg [63:0] f_pa;  reg [3:0] f_tag;  wire f_ok;
    rv_dcache dut (.clk(clk), .reset(reset),
       .rd_req(rd_req), .rd_pa(rd_pa), .rd_tag(rd_tag), .rd_nc(rd_nc), .rd_ack(rd_ack),
+      .rd_quiet(rd_quiet), .f_hint(f_hint), .f_req(f_req), .f_pa(f_pa), .f_tag(f_tag), .f_ok(f_ok), .f_cancel(f_cancel),
       .rd_valid(rd_valid), .rd_data(rd_data), .rd_resp_tag(rd_resp_tag), .rd_resp_addr(rd_resp_addr),
       .wr_req(wr_req), .wr_pa(wr_pa), .wr_data(wr_data), .wr_mask(wr_mask),
       .wr_nc(wr_nc), .cbo_req(cbo_req), .cbo_zero(cbo_zero), .cbo_keep(cbo_keep),
@@ -117,6 +121,9 @@ module tb;
    // acceptance is decided at the edge, by the pre-edge handshake
    reg        took;  reg [3:0] took_tag;
    always @(posedge clk) begin took <= rd_req & rd_ack & ~reset; took_tag <= rd_tag; end
+   reg        ftook;  reg [3:0] ftook_tag;           // the fast load taken at the last edge
+   always @(posedge clk) begin ftook <= f_req & ~reset; ftook_tag <= f_tag; end
+   integer    n_fast, n_fcan;
    reg        pq_plain;                          // a committed store was presented with wr_room: it must be taken
    always @(posedge clk) pq_plain <= wr_req & ~cbo_req & ~wr_nc & wr_room & ~reset;
    reg        mq_took, mq_we;  reg [57:0] mq_addr;  reg [3:0] mq_slot;  reg [511:0] mq_wdata;  reg [63:0] mq_wmask;
@@ -128,7 +135,7 @@ module tb;
    // a load in flight reads the chunk of pa (line: its line)
    function ld_busy; input [63:0] a; input line; integer q; reg [63:0] m; begin
       m = line ? ~64'd63 : ~64'd7;
-      ld_busy = took && ((out_pa[took_tag] & m) == (a & m));
+      ld_busy = (took && ((out_pa[took_tag] & m) == (a & m))) || (ftook && ((out_pa[ftook_tag] & m) == (a & m)));
       for (q = 0; q < NTAG; q = q + 1) if (out_v[q] && ((out_pa[q] & m) == (a & m))) ld_busy = 1'b1;
    end endfunction
    // the store-port op not yet done covers pa: its chunk, a CBO its line
@@ -183,6 +190,7 @@ module tb;
       for (k = 0; k < NTAG; k = k + 1) out_v[k] = 1'b0;
       for (k = 0; k < NOUT; k = k + 1) mo_v[k] = 1'b0;
       rd_req = 0; rd_va = 0; rd_pa = 0; rd_tag = 0; rd_phys = 0; rd_nc = 0; inv_req = 0; cq_ready = 0;
+      rd_quiet = 1; f_hint = 0; f_req = 0; f_cancel = 0; f_pa = 0; f_tag = 0; n_fast = 0; n_fcan = 0;
       wr_req = 0; wr_va = 0; wr_pa = 0; wr_data = 0; wr_mask = 0; st_pend = 0; st_t = 0; rm_due = 0;
       wr_nc = 0; cbo_req = 0; cbo_zero = 0; cbo_keep = 0; st_acc = 0; st_kind = K_ST;
       ic_req = 0; ic_pa = 0; ic_pend = 0; ic_t = 0; n_icl = 0; c_icw = 0;
@@ -235,8 +243,13 @@ module tb;
          c_fpw = c_fpw + dut.fp_wr;  c_fpg = c_fpg + dut.fp_mg;  c_fpm = c_fpm + dut.fp_miss;  c_fpwt = c_fpwt + (dut.sb_hd & dut.bhit & dut.sb_wait);
          c_w1 = c_w1 + dut.blk_w1;  c_dvic = c_dvic + (dut.m_alloc & dut.vic_dty);
          c_icw = c_icw + (dut.m_clean & dut.cp_dty & dut.sf_ic[dut.sq_hp]);   // an I$ clean found the line dirty
-         // ---- the load taken at the last edge
+         // ---- the load taken at the last edge; a fast one is in its compare now, where it may be cancelled
          if (took) begin out_v[took_tag] = 1'b1; out_t[took_tag] = now; n_req = n_req + 1; end
+         f_cancel = 1'b0;
+         if (ftook) begin
+            if (rnd(0) % 4 == 0) begin f_cancel = 1'b1;  n_fcan = n_fcan + 1; end
+            else begin out_v[ftook_tag] = 1'b1; out_t[ftook_tag] = now; n_req = n_req + 1; n_fast = n_fast + 1; end
+         end
          // ---- the store port: a committed store is presented for one cycle when wr_room says the
          // cache takes it, and is in gold from then; an NC store or a CBO is held until its wr_cpl
          if (pq_plain && !wr_acc) begin $display("FAIL c=%0d: a store presented with wr_room was not taken", now); errors = errors + 1; end
@@ -300,17 +313,24 @@ module tb;
             end
          end
          // ---- a new load: a free tag, not covered by the store-port op not yet done
-         rd_req = 1'b0;
+         rd_req = 1'b0;  f_req = 1'b0;  f_hint = 1'b0;  rd_quiet = 1'b1;
          t = rnd(0) % NTAG;
-         if (now < cycles && !fn_due && !fn_wait && !out_v[t] && !(took && took_tag == t[3:0]) && (rnd(0) % 4 != 0)) begin
+         if (now < cycles && !fn_due && !fn_wait && !out_v[t] && !(took && took_tag == t[3:0])
+             && !(ftook && ftook_tag == t[3:0]) && (rnd(0) % 4 != 0)) begin
             pick_access;
             pa = pp_pa(vp_pp[p]) + off;
             if (!st_covers(pa)) begin
                kind = rnd(0) % 10;
                if (kind == 1 && nc_busy(0)) kind = 2;
-               rd_req = 1'b1;  rd_tag = t[3:0];  rd_phys = (kind == 0);  rd_nc = (kind == 1);
-               rd_va = (kind == 0) ? {rnd(0), rnd(0)} : vp_va[p] + off;  rd_pa = pa;   // a walk's VA is noise
-               out_pa[t] = rd_pa;  out_sz[t] = sz[1:0];  out_kind[t] = (kind == 0) ? 2'd1 : (kind == 1) ? 2'd2 : 2'd0;
+               out_pa[t] = pa;  out_sz[t] = sz[1:0];  out_kind[t] = (kind == 0) ? 2'd1 : (kind == 1) ? 2'd2 : 2'd0;
+               // a cached load goes the fast way, half the time the cache takes one (f_ok, of its registers)
+               if (kind >= 2 && rnd(0) % 2) begin f_hint = 1'b1;  #1; end
+               if (f_hint && f_ok) begin
+                  f_req = 1'b1;  f_tag = t[3:0];  f_pa = pa;
+               end else begin
+                  rd_req = 1'b1;  rd_quiet = 1'b0;  rd_tag = t[3:0];  rd_phys = (kind == 0);  rd_nc = (kind == 1);
+                  rd_va = (kind == 0) ? {rnd(0), rnd(0)} : vp_va[p] + off;  rd_pa = pa;   // a walk's VA is noise
+               end
             end
          end
          // ---- the clean: every FENCE cycles and after the drain, as fence.i issues it -- with nothing
@@ -320,7 +340,7 @@ module tb;
          for (k = 0; k < NTAG; k = k + 1) n_out = n_out + out_v[k];
          if (now > 0 && fence > 0 && (now % fence) == 0 && now < cycles) fn_due = 1;
          if (now >= cycles && n_out == 0 && !fn_final) begin fn_due = 1;  fn_final = 1; end
-         if (fn_due && !st_pend && !ic_pend && !fn_wait && n_out == 0 && !took && !rd_req && !wr_req) begin fn_due = 0;  fn_wait = 1;  fn_t = now;  inv_req = 1'b1;  n_fence = n_fence + 1; end
+         if (fn_due && !st_pend && !ic_pend && !fn_wait && n_out == 0 && !took && !rd_req && !ftook && !f_req && !wr_req) begin fn_due = 0;  fn_wait = 1;  fn_t = now;  inv_req = 1'b1;  n_fence = n_fence + 1; end
          else if (fn_wait && now > fn_t + 1 && !inv_busy) begin
             fn_wait = 0;
             for (w = 0; w < NWD; w = w + 8) check_line(PBASE + 64'(w) * 8, "the clean");
@@ -400,19 +420,20 @@ module tb;
          if (errors > 10) begin $display("DCACHE-TB FAIL: too many errors"); $finish; end
          n_out = 0;
          for (k = 0; k < NTAG; k = k + 1) n_out = n_out + out_v[k];
-         n_out = n_out + took + rd_req + st_pend + ic_pend + fn_wait + fn_due;
+         n_out = n_out + took + rd_req + ftook + f_req + st_pend + ic_pend + fn_wait + fn_due;
       end
       if (n_req != n_resp) begin $display("FAIL: %0d loads, %0d answered after the drain", n_req, n_resp); errors = errors + 1; end
       if (!fn_done) begin $display("FAIL: the final clean never finished"); errors = errors + 1; end
       if (c_hit == 0 || c_drop == 0 || c_merge == 0 || c_alloc == 0 || c_wait == 0 ||
           c_sal == 0 || c_ro == 0 || c_blk == 0 || c_def == 0 || n_wr == 0 ||
           c_nc == 0 || c_cln == 0 || c_cdone == 0 || c_zero == 0 || n_dma == 0 || n_walk == 0 || n_ncld == 0 || n_ncst == 0 ||
-          c_age == 0 || n_icl == 0 || c_icw == 0 || c_fpw == 0 || c_fpg == 0 || c_fpm == 0 || c_fpwt == 0 || c_dvic == 0) begin
+          c_age == 0 || n_icl == 0 || c_icw == 0 || c_fpw == 0 || c_fpg == 0 || c_fpm == 0 || c_fpwt == 0 || c_dvic == 0 ||
+          n_fast == 0 || n_fcan == 0) begin
          $display("FAIL: an outcome never occurred"); errors = errors + 1;
       end
-      $display("DCACHE-TB %s seed=%0d %s: %0d loads (%0d walks, %0d NC), %0d stores, %0d NC stores, CBOs %0d clean %0d flush (%0d DMA) %0d zero, %0d cleans; %0d requests: %0d hits, %0d drop, %0d merge, %0d alloc (%0d dirty victims), %0d wait (%0d behind the store), %0d defer (%0d a row written as read); store lookup %0d written, %0d merged, %0d missed, %0d waited; main-lookup stores %0d allocated; %0d read-outs, %0d reads, %0d writes; %0d remaps; store queue %0d issued behind the head, %0d sent back; %0d ageings; %0d I$ cleans (%0d found dirty)",
+      $display("DCACHE-TB %s seed=%0d %s: %0d loads (%0d walks, %0d NC), %0d stores, %0d NC stores, CBOs %0d clean %0d flush (%0d DMA) %0d zero, %0d cleans; %0d requests: %0d hits, %0d drop, %0d merge, %0d alloc (%0d dirty victims), %0d wait (%0d behind the store), %0d defer (%0d a row written as read); store lookup %0d written, %0d merged, %0d missed, %0d waited; main-lookup stores %0d allocated; %0d read-outs, %0d reads, %0d writes; %0d remaps; store queue %0d issued behind the head, %0d sent back; %0d ageings; %0d I$ cleans (%0d found dirty); %0d fast loads, %0d cancelled",
                errors ? "FAIL" : "PASS", seed, reorder ? "reorder" : "in-order", n_resp, n_walk, n_ncld, n_st, n_ncst, n_cln, n_fl, n_dma, n_z, n_fence, n_access,
-               c_hit, c_drop, c_merge, c_alloc, c_dvic, c_wait, c_blk, c_def, c_w1, c_fpw, c_fpg, c_fpm, c_fpwt, c_sal, c_ro, n_rd, n_wr, n_remap, c_sq1, c_sqbk, c_age, n_icl, c_icw);
+               c_hit, c_drop, c_merge, c_alloc, c_dvic, c_wait, c_blk, c_def, c_w1, c_fpw, c_fpg, c_fpm, c_fpwt, c_sal, c_ro, n_rd, n_wr, n_remap, c_sq1, c_sqbk, c_age, n_icl, c_icw, n_fast, n_fcan);
       $finish;
    end
 endmodule

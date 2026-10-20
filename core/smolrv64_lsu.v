@@ -99,17 +99,21 @@ module smolrv64_lsu
     // S_IDLE already does, so this is a completion arm, not a state: the FSM stays idle.
     // The access happens later, through the pre-translated port above.
     input  wire            req_xlate,
-    // ...and this translate-only LOAD may also ISSUE its access in the same pass. Set by the
-    // core when no store older than it is live, so there is no ordering test to wait for.
-    // What it saves is exactly smolrv64_lq's SELECT cycle: the entry is still filled and M is
-    // still released on xo_v, and smolrv64_lq still lands the data.
+    // ...and this translate-only LOAD may also start its access in the same pass (its load-queue
+    // entry is live and not yet filled). The D$ takes it in this very cycle (f_*), whatever older
+    // stores are live: the store queue's registered verdict cancels it a cycle later (f_cancel)
+    // when one blocks it. The entry is still filled and M still released on xo_v, and
+    // smolrv64_lq still lands the data.
     input  wire            req_early,
+    input  wire            f_ok,           // the D$ takes a load presented this cycle (registers only)
+    output wire            f_v,            // M's load presented to the D$ now: the index from M's address,
+    output wire [55:0]     f_pa,           // ...the page number from the dTLB, the doubleword
+    input  wire [(1 << LDTW)-1:0] f_cancel, // per tag: last cycle's fast start is void, its lookup with it
     output wire [55:0]     xo_pa,
     output wire            xo_unc,
     output wire            xo_mem,         // the translated PA is DRAM/LRAM (idempotent, speculatable)
     output wire            xo_v,           // translation landed THIS cycle -> fill the entry
-    output wire            xo_early,       // ...and the access started here too (req_early
-                                           // honoured: the FSM was idle and the port free)
+    output wire            xo_early,       // ...and the access started here too (f_v)
     output wire            xo_tv,          // ...with its PA: the TLB held it (else the walker will)
     output wire            xo_flt,         // ...or with the fault its address alone decides
     output wire [3:0]      xo_fc,
@@ -138,7 +142,7 @@ module smolrv64_lsu
     // the fast path, including one starting now; the slow path's by the tag it started with)
     input  wire [(1 << LDTW)-1:0] kill,
     input  wire [LDTW-1:0] pt_tag,         // the load-queue entry the port's candidate is (C4a)
-    input  wire [LDTW-1:0] req_tag,        // ...and the one M's own load (req_early) is
+    input  wire [LDTW-1:0] req_tag,        // ...and the one M's own load (f_v) is
     output wire [LDTW-1:0] pt_rtag,        // the entry whose data lands this cycle (fast path)
     output wire            pt_fast_done,   // a queued load landed on the fast path
     input  wire            m_head,         // M's op is the ROB head (non-speculative) -- gates non-DRAM access
@@ -318,7 +322,7 @@ module smolrv64_lsu
    // runs a queued access (the walker's reads go through the D$ port arbiter, behind this
    // FSM's own access, and complete on their own), and the request is never withdrawn under
    // the walker by the FSM leaving S_IDLE -- which was the restart hazard the old gating
-   // guarded against from the other side. The early START is still an FSM matter (xl_early).
+   // guarded against from the other side. M's own start (f_go) needs neither the FSM nor the port.
    // An FSM-starting request likewise ASKS the MMU whenever it waits in S_IDLE; the port's
    // grant decides only whether it may START this cycle (xl_ok_f below). Gating the request
    // itself on ~pt_start put the grant inside `fault`, and `fault` is M's completion: the
@@ -359,7 +363,7 @@ module smolrv64_lsu
    // ------------------------------------------------------------ translation
    wire        t_ready, t_fault, t_uncached;
    wire [55:0] t_paddr;
-   wire        s_ok, s_flt, s_nc;
+   wire        s_ok, s_flt, s_nc, s_dram;
    wire [3:0]  s_cause;
    wire [55:0] s_paddr;
    wire [3:0]  t_cause;
@@ -392,7 +396,7 @@ module smolrv64_lsu
    // needs, whose column walk touches a new page every one or two loads. A first-level miss that
    // the second level holds answers as a one-cycle walk; at 2048 entries in distributed RAM the
    // first level alone was 8.4 K LUTs.
-   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6), .L2N(2048), .L2I(11)) u_mmu
+   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .DRAM_BASE({8'd0, LSU_DRAM_BASE}), .TLBN(64), .TLBI(6), .L2N(2048), .L2I(11)) u_mmu
      (.clk(clk), .reset(reset),
       .req_valid(xl_req), .req_vaddr(mm_va), .req_access(mm_acc),
       .priv(xl_priv), .sum(xl_sum), .mxr(xl_mxr), .satp(xl_satp), .flush(xl_flush), .walk_ok(1'b1),
@@ -401,7 +405,7 @@ module smolrv64_lsu
       .walking(mmu_walking), .t_ready(t_ready), .t_paddr(t_paddr), .t_fault(t_fault), .t_cause(t_cause),
       .t_lvl(), .t_uncached(t_uncached), .t_ok(), .t_fault_raw(),
       .s_vaddr(req_vaddr), .s_access(mm_st ? 2'd2 : 2'd1),
-      .s_ok(s_ok), .s_flt(s_flt), .s_cause(s_cause), .s_paddr(s_paddr), .s_nc(s_nc));
+      .s_ok(s_ok), .s_flt(s_flt), .s_cause(s_cause), .s_paddr(s_paddr), .s_nc(s_nc), .s_dram(s_dram));
    assign wk_done = wk_v & wk_own & t_ready;
    assign wk_pa   = t_paddr;
    assign wk_unc  = t_uncached;
@@ -446,21 +450,22 @@ module smolrv64_lsu
    // NO disambiguation here any more. smolrv64_lq owns the ordering test, against a REGISTERED
    // address, so it is off the translate path entirely -- that is the whole reason the queue
    // exists (see its header).
-   // ...unless req_early says the same pass may issue the access. Only the START moves:
-   // xo_ok still fires, so smolrv64_lq is still filled and M is still released this cycle. The
-   // start is an FSM matter, so it is the one translate-only thing that still needs S_IDLE
-   // and yields to the port; when it yields, the load simply goes the queue's way, and
-   // smolrv64_lq is told which happened through xo_early rather than re-deriving it.
-   // A speculative early access to NON-DRAM (device/MMIO) must not happen: the read has side
-   // effects (e.g. popping a UART RX byte on the wrong path). Only DRAM/LRAM speculate early;
-   // a non-DRAM load waits until M is the ROB head (non-speculative). See smolrv64_lq for the
-   // queued path's matching gate.
-   wire xl_early = xo_ok & req_early & (t_mem | m_head) & (st == S_IDLE) & ~pt_start
-                 & port_free & ~o_v[req_tag];   // the translate's region (see xo_mem)
-   wire start_ok = pt_start | xl_ok_f | xl_early;
+   // M'S LOAD STARTS IN M'S OWN CYCLE, beside the FSM and the port: the D$ reads its arrays at M's
+   // address bits (the index is inside the page offset) and registers the dTLB's page number for
+   // its compare, so the load is answered two cycles from now. It starts on the dTLB's answer
+   // alone: a hit whose perms pass, a page in DRAM (a speculative read of a device has effects:
+   // such a load waits in the queue for the ROB head), cached, inside one doubleword, its tag
+   // free, and the D$ taking a load now. Never on the store queue: its alias test takes the whole
+   // cycle, so it cancels the start a cycle later instead (f_cancel). Anything not started goes
+   // the queue's way, and smolrv64_lq is told which happened through xo_early.
+   wire xw_m  = (({1'b0, req_vaddr[2:0]} + req_nb) > 4'd8);   // M's load straddles a doubleword
+   wire f_go  = xo_ok & req_early & s_dram & ~s_nc & ~xw_m & f_ok & ~o_v[req_tag];
+   wire start_ok = pt_start | xl_ok_f;
    assign xo_v     = xo_any;
    assign xo_tv    = xo_ok;
-   assign xo_early = xl_early;
+   assign xo_early = f_go;
+   assign f_v      = f_go;
+   assign f_pa     = s_paddr & ~56'd7;
    assign xo_pa  = s_paddr;
    assign xo_unc = s_nc;
    // THE TRANSLATE'S OWN REGION, NEVER eff_pa's. eff_pa is the PORT's address whenever the port
@@ -619,10 +624,9 @@ module smolrv64_lsu
    // sits here, because every access goes through this FSM, and the D$ holds a load to the line
    // of any store it has queued.
    wire take_next = (st == S_ST) & st_fin & ~xword_q & src_pt & pt_v & pt_store & ~(mmu_walking & pm_q);   // src_pt: M's op (a CBO) is not a store to chain from
-   // M's own start: a translate-only load (the early start) took its PA from the lookup port, an
-   // FSM-starting op (AMO, LR/SC, CBO) from the walker's
-   assign eff_pa  = (pt_start | take_next) ? pt_pa  : req_xlate ? s_paddr : t_paddr;
-   assign eff_unc = (pt_start | take_next) ? pt_unc : req_xlate ? s_nc    : t_uncached;
+   // M's own FSM start (AMO, LR/SC, CBO) took its PA from the walker's port
+   assign eff_pa  = (pt_start | take_next) ? pt_pa  : t_paddr;
+   assign eff_unc = (pt_start | take_next) ? pt_unc : t_uncached;
 
    // ---------------------------------------------- FAST PATH: a queued load, non-blocking (C4a)
    // A queued load that is cached, inside one word and to memory (DRAM or the local SRAM) needs
@@ -635,9 +639,10 @@ module smolrv64_lsu
    // the FSM path, whose responses carry one fixed tag of their own (the SoC's TAG_SLOW), so a
    // slow access and any number of fast ones are in flight together. Re-done from da28895b.
    localparam NLD = 1 << LDTW;
-   wire [LDTW-1:0] ld_tag     = pt_start ? pt_tag : req_tag;
-   wire            ld_fast_ok = start_ok & ((pt_start & ~pt_store) | xl_early)
-                              & ~xword & ~eff_unc & pa_mem;
+   // Two fast starts a cycle, on two entries: the port's queued load (ld_fast_ok, on pt_tag) and
+   // M's own (f_go, on req_tag)
+   wire [LDTW-1:0] ld_tag     = pt_tag;
+   wire            ld_fast_ok = start_ok & pt_start & ~pt_store & ~xword & ~eff_unc & pa_mem;
    reg  [3:0]      o_nb   [0:NLD-1];             // per tag: how to format the word
    reg  [NLD-1:0]  o_sgn, o_fp, o_kill;          // o_kill: the load was squashed while in flight
    integer         kt;
@@ -730,30 +735,41 @@ module smolrv64_lsu
       if (reset) begin o_v <= {NLD{1'b0}}; o_kill <= {NLD{1'b0}}; end
       else begin
          if (ld_fast_ret) o_v[r_tag] <= 1'b0;
+         for (kt = 0; kt < NLD; kt = kt + 1)       // the cancel: no response will come
+            if (f_cancel[kt]) o_v[kt] <= 1'b0;
          if (ld_fast_ok) begin
             o_v[ld_tag] <= 1'b1;  o_kill[ld_tag] <= 1'b0;  o_nb[ld_tag] <= nb;  o_boff[ld_tag] <= boff;
             o_sgn[ld_tag] <= eff_signed;  o_fp[ld_tag] <= eff_fp;
+         end
+         if (f_go) begin
+            o_v[req_tag] <= 1'b1;  o_kill[req_tag] <= 1'b0;  o_nb[req_tag] <= req_nb;  o_boff[req_tag] <= req_vaddr[2:0];
+            o_sgn[req_tag] <= req_signed;  o_fp[req_tag] <= req_fp;
          end
          // a redirect fires at the ROB head: every fast load in flight is younger, wrong-path --
          // including one STARTING in this very cycle (the queue's candidate is younger than the
          // head too; the slow path's ld_sq kills that case the same way). The response still
          // comes (the tag stays allocated until then) and is dropped.
-         if (flush) o_kill <= o_kill | o_v | (ld_fast_ok ? ({{(NLD-1){1'b0}}, 1'b1} << ld_tag) : {NLD{1'b0}});
+         if (flush) o_kill <= o_kill | o_v | (ld_fast_ok ? ({{(NLD-1){1'b0}}, 1'b1} << ld_tag) : {NLD{1'b0}})
+                                         | (f_go ? ({{(NLD-1){1'b0}}, 1'b1} << req_tag) : {NLD{1'b0}});
          // the kill, per tag, after the start arm (a dead load starting now is killed with it)
          for (kt = 0; kt < NLD; kt = kt + 1)
-            if (kill[kt] & (o_v[kt] | (ld_fast_ok & (ld_tag == kt[LDTW-1:0])))) o_kill[kt] <= 1'b1;
+            if (kill[kt] & (o_v[kt] | (ld_fast_ok & (ld_tag == kt[LDTW-1:0])) | (f_go & (req_tag == kt[LDTW-1:0]))))
+               o_kill[kt] <= 1'b1;
       end
    end
    // B-rule protocol: a response is matched by a tag the requester allocated. These three
    // are the checks that caught C4a step 2's first attempt on its first simulation run,
    // and they are the ones that matter most once the D$ grows MSHRs (C5) -- so they are
    // wires, and the integrity log carries them onto the board.
-   wire e_tag_reissue = ld_fast_ok & o_v[ld_tag] & ~(ld_fast_ret & (r_tag == ld_tag));
+   wire e_tag_reissue = (ld_fast_ok & o_v[ld_tag] & ~(ld_fast_ret & (r_tag == ld_tag)))
+                      | (ld_fast_ok & f_go & (ld_tag == req_tag))
+                      | (|(f_cancel & ~o_v)) | (f_go & f_cancel[req_tag]) | (ld_fast_ok & f_cancel[ld_tag]);
    wire e_tag_orphan  = mem_rvalid_c & ~o_v[mem_rtag_resp];
    wire e_tag_reuse   = ld_fast_ok & ld_fast_ret & (r_tag == ld_tag);
    always @(posedge clk) if (!reset) begin
       if (e_tag_reissue)
-         $fatal(1, "smolrv64_lsu: tag %0d reissued while its response is outstanding", ld_tag);
+         $fatal(1, "smolrv64_lsu: tag reissued while its response is outstanding, two starts on one tag, or a cancel on a tag with nothing outstanding or starting (port %0d, M %0d, cancel %b, o_v %b)",
+                ld_tag, req_tag, f_cancel, o_v);
       if (e_tag_orphan)
          $fatal(1, "smolrv64_lsu: fast response with tag %0d that nothing is waiting on", mem_rtag_resp);
       if (e_tag_reuse)
@@ -765,8 +781,11 @@ module smolrv64_lsu
    reg [63:0] dbg_line; initial if (!$value$plusargs("dbg_line=%h", dbg_line)) dbg_line = 64'hFFFF_FFFF_FFFF_FFFF;
    always @(posedge clk) if (!reset) begin
       if (start_ok && (eff_pa[55:6] == dbg_line[55:6]))
-         $display("[lsu t=%0t START pa=%h fast=%b tag=%0d pt=%b st=%b early=%b nb=%0d boff=%0d unc=%b xword=%b fsm=%0d o_v=%b port_free=%b]",
-                  $time, eff_pa, ld_fast_ok, ld_tag, pt_start, pt_start & pt_store, xl_early, nb, boff, eff_unc, xword, st, o_v, port_free);
+         $display("[lsu t=%0t START pa=%h fast=%b tag=%0d pt=%b st=%b nb=%0d boff=%0d unc=%b xword=%b fsm=%0d o_v=%b port_free=%b]",
+                  $time, eff_pa, ld_fast_ok, ld_tag, pt_start, pt_start & pt_store, nb, boff, eff_unc, xword, st, o_v, port_free);
+      if (f_go && (f_pa[55:6] == dbg_line[55:6]))
+         $display("[lsu t=%0t MSTART pa=%h tag=%0d o_v=%b]", $time, s_paddr, req_tag, o_v);
+      if (|f_cancel) $display("[lsu t=%0t CANCEL %b]", $time, f_cancel);
       if (mem_rvalid_c)
          $display("[lsu t=%0t FASTRESP tag=%0d o_v=%b kill=%b data=%h fmt=%h nb=%0d boff=%0d]", $time, mem_rtag_resp, o_v[mem_rtag_resp], o_kill[mem_rtag_resp], mem_rdata_c, ld_fast_val, f_nb, o_boff[mem_rtag_resp]);
       if (mem_wen && (mem_wabase[55:6] == dbg_line[55:6]))
@@ -824,7 +843,7 @@ module smolrv64_lsu
    // The slow path's load names its entry by the tag it started with: fast starts go on meanwhile,
    // so nothing outside the LSU names it reliably. A slow start replaces it: the FSM starts one
    // only once the last has finished, and nothing dead starts (a dead entry is not live).
-   wire slow_go = (pt_start | xl_early) & ~ld_fast_ok;
+   wire slow_go = pt_start & ~ld_fast_ok;
    reg  [LDTW-1:0] sl_tag;
    reg  ld_sq;  initial ld_sq = 1'b0;
    always @(posedge clk) begin
@@ -845,7 +864,7 @@ module smolrv64_lsu
    endfunction
    initial if (NLD > 63) $fatal(1, "smolrv64_lsu: NLD=%0d loads outstanding; ld_infl counts to 63", NLD);
    assign ld_infl  = ones_ld(o_v);
-   assign ld_sent  = ld_fast_ok;
+   assign ld_sent  = ld_fast_ok | f_go;   // a cycle with a start (two in one cycle count once)
    assign ld_fkill = ld_fast_ret & r_kill;
 
    // The FSM below asserts these two inline; they are qualified by the state that
@@ -870,11 +889,11 @@ module smolrv64_lsu
                 // A NON-DRAM ACCESS IS NEVER SPECULATIVE: the port's request carries the LQ's
                 // head compare (or is a committed store), the early path carries M's.
                 if (e_dev_spec)
-                   $fatal(1, "smolrv64_lsu: speculative non-DRAM access: pa=%h pt_start=%b xl_early=%b", eff_pa, pt_start, xl_early);
+                   $fatal(1, "smolrv64_lsu: speculative non-DRAM access: pa=%h pt_start=%b", eff_pa, pt_start);
                 if (e_dev_span)
-                   $fatal(1, "smolrv64_lsu: non-DRAM access straddles a word: pa=%h nb=%0d boff=%0d va=%h unc=%b pt_start=%b xl_early=%b req_early=%b m_head=%b pt_store=%b st=%0d",
-                          eff_pa, nb, boff, req_vaddr, eff_unc, pt_start, xl_early, req_early, m_head, pt_store, st);
-                own_pt        <= (pt_start | xl_early) & ~ld_fast_ok;   // smolrv64_lq lands it; a fast load's landing is by tag
+                   $fatal(1, "smolrv64_lsu: non-DRAM access straddles a word: pa=%h nb=%0d boff=%0d va=%h unc=%b pt_start=%b m_head=%b pt_store=%b st=%0d",
+                          eff_pa, nb, boff, req_vaddr, eff_unc, pt_start, m_head, pt_store, st);
+                own_pt        <= pt_start & ~ld_fast_ok;   // smolrv64_lq lands it; a fast load's landing is by tag
                 own_pt_st     <= pt_start & pt_store;
                 src_pt        <= pt_start;              // ...but the fields are M's
                 nc_q          <= eff_unc;
@@ -977,6 +996,9 @@ module smolrv64_lsu
       // a fast load's word is formatted by its byte offset, so its read is word-aligned
       if (ld_fast_ok & ~xl_can)
          $fatal(1, "smolrv64_lsu: a fast load starts unaligned (pa=%h)", eff_pa);
+      // M's start is DRAM by its dTLB entry; the PA it presents says the same (rule D12)
+      if (f_go & ~(s_paddr >= LSU_DRAM_BASE))
+         $fatal(1, "smolrv64_lsu: M's load starts at pa=%h, below DRAM", s_paddr);
    end
 
    // ---- INTEGRITY LOG (rv_errlog) ---------------------------------------------------
@@ -986,7 +1008,8 @@ module smolrv64_lsu
    // nothing -- and simulation reaches ~1.5e9 cycles where Geekbench reaches ~3e11.
    //   0 dev_spec    a speculative access to a non-DRAM address
    //   1 dev_span    a non-DRAM access straddling an 8-byte word
-   //   2 tag_reissue a load tag reissued while its response is outstanding
+   //   2 tag_reissue a load tag reissued while its response is outstanding, two starts on one tag,
+   //                 or a cancel on a tag with nothing outstanding or starting again
    //   3 tag_orphan  a fast response carrying a tag nothing is waiting on
    //   4 tag_reuse   a tag lands and restarts in one cycle (the queue reused the slot)
    //   5 ld_done     pt_ld_done disagrees with pt_done & ~store

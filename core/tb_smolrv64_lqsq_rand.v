@@ -58,6 +58,7 @@ module tb;
    wire [IDXB-1:0]  lf_idx;
    wire             lf_rp;
    wire [NENT-1:0]  e_wt, e_acc, sq_unk_q, sq_viol, sq_res_c, sq_res_a;
+   wire [NENT-1:0]  sq_l_cancel;   // an early start an older store blocks, cancelled a cycle later
    wire [NENT*8-1:0] e_pch;
    wire [IDXB-1:0]  lk_idx, sk_idx;
    wire [38:0]      lk_va, sk_va, lf_pc, sf_pc;
@@ -88,7 +89,7 @@ module tb;
      (.clk(clk),.reset(reset),
       .d_alloc(lq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(lq_d_rob),.d_prd(lq_d_prd),.d_rd(lq_d_rd),.d_rd_v(lq_d_rd_v),
       .d_sqtag(lq_d_sqtag),.d_wt(1'b1),.d_ready(lq_d_ready),.d_ready2(lq_d_ready2),.d_idx(lq_d_idx),
-      .a_v(lq_a_v),.a_sent(lq_a_sent),.a_idx(lq_a_idx),.a_pa(lq_a_pa),.a_va(39'(lq_a_pa)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(lq_a_size),
+      .a_v(lq_a_v),.a_sent(lq_a_sent),.a_cancel(sq_l_cancel),.a_idx(lq_a_idx),.a_pa(lq_a_pa),.a_va(39'(lq_a_pa)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(lq_a_size),
       .a_signed(lq_a_signed),.a_fp(lq_a_fp),.a_unc(lq_a_unc),
       .e_off(e_off),.e_size(e_size),.e_tag(e_tag),.e_av(e_av),.e_wt(e_wt),.e_pch(e_pch),.e_acc(e_acc),.unk_q(sq_unk_q),.viol(sq_viol),.e_block(e_block),.x_block(lq_x_block),
       .e_vpn(e_vpn),.e_fwd(sq_l_fwd),.fw_busy(1'b0),.x_fwd(lq_x_fwd),.a_bare(1'b0),
@@ -110,7 +111,7 @@ module tb;
       .c_fast(sq_c_fast_nc),.c_take(sq_c_take),.c_done(sq_c_take),
       .kc_v(sq_kc_v),.kc_rob(sq_kc_rob),.kc_addr(sq_kc_addr),.kc_data(sq_kc_data),.kc_size(sq_kc_size),.k_take(sq_k_take),
       .l_off(e_off),.l_size(e_size),.l_tag(e_tag),.l_av(e_av),.l_wt(e_wt),.l_acc(e_acc),.l_unk_q(sq_unk_q),.l_viol(sq_viol),.l_res_c(sq_res_c),.l_res_a(sq_res_a),
-      .l_fill(lq_a_v),.l_fill_ix(lq_a_idx),.l_fill_off(lq_a_pa[11:0]),.l_fill_size(lq_a_size), .l_fill_flt(1'b0),
+      .l_fill(lq_a_v),.l_fill_ix(lq_a_idx),.l_fill_go(lq_a_v & lq_a_sent),.l_cancel(sq_l_cancel),.l_fill_off(lq_a_pa[11:0]),.l_fill_size(lq_a_size), .l_fill_flt(1'b0),
       .l_vpn(e_vpn),.l_fill_vpn({1'b0, lq_a_pa[38:12]}),.a_bare(1'b0),.l_fwd(sq_l_fwd),.f_go(lq_x_take & lq_x_fwd),.f_lix(lq_x_idx),.f_data(sq_f_data),
       .l_block(e_block),.l_block_unk_q(sq_l_block_unk_q),.l_block_q(l_block_q),.l_older(l_older),.ld_tag(lq_q_tag),.ld_older(ld_older),
       .k_v(sk_v),.k_idx(sk_idx),.k_va(sk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b1),.w_flt(1'b0),.w_fc(4'd0),.f_v(sf_v),.f_rob(sf_rob),.f_fc(sf_fc),.f_pc(sf_pc),.f_seq(sf_seq),.occupancy(sq_occ),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.kmask(sq_kmask_nc));
@@ -133,6 +134,8 @@ module tb;
    integer nops, seed, i, j, op, act, n_early, n_reord, n_full, n_take, n_flush, n_err, n_cyc, n_fwd, fw_op, fw_n;
    integer p_disp, p_addr, p_scmt;          // program-order cursors: dispatch, address, store commit
    integer live_ld_inflight, verbose, vfrom, vto;
+   integer pend_op, n_cancel;               // the early start of last cycle, and the cancels seen
+   reg     pend_cx;                         // ...and whether the model expects it cancelled
 
    // xorshift32 on a module-level state: $random(seed) called through a function leaves
    // the seed untouched under Verilator, and $urandom ignores its argument -- one gave
@@ -156,6 +159,13 @@ module tb;
          n_err = n_err + 1;
       end
    endtask
+   // an older store still in the queue (not dead, not drained) that overlaps it?
+   function older_ovl(input integer o);
+      integer k; begin older_ovl = 0;
+         for (k = 0; k < o; k = k + 1)
+            if (is_st[k] && (st[k] == 1 || st[k] == 2) && ovl(addr[k], sz[k], addr[o], sz[o])) older_ovl = 1;
+      end
+   endfunction
    // an older store that is live in the queue (allocated, uncommitted, not dead)?
    function older_live(input integer o);
       integer k; begin older_live = 0;
@@ -182,11 +192,25 @@ module tb;
          st[i]    = 0;
       end
       n_early = 0; n_reord = 0; n_full = 0; n_take = 0; n_flush = 0; n_err = 0; n_cyc = 0; n_fwd = 0;
-      p_disp = 0; p_addr = 0; p_scmt = 0; live_ld_inflight = 0;
+      p_disp = 0; p_addr = 0; p_scmt = 0; live_ld_inflight = 0;  pend_op = -1;  pend_cx = 0;  n_cancel = 0;
       repeat (3) @(posedge clk); #1; reset = 0; step;
 
       while ((p_disp < nops || lq_occ != 0 || sq_occ != 0) && n_err < 8 && n_cyc < 40*nops) begin
          n_cyc = n_cyc + 1;
+         // last cycle's early start: cancelled exactly when an undrained older store overlaps it
+         if (pend_op >= 0) begin
+            if (sq_l_cancel[qix[pend_op]] !== pend_cx)
+               fail(pend_cx ? "an early start past an overlapping older store was not cancelled"
+                            : "an early start no older store overlaps was cancelled", pend_op);
+            if (sq_l_cancel !== (pend_cx ? ({{(NENT-1){1'b0}}, 1'b1} << qix[pend_op]) : {NENT{1'b0}}))
+               fail("a cancel names another entry", pend_op);
+            if (sq_l_cancel[qix[pend_op]]) begin
+               st[pend_op] = 1;  live_ld_inflight = live_ld_inflight - 1;  n_cancel = n_cancel + 1;
+            end
+            pend_op = -1;
+         end else if (|sq_l_cancel) fail("a cancel with no early start last cycle", 0);
+         // addresses arrive in program order here, so no load ever reads before an older store's address
+         if (|sq_viol) fail("an ordering violation", 0);
          act = rnd(0) % 8;
          lq_d_alloc = 0; lq_a_v = 0; lq_a_sent = 0; lq_x_take = 0; lq_l_v = 0;
          sq_d_alloc = 0; sq_a_v = 0; sq_c_take = 0; sq_k_take = 0; flush = 0;
@@ -218,16 +242,17 @@ module tb;
                     st[op] = 1; p_addr = p_addr + 1;
                  end else begin
                     lq_b_idx = qix[op]; #1;
-                    // the early start is offered only to the untranslated candidate with no
-                    // older store live -- and the store queue must agree with the model
+                    // the store queue's older-store answer must agree with the model
                     if (lq_b_ok && (ld_older !== older_live(op)))
                        fail(ld_older ? "ld_older says an older store is live; the model has none"
                                      : "ld_older says none; the model has an older live store", op);
                     lq_a_v = 1; lq_a_idx = qix[op]; lq_a_pa = addr[op]; lq_a_size = sz[op];
                     lq_a_signed = sgn[op]; lq_a_unc = unc[op]; lq_a_fp = 0;
-                    if (lq_b_ok && !ld_older && (rnd(0) % 4) != 0) begin
+                    // the early start, whatever older stores are live: one that overlaps it cancels
+                    // the start a cycle later (checked at the top of the next cycle)
+                    if (lq_b_ok && (rnd(0) % 4) != 0) begin
                        lq_a_sent = 1; st[op] = 2; n_early = n_early + 1; live_ld_inflight = live_ld_inflight + 1;
-                       if (older_live(op)) fail("early start past a live older store", op);
+                       pend_op = op;  pend_cx = older_ovl(op);
                     end else st[op] = 1;
                     p_addr = p_addr + 1;
                  end
@@ -330,8 +355,9 @@ module tb;
             $display("   op %0d %s addr=%h sz=%0d st=%0d qix=%0d", i, is_st[i] ? "st" : "ld", addr[i], 1 << sz[i], st[i], qix[i]);
          n_err = n_err + 1;
       end
-      $display("---- tb_smolrv64_lqsq_rand: ops=%0d cycles=%0d takes=%0d early=%0d reordered-past-older-store=%0d full-queue-loads=%0d flushes=%0d forwards=%0d errors=%0d",
-               nops, n_cyc, n_take, n_early, n_reord, n_full, n_flush, n_fwd, n_err);
+      $display("---- tb_smolrv64_lqsq_rand: ops=%0d cycles=%0d takes=%0d early=%0d cancelled=%0d reordered-past-older-store=%0d full-queue-loads=%0d flushes=%0d forwards=%0d errors=%0d",
+               nops, n_cyc, n_take, n_early, n_cancel, n_reord, n_full, n_flush, n_fwd, n_err);
+      if (n_cancel == 0) begin $display("FAIL: no early start was ever cancelled"); n_err = n_err + 1; end
       if (n_err != 0) begin $display("LQSQ-RAND FAIL"); $fatal(1, "tb_smolrv64_lqsq_rand FAILED"); end
       $display("LQSQ-RAND PASS");
       $finish;

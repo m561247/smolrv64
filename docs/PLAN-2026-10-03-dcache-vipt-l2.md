@@ -329,6 +329,16 @@ below starts):
   starts today become 79-90%). The one-cycle price, measured by answering every load a cycle
   late: GB5 SimPoints +1.44% cycles, the 60 M boot -1.49% retires.
 
+**Built 2026-10-19 (wip/dtlb), as designed.** GB5's 77 SimPoints -1.70% of the single-core cycles
+against 039314ad (every subtest; SQLite -3.13%, HTML5 -2.82%, Navigation -2.28%, AES-XTS -0.14%),
+the 60 M boot +1.66% retires, Dhrystone -0.86% and CoreMark -8.37% cycles. What stops a start now
+(`LDPATH-SIM`, % of loads): the D$ takes no load in M's cycle 2-12 (a read waiting at the door,
+the port register presenting, a replay or an urgent store), the dTLB does not hold the page 0.4-12
+(N-Body 12.1, Speech 9.7, Navigation 6.8), and a cancel 0.6-19 (N-Body 19.1, Navigation 14.3,
+HTML5 12.2). The core's slow-load landing index took M's index on every early start, right only
+while that start needed the state machine idle: the first lockstep landed a slow load in the entry
+M had just started, and that write is gone.
+
 **Then: loads leave M's funnel.** A load stage beside M with its own pick (the oldest waiting load,
 else a lane's), its own dTLB read port (a LUTRAM copy, written by the same fills), the queue fill
 and the alias row; M keeps stores, AMOs, LR/SC and CBOs. 36-55% of the integer subtests' loads

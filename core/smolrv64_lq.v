@@ -29,14 +29,14 @@
 //             exactly one disambiguation query port into smolrv64_sq.
 //   land      data returns, writes back, completes the ROB slot.
 //
-// FILL AND ACCESS COLLAPSE when there is nothing to disambiguate against. The SELECT cycle
-// exists to read a registered address into the alias test; a load with no store older than
-// it still live has no alias test to run, so the core starts its access in the same pass
-// that fills the entry (a_sent) and the entry goes straight to `sent`. Everything else is
-// unchanged -- the entry is still filled, M is still released here, and the data still lands
-// through l_*. That last part is the point: an earlier attempt let M keep the load through
-// its access instead, and giving up the early release cost more than the cycles it saved
-// (ldbench 6.00 -> 7.00 cyc/load). The queue's two cycles are not pure overhead.
+// FILL AND ACCESS COLLAPSE. The core starts a translated load's access in the same pass that
+// fills the entry (a_sent), whatever older stores are live, and the entry goes straight to
+// `sent`. The alias test answers a cycle later, from the row the fill wrote: a load an older
+// store blocks has its access cancelled (a_cancel, smolrv64_sq l_cancel) and is unsent again,
+// to forward or wait like any blocked entry. Everything else is unchanged -- the entry is still
+// filled, M is still released here, and the data still lands through l_*. That last part is
+// the point: an earlier attempt let M keep the load through its access instead, and giving up
+// the early release cost more than the cycles it saved (ldbench 6.00 -> 7.00 cyc/load).
 //
 // FLUSH IS WHOLESALE for the same reason as smolrv64_sq's: `redirect` is gated by head_block,
 // so it fires only with the redirecting instruction at the ROB head, and everything still
@@ -80,6 +80,7 @@ module smolrv64_lq
     // been what a candidate is for.
     input  wire                  a_v,
     input  wire                  a_sent,
+    input  wire [NENT-1:0]       a_cancel,    // per entry: last cycle's a_sent is void (smolrv64_sq l_cancel)
     input  wire [IDXB-1:0]       a_idx,
     input  wire [PAW-1:0]        a_pa,        // ...its PA, when a_tv
     input  wire [VAW-1:0]        a_va,        // the VA, always: the alias test and the walker read it
@@ -448,6 +449,8 @@ module smolrv64_lq
          // Filled AND already gone. It cannot collide with x_take above: that one needs a filled
          // entry, and a_sent is asserted only for one that is not filled yet (b_ok).
          if (a_v & a_sent) sent[a_idx] <= 1'b1;
+         for (kw = 0; kw < NENT; kw = kw + 1)
+            if (a_cancel[kw]) sent[kw] <= 1'b0;
          // The kill, after every other arm (a dead entry landing, filled or sent now dies all the
          // same; a dead entry landing now is counted once) and before the flush. Nothing
          // allocates while it holds (asserted).
@@ -487,7 +490,7 @@ module smolrv64_lq
 
    // Invariants (docs/rtl-rules.md A1). Every one of these is something the queue would
    // otherwise do silently and wrongly.
-   integer ia;
+   integer ia, ic;
    reg [NENT-1:0] v_first;               // the live entries no live entry is older than: one
    reg [IDXB:0]   v_n, f_n;              // ...counted, and the live entries
    always @* begin
@@ -524,8 +527,11 @@ module smolrv64_lq
          $fatal(1, "smolrv64_lq: started an access for entry %0d with no address or already sent", x_idx);
       if (a_v & a_sent & ~b_ok)
          $fatal(1, "smolrv64_lq: entry %0d started early but is not a live unfilled entry", a_idx);
-      if (a_v & a_sent & x_v & x_take)
-         $fatal(1, "smolrv64_lq: an early start and a candidate start in the same cycle");
+      if (a_v & a_sent & x_v & x_take & (a_idx == x_idx))
+         $fatal(1, "smolrv64_lq: entry %0d started early and as the candidate in one cycle", a_idx);
+      for (ic = 0; ic < NENT; ic = ic + 1)
+         if (a_cancel[ic] & v[ic] & ~sent[ic])
+            $fatal(1, "smolrv64_lq: entry %0d's access cancelled but it was not sent", ic);
       if (a_v & a_sent & ~a_tv)
          $fatal(1, "smolrv64_lq: entry %0d started early without a translation", a_idx);
       if (x_v & x_take & ~tv[x_idx])

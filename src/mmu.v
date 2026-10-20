@@ -27,7 +27,10 @@ module mmu
     // The top of physical memory: a PA at or above it does not exist and takes an access
     // fault. Every device lies below DRAM, so everything below the top is addressable and the
     // SoC's decode owns the device hole. The default is the whole AW-bit space (unit benches).
-    parameter [63:0] DRAM_TOP  = 64'd1 << AW)
+    parameter [63:0] DRAM_TOP  = 64'd1 << AW,
+    // The base of DRAM: memory a load may read speculatively (s_dram). The default makes everything
+    // below the top DRAM (unit benches).
+    parameter [63:0] DRAM_BASE = 64'd0)
    (input  wire        clk,
     input  wire        reset,
     // request (combinational; held by the caller until t_ready)
@@ -74,7 +77,8 @@ module mmu
     output wire        s_flt,
     output wire [3:0]  s_cause,
     output wire [AW-1:0] s_paddr,
-    output wire        s_nc);
+    output wire        s_nc,
+    output wire        s_dram);      // ...and the whole page lies in [DRAM_BASE, DRAM_TOP): a bit of the entry
 
    wire        xlate = (satp[63:60] == 4'd8);   // 8 = Sv39, else Bare (identity)
 
@@ -119,6 +123,7 @@ module mmu
    reg [7:0]        tlb_perm[0:TLBN-1];   // PTE perm bits V,R,W,X,U,G,A,D
    reg              tlb_nc  [0:TLBN-1];   // Svpbmt: leaf is NC/IO (PBMT pte[62:61] != 0)
    reg              tlb_n   [0:TLBN-1];   // Ssvnapot: leaf is a 64 KiB NAPOT page (pte[63])
+   reg              tlb_dram[0:TLBN-1];   // the page lies in DRAM, decided at the fill (no compare on a hit)
    integer t;
    // tlb_n is initialized (unlike tlb_ppn/tlb_perm) because it drives a SELECT in
    // leaf_pa: an X there makes the whole PA X, where an X in tlb_ppn alone still
@@ -264,6 +269,7 @@ module mmu
    wire [7:0]      s_perm = tlb_perm[s_idx];
    wire            s_nc_e = tlb_nc[s_idx];
    wire            s_n    = tlb_n[s_idx];
+   wire            s_dr_e = tlb_dram[s_idx];
    wire            s_hit  = s_v_e & (s_tag == s_vpn)
                           & ~perm_fault({56'd0, s_perm}, s_access, priv, sum, mxr);
    wire            s_noncanon = (s_vaddr[63:39] != {25{s_vaddr[38]}});
@@ -274,6 +280,7 @@ module mmu
    assign s_ok    = ~s_flt & (~xlate | s_hit);
    assign s_paddr = xlate ? leaf_pa(s_ppn, s_lvl, s_vaddr, s_n) : s_vaddr[AW-1:0];
    assign s_nc    = xlate & s_nc_e;
+   assign s_dram  = xlate ? s_dr_e : ({1'b0, s_vaddr} >= {1'b0, DRAM_BASE});   // Bare: s_ok holds the top
 
    // start a walk when the request can't resolve this cycle
    wire start_walk = req_valid & walk_ok & xlate & !noncanon & !tlb_ok & !wdm & (st==IDLE);
@@ -315,6 +322,10 @@ module mmu
    wire             f1_n    = l2_fill ? l2_n    : ptw_rdata[63];
    // a second-level entry was installed only below the cap, so its refill is installed too
    wire             f1_in   = l2_fill | ({1'b0, leaf_last} < TOP_PPN);
+   // ...and the page's first byte is DRAM's: an installed page ends below the top, so it is DRAM whole
+   wire [43:0]      f1_base = (f1_lvl == 2'd2) ? {f1_ppn[43:18], 18'd0} : (f1_lvl == 2'd1) ? {f1_ppn[43:9], 9'd0}
+                            : f1_n ? {f1_ppn[43:4], 4'd0} : f1_ppn;
+   wire             f1_dram = ({8'd0, f1_base, 12'd0} >= DRAM_BASE);
    wire             g_we    = ~reset & (scan | f1);
    wire [TLBI-1:0]  g_wa    = scan ? scan_i[TLBI-1:0] : va_q[12+:TLBI];
    wire [GB:0]      g_wd    = scan ? {(GB+1){1'b0}} : {f1_in, cg};
@@ -329,6 +340,7 @@ module mmu
       tlb_perm[va_q[12+:TLBI]] <= f1_perm;
       tlb_nc[va_q[12+:TLBI]]   <= f1_nc;
       tlb_n[va_q[12+:TLBI]]    <= f1_n;
+      tlb_dram[va_q[12+:TLBI]] <= f1_dram;
    end
    generate if (L2N > 0) begin : l2
       // ONE BLOCK RAM, {installed, generation, tag, ppn, lvl, perm, nc, n} per entry, read port and

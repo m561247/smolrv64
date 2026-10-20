@@ -117,6 +117,16 @@ module rv_dcache #(
    output reg  [63:0]       rd_data,     // the addressed bytes at bit 0
    output reg  [RTW-1:0]    rd_resp_tag,
    output reg  [63:0]       rd_resp_addr,// the PA the response answers
+   // ---- M's load in M's own cycle: taken whenever presented, so it never waits at a door. The
+   // index comes from a register, the page number from the dTLB this cycle; an older store that
+   // blocks the load voids its lookup a cycle later.
+   input  wire              rd_quiet,    // registered: no rd_req can be presented this cycle
+   input  wire              f_hint,      // registered: M holds a load that may be presented now
+   input  wire              f_req,       // presented now, only while f_ok
+   input  wire [63:0]       f_pa,
+   input  wire [RTW-1:0]    f_tag,
+   output wire              f_ok,        // a load presented now is taken (registers only)
+   input  wire              f_cancel,    // the lookup's fast load is void (its T+1)
    // ---- committed stores: the data sits at its byte lanes of the aligned 8-byte chunk
    input  wire              wr_req,
    input  wire [63:0]       wr_pa,
@@ -278,6 +288,7 @@ module rv_dcache #(
    reg        door;                               // registered: open unless the clean or the scan runs
    reg        sdoor;                              // the stores': open while a clean waits for them
    reg        s1_v;  reg [63:0] s1_pa;  reg [TB-1:0] s1_tag;  reg s1_nc;
+   reg        s1_f;                               // the lookup's load is M's fast one (f_cancel may void it)
    reg        s1_head;                            // a store in the lookup is the queue's head
    // the replay pick: the lowest waiter released by its MSHR, a drop or a conflict, else the first
    // released by any resource freeing at or after ra_ptr, round robin -- each freeing hands its
@@ -311,15 +322,21 @@ module rv_dcache #(
    wire           st_urgent = (sc == SD) | sf_cbo[sq_hp] | sf_nc[sq_hp] | sf_ic[sq_hp] | (st_age >= ST_WAIT);
    reg  [2:0]     fp_age;                         // the store lookup's head has waited this long
    wire           fp_hold = (fp_age >= FP_WAIT);   // ...and shuts the load door
-   wire           st_go  = ~(rm_v | ra_v) & ~hold & sdoor & (sq_i0 | sq_i1) & (~(door & rd_req & ~fp_hold) | st_urgent);
+   // M's load counts as presented whenever M holds one (f_hint, a register), so the store's turn and
+   // the arrays' address never wait for f_req, the dTLB's late answer (rules I6, I8): a load that
+   // does not come costs the store that cycle
+   wire           st_go  = ~(rm_v | ra_v) & ~hold & sdoor & (sq_i0 | sq_i1) & (~(door & (rd_req | f_hint) & ~fp_hold) | st_urgent);
    wire           si     = ~sq_i0;                // the entry issued
    wire [1:0]     sq_ps  = si ? sq_h1 : sq_hp;     // ...its slot
    wire           new_go = ~(rm_v | ra_v) & ~hold & door & ~fp_hold & ~st_go & rd_req;
    assign rd_ack = new_go;
-   wire           a_take = rp_v | st_go | new_go;
-   wire [TB-1:0]  a_tag = rp_v ? rp_t        : st_go ? ST    : {1'b0, rd_tag};
-   wire           a_nc  = rp_v ? wt_nc[rp_t] : st_go ? (sf_nc[sq_ps] & ~sf_cbo[sq_ps]) : rd_nc;
-   wire [63:0]    a_pa  = rp_v ? wt_pa[rp_t] : st_go ? sf_pa[sq_ps] : rd_pa;
+   // the fast load is taken when no replay, urgent store, held door or other read is in its way
+   assign f_ok   = ~(rm_v | ra_v) & ~hold & door & ~fp_hold & ~(sdoor & (sq_i0 | sq_i1) & st_urgent) & rd_quiet;
+   wire           a_take = rp_v | st_go | new_go | f_req;
+   wire           a_cap  = rp_v | st_go | new_go | f_ok;   // a_take on the state alone: the lookup's fields
+   wire [TB-1:0]  a_tag = rp_v ? rp_t        : st_go ? ST    : f_ok ? {1'b0, f_tag} : {1'b0, rd_tag};
+   wire           a_nc  = rp_v ? wt_nc[rp_t] : st_go ? (sf_nc[sq_ps] & ~sf_cbo[sq_ps]) : f_ok ? 1'b0 : rd_nc;
+   wire [63:0]    a_pa  = rp_v ? wt_pa[rp_t] : st_go ? sf_pa[sq_ps] : f_ok ? f_pa : rd_pa;
    // taking a store: a CBO or NC store held for its completion is the one already queued
    reg            sq_cn;                          // a CBO or an NC store is queued
    always @* begin
@@ -415,11 +432,13 @@ module rv_dcache #(
       for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_pa[sq_hp + i[1:0]][6 +: LB] == s1_pa[6 +: LB])) sq_ln = 1'b1;
    end
    reg            w1_v;  reg [LB-1:0] w1_pl;      // the store written at the last edge, its line
-   wire blk_st = s1_v & ~s1_st & sq_ln;
-   wire blk_w1 = s1_v & ~s1_st & ~sq_ln & w1_v & (w1_pl == s1_pa[6 +: LB]);
+   // a cancelled fast load is no request at all: it neither waits, nor answers, nor fills
+   wire s1_live = s1_v & ~(s1_f & f_cancel);
+   wire blk_st = s1_live & ~s1_st & sq_ln;
+   wire blk_w1 = s1_live & ~s1_st & ~sq_ln & w1_v & (w1_pl == s1_pa[6 +: LB]);
    // a store behind the head while the head is parked: it goes back to the queue, untouched
    wire sq_bk  = s1_v & s1_st & ~s1_head;
-   wire l1_v   = s1_v & ~blk_st & ~blk_w1 & ~sq_bk;   // the lookup proceeds
+   wire l1_v   = s1_live & ~blk_st & ~blk_w1 & ~sq_bk;   // the lookup proceeds
    reg  [WAYS-1:0] hitv;
    always @* for (i = 0; i < WAYS; i = i + 1) hitv[i] = vr[i] & (tr[i*PTB +: PTB] == s1_ptg);
    wire           hit    = |hitv;
@@ -509,7 +528,7 @@ module rv_dcache #(
    wire [1:0] sq_pt = sq_hp + sc;                                     // the tail's slot
    // counted once per request, never per replay: an access is a load or store taken, a miss a line
    // fill started
-   assign perf_access = new_go | wr_take;
+   assign perf_access = new_go | f_req | wr_take;
    assign perf_miss   = m_alloc;
 
    // ---------------------------------------------------------------- the data arrays
@@ -631,7 +650,7 @@ module rv_dcache #(
    // ---------------------------------------------------------------- the machine
    always @(posedge clk) begin
       if (reset) begin
-         door <= 1'b0;  sdoor <= 1'b0;  s1_v <= 1'b0;  sb_v <= 1'b0;  rd_valid <= 1'b0;  wr_acc <= 1'b0;  wr_cpl <= 1'b0;
+         door <= 1'b0;  sdoor <= 1'b0;  s1_v <= 1'b0;  s1_f <= 1'b0;  sb_v <= 1'b0;  rd_valid <= 1'b0;  wr_acc <= 1'b0;  wr_cpl <= 1'b0;
          sc <= 2'd0;  sq_hp <= 2'd0;  wr_room <= 1'b0;  icq <= 1'b0;  ic_ack <= 1'b0;  ic_dty <= 1'b0;  ic_slow <= 1'b0;
          nc_v <= 1'b0;  nc_rdy <= 1'b0;  cl_pend <= 1'b0;  cl_on <= 1'b0;  cl_wait <= 1'b0;
          scan_on <= 1'b1;  scan <= 6'd0;  fl_v <= 1'b0;  ra_ptr <= {TB{1'b0}};  w1_v <= 1'b0;
@@ -643,7 +662,8 @@ module rv_dcache #(
       end else begin
          // the main lookup stage takes whatever the arrays were addressed for
          s1_v <= a_take;
-         if (a_take) begin s1_pa <= a_pa; s1_tag <= a_tag; s1_nc <= a_nc; end
+         s1_f <= f_req;
+         if (a_cap) begin s1_pa <= a_pa; s1_tag <= a_tag; s1_nc <= a_nc; end
          // the head's own replay, the head, or the entry behind a head that resolves now
          s1_head <= rp_v | ~si | st_done;
          if (rp_v) wt_v[rp_t] <= 1'b0;                  // a replaying waiter leaves the table
@@ -696,7 +716,7 @@ module rv_dcache #(
          // dead: the request in the lookup owns its waiter entry (it left the table to get there,
          // or it is new), and the free MSHR is not live. Only the few bits that make an entry or
          // an MSHR live wait for the decision.
-         if (s1_v & ~sq_bk) begin wt_pa[s1_tag] <= s1_pa;  wt_nc[s1_tag] <= s1_nc; end
+         if (s1_live & ~sq_bk) begin wt_pa[s1_tag] <= s1_pa;  wt_nc[s1_tag] <= s1_nc; end
          if (s1_v & ms_free_v) begin
             ms_pl[ms_free] <= s1_pl;  ms_set[ms_free] <= s1_set;  ms_way[ms_free] <= vic;
             ms_bt[ms_free] <= 2'd0;  ms_bl[ms_free] <= 1'b0;  ms_dty[ms_free] <= k_st | k_z;
@@ -807,6 +827,8 @@ module rv_dcache #(
    //  10 rsv_vic     a victim an MSHR reserves or the store lookup writes, or no unreserved way
    //  11 sq_order    a store sent back to the queue, or the head issued, as the head leaves
    //  12 st_clean    a store taken while a clean is asked for or under way (the clean leaves it out)
+   //  13 fast        M's load presented while not taken, beside another read, on a busy tag, or a
+   //                 cancel with no fast load in the lookup
    wire e_orphan  = cr_f & ~ms_v[cr_m];
    wire e_slot    = cr_valid & ~cr_f & ~((cr_slot == NCS) & nc_v & ~nc_we & nc_sent);
    wire e_wdone   = cw_valid & ~cw_ok & ~fin_nc;
@@ -824,12 +846,14 @@ module rv_dcache #(
    wire e_vic     = m_alloc & (rsv[vic] | ~(|cand) | (fp_wr & sb_set1 & bhitv[vic]));
    wire e_sqord   = (sq_bk & st_done) | (st_go & ~si & st_done) | ((fp_wr | fp_mg) & fin_now);
    wire e_stcl    = wr_take & (inv_req | cl_pend | cl_on | cl_wait);
-   wire [15:0] e_now = {3'd0, e_stcl, e_sqord, e_vic, e_wr2, e_rorace, e_wdead, e_wtbusy, e_btwo, e_two, e_beat, e_wdone, e_slot, e_orphan};
+   wire e_fast    = (f_req & (~f_ok | ~f_hint | rd_req | wt_v[{1'b0, f_tag}] | (s1_v & (s1_tag == {1'b0, f_tag}))))
+                  | (f_cancel & ~(s1_v & s1_f));
+   wire [15:0] e_now = {2'd0, e_fast, e_stcl, e_sqord, e_vic, e_wr2, e_rorace, e_wdead, e_wtbusy, e_btwo, e_two, e_beat, e_wdone, e_slot, e_orphan};
    reg  [15:0] e_q;
    always @(posedge clk) e_q <= reset ? 16'd0 : e_now;
    assign err = e_q;
    always @(posedge clk) if (!reset && (e_now != 0))
-      $fatal(1, "rv_dcache: invariant %b (orphan beat, bad slot, write completion, beat order, two ways, two ways at the store lookup, tag reuse, dead waiter, read-out race, two store writes, reserved victim, store-queue order)", e_now[11:0]);
+      $fatal(1, "rv_dcache: invariant %b (orphan beat, bad slot, write completion, beat order, two ways, two ways at the store lookup, tag reuse, dead waiter, read-out race, two store writes, reserved victim, store-queue order, store under a clean, fast load)", e_now[13:0]);
 
 endmodule
 `default_nettype wire

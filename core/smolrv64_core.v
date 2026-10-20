@@ -107,6 +107,12 @@ module smolrv64_core
     input  wire [LQ_IB-1:0]        dmem_rtag_resp,
     input  wire [63:0]             dmem_rdata_c,
     input  wire                    dmem_rbusy,      // the last read awaits the cache's accept
+    output wire                    dmem_fv,         // M's load, presented to the D$ in M's own cycle
+    output wire [AW-1:0]           dmem_fpa,        // ...its doubleword: the index from M's address, the page from the dTLB
+    output wire [LQ_IB-1:0]        dmem_ftag,       // ...its tag: the load-queue index
+    output wire                    dmem_fhint,      // registered: M holds a plain load (the D$'s priority)
+    output wire                    dmem_fcancel,    // the load presented last cycle is void: an older store blocks it
+    input  wire                    dmem_fok,        // the D$ takes a load presented this cycle (registers only)
     output wire                    dmem_wen,
     output wire                    dmem_wfsm,    // the LSU's state machine writes: the device address is the write's
     output wire [AW-1:0]           dmem_waddr,
@@ -383,7 +389,7 @@ module smolrv64_core
       .walking(), .t_ready(immu_ready), .t_paddr(immu_pa), .t_fault(immu_fault),
       .t_cause(immu_cause), .t_lvl(immu_lvl), .t_uncached(), .t_ok(), .t_fault_raw(),
       .walk_ok(~walk_hold),
-      .s_vaddr(64'd0), .s_access(2'd1), .s_ok(), .s_flt(), .s_cause(), .s_paddr(), .s_nc());   // the second lookup is the dTLB's
+      .s_vaddr(64'd0), .s_access(2'd1), .s_ok(), .s_flt(), .s_cause(), .s_paddr(), .s_nc(), .s_dram());   // the second lookup is the dTLB's
    // a PA the iMMU delivers is below DRAM_TOP (Bare faults one above it), so it is a PC
    assign imem_addr = immu_pa[PCW-1:0];
    always @(posedge clk) if (!reset & immu_ready & ~immu_fault & (immu_pa[55:PCW-1] != 0))
@@ -1631,6 +1637,7 @@ module smolrv64_core
    wire                lsu_sp_busy, lsu_sp_done;   // the LSU's store register: holds a store / the D$ takes it
    wire                sq_ld_block;      // instrumentation: candidate held by an alias
    wire [LQ_N-1:0]     sq_l_older;       // per load, registered: an older store is live
+   wire [LQ_N-1:0]     sq_l_cancel;      // per load, of registers: its start last cycle is void
    wire [LQ_N-1:0]     sq_l_block_live;  // the live alias block, the oracle for the registered copy the queue reads
    wire [SQ_IB:0]      sq_occ;
    wire [LQ_N-1:0]     sq_l_block_unk_q;   // counters: the candidate's block is an UNKNOWN older address
@@ -1766,7 +1773,7 @@ module smolrv64_core
       // a conflict matrix updated wherever an address arrives, and issue reads a flop.
       .l_off(lq_e_off), .l_size(lq_e_size), .l_tag(lq_e_tag), .l_av(lq_e_av),
       .l_wt(lq_e_wt), .l_acc(lq_e_acc), .l_unk_q(sq_l_unk_q), .l_viol(sq_l_viol), .l_res_c(sq_l_res_c), .l_res_a(sq_l_res_a),
-      .l_fill(m_lq_fill), .l_fill_ix(m_lq_idx),
+      .l_fill(m_lq_fill), .l_fill_ix(m_lq_idx), .l_fill_go(m_lq_fill & lsu_xo_early), .l_cancel(sq_l_cancel),
       .l_fill_off(m_addr[11:0]), .l_fill_size(m_mem_size), .l_fill_flt(lsu_xo_flt),
       .l_block(sq_l_block_live), .l_block_q(lq_e_block), .l_older(sq_l_older),
       .ld_tag(lq_q_tag), .ld_older(sq_ld_older),
@@ -1866,7 +1873,7 @@ module smolrv64_core
       .d_rd(gld_rd), .d_rd_v(gld_rdv), .d_sqtag(ld_sqtag), .d_wt(ld_wt),
       .d_pc(gld_pc), .d_seq(gld_seq),
       .d_ready(lq_d_ready), .d_ready2(lq_d_ready2), .d_idx(lq_d_idx),
-      .a_v(m_lq_fill), .a_sent(lsu_xo_early), .a_idx(m_lq_idx),
+      .a_v(m_lq_fill), .a_sent(lsu_xo_early), .a_cancel(sq_l_cancel), .a_idx(m_lq_idx),
       .a_pa(lsu_xo_pa), .a_va(m_addr[38:0]), .a_tv(lsu_xo_tv | lsu_xo_flt), .a_flt(lsu_xo_flt), .a_fc(lsu_xo_fc),
       .a_size(m_mem_size),
       .a_signed(m_mem_signed), .a_fp(m_is_fp), .a_unc(lsu_xo_unc), .a_mem(lsu_xo_mem),
@@ -1887,11 +1894,10 @@ module smolrv64_core
       .kd_v(rob_kd_v), .kh(rob_kh), .kb(rob_kb), .kmask(lq_kmask));
 
    // ------------------------------------------------- COLLAPSING FILL AND ACCESS
-   // The queue costs a load two cycles -- one to register the address, one to select the
-   // candidate and run the alias test against it. The SECOND is what pays for the test, so
-   // a load with no store OLDER than it still live should not pay it: the access issues in
-   // the same M pass that fills the entry. Fill, M's early release and the landing path are
-   // ALL unchanged -- only the start moves.
+   // A translated load's access starts in the M pass that fills its entry, presented to the D$ in
+   // that same cycle (smolrv64_lsu f_go): the arrays read at M's address bits, the dTLB's page
+   // number registered for the compare, the answer two cycles on. Fill, M's early release and the
+   // landing path are ALL unchanged -- only the start moves.
    //
    // That last point is the whole design. An earlier attempt dropped the entry and let M
    // keep the load through its access instead, which also skipped the fill cycle -- and it
@@ -1899,19 +1905,14 @@ module smolrv64_core
    // cycles are not overhead: releasing M lets the following non-memory instructions execute
    // while the data is in flight, and that is worth more than the latency it costs.
    //
-   // TIMING-SAFE BY CONSTRUCTION, which is the only reason this may gate a start at all.
-   // smolrv64_sq's ld_older is v[]/head/ld_tag alone -- no address, nothing off the translate
-   // path -- and lq_b_ok is a 2-bit index compare on flops. Both settle at the top of the
-   // cycle, in parallel with the dTLB lookup they qualify. ld_BLOCK, the address compare, is
-   // what must never come back here, and does not. The ADDRESS still reaches mem_raddr from
-   // t_paddr in this cycle, which is the path ec6ad3e closed at 166 MHz.
-   //
-   // ld_older answers about OUR load only while the queue's query port is asking about it:
-   // q_tag is sqt[acc], so `b_idx == acc` -- inside lq_b_ok -- is what makes the read sound.
-   // ...and since 2026-09-07 the answer M reads is the store queue's REGISTERED per-load
-   // copy at M's own load index (a register), not the live query: see smolrv64_sq l_older. The
-   // live one is the oracle, and the copy may only ever be the more conservative.
-   wire lq_b_early = m_ld_nb & lq_b_ok & ~sq_l_older[m_lq_idx];
+   // OLDER STORES DO NOT GATE THE START; THEY CANCEL IT. The alias test -- M's address against
+   // every store's, the filling load's block bit -- takes the whole cycle (5.62 ns on
+   // 039314ad's routed checkpoint), so it cannot qualify a start in the same cycle. It stays
+   // registered in smolrv64_sq, and the block it writes voids the started access a cycle later
+   // (sq_l_cancel): the D$ drops the lookup, the LSU the tag, smolrv64_lq the entry's `sent`,
+   // and the load forwards or waits as a blocked entry does. What may gate the start settles at
+   // the top of the cycle, beside the dTLB lookup it qualifies: lq_b_ok, a compare on flops.
+   wire lq_b_early = m_ld_nb & lq_b_ok;
    // Checked only while M holds the load: m_lq_idx is a register that keeps the LAST load's
    // index, and a load dispatched into that entry a cycle ago is the queue's candidate
    // (lq_b_ok) before its copy has caught up -- one cycle, and M is not looking.
@@ -1954,17 +1955,13 @@ module smolrv64_core
    always @(posedge clk)
       if (!reset && lq_x_v && ~lq_x_fwd && sq_l_block_live[lq_x_idx])
          $fatal(1, "smolrv64_core: load %0d starts on the registered block copy while the live block holds it", lq_x_idx);
-   // The tag of the access in flight. One at a time today, so a single register; when loads
-   // are pipelined this becomes the D$'s rd_tag and the queue interface does not change.
-   // Two ways an access leaves for memory now, and they name their entry differently: the
-   // candidate path by lq_x_idx, the early path by the index M is holding. They are mutually
-   // exclusive -- an early start needs ~av[acc], a candidate start needs av[acc] -- which
-   // smolrv64_lq asserts rather than assumes.
-   wire lq_b_take = lsu_xo_early;          // the LSU says whether the early start happened
+   // THE SLOW LOAD'S ENTRY: the one access the LSU's state machine runs at a time (a straddle, a
+   // device, an NC load) lands under the index it started with. Only the candidate path starts
+   // one; M's own start is always fast and lands by its tag, beside a slow load in flight, so it
+   // never names this register.
    reg  [LQ_IB-1:0] ld_inflight_idx;
    initial ld_inflight_idx = {LQ_IB{1'b0}};
-   always @(posedge clk) if      (lq_x_take) ld_inflight_idx <= lq_x_idx;
-                         else if (lq_b_take) ld_inflight_idx <= m_lq_idx;
+   always @(posedge clk) if (lq_x_take) ld_inflight_idx <= lq_x_idx;
 
    // NW=4: the store's ROB slot completes when the BUFFER writes it, not when it executes.
    // Routed through the existing completion mechanism (rule C2), which is parameterised on
@@ -2286,6 +2283,7 @@ module smolrv64_core
       .pt_unc(pt_store ? sq_c_unc : lq_x_unc), .pt_done(lsu_pt_done),
       .pt_ack(lsu_pt_ack), .pt_is_store(lsu_pt_is_store), .pt_ld_done(lsu_pt_ld_done), .pt_ld_kill(lsu_pt_ld_kill),
       .pt_tag(lq_x_idx), .req_tag(m_lq_idx), .pt_rtag(lsu_pt_rtag), .pt_fast_done(lsu_pt_fast_done),
+      .f_ok(dmem_fok), .f_v(dmem_fv), .f_pa(lsu_f_pa), .f_cancel(sq_l_cancel),
       .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj), .fw_any(lsu_fw_any), .fw_lt(lsu_fw_lt),
       .req_store(m_is_store & ~m_is_amo), .req_amo(m_is_amo),
       .req_amo_func(m_amo_func), .req_cbo(m_is_cbo), .req_cbo_zero(m_cbo_zero),
@@ -2320,6 +2318,11 @@ module smolrv64_core
    // retirement, so at the fire a committed store may still wait in it; after the redirect it holds
    // only older stores, so the wait ends.
    assign dmem_idle = lsu_idle & (sq_occ == 0);
+   wire [55:0] lsu_f_pa;
+   assign dmem_fpa     = {{(AW-56){1'b0}}, lsu_f_pa};
+   assign dmem_ftag    = m_lq_idx;
+   assign dmem_fhint   = m_valid & m_ld_nb;
+   assign dmem_fcancel = |sq_l_cancel;
 
    // ---- the MD stage: the one divider ----
    // A divide issues in its slot's lane, which reads its operands and hands them here in its

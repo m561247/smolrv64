@@ -148,6 +148,10 @@ module smolrv64_sq
     input  wire [11:0]           l_fill_off,
     input  wire [1:0]            l_fill_size,
     input  wire                  l_fill_flt,  // ...and faults on its address alone (never reaches memory)
+    input  wire                  l_fill_go,   // ...and its access started in the same cycle (smolrv64_lsu f_v)
+    output wire [LQN-1:0]        l_cancel,    // per entry, of registers: the access it started last cycle
+                                              // is void, an older store blocks it (that store's overlap,
+                                              // or its unknown address the wait table respects)
     output wire [LQN-1:0]        l_block_unk_q, // per entry, REGISTERED: blocked by an older store whose ADDRESS IS
                                               // UNKNOWN (the rest of l_block_q is a known overlap). Counters only.
     output wire [LQN-1:0]        l_block,     // per entry: an older store aliases it
@@ -546,7 +550,13 @@ module smolrv64_sq
          // store's address arrived earlier, or the load reached memory after it), and the store
          // address ARRIVING this cycle against a load that already has (the flag is then a flop in
          // the cycle the store's address is visible, before the store can commit and retire)
-         assign l_viol[gl]        = l_av[gl] & l_acc[gl] & ((|ovr) | arr_ov);
+         // THE START THE BLOCK CANCELS. M starts a load's access before the alias test can answer
+         // (its row is this cycle's whole path); the block that row writes says, a cycle later,
+         // whether the access stands. A cancelled load never read memory, so it is no violation.
+         reg go_q;  initial go_q = 1'b0;
+         always @(posedge clk) go_q <= ~reset & l_fill_go & (l_fill_ix == gl[LQIB-1:0]);
+         assign l_cancel[gl]      = go_q & blk_q;
+         assign l_viol[gl]        = l_av[gl] & l_acc[gl] & ~l_cancel[gl] & ((|ovr) | arr_ov);
          // RESOLUTION: the cycle the last older store with an unknown address gets one, the load
          // learns whether it overlaps an older store. A pulse (registered), one of two: it did not
          // (l_res_c) or it did (l_res_a) -- the training signal of the wait table, whether the load
@@ -807,6 +817,8 @@ module smolrv64_sq
          $fatal(1, "smolrv64_sq: store entry %0d at va %h crosses a page", a_idx, a_va);
       if (l_fill & ~l_fill_flt & (({1'b0, l_fill_off} + (13'd1 << l_fill_size)) > 13'h1000))
          $fatal(1, "smolrv64_sq: load entry %0d at offset %h crosses a page", l_fill_ix, l_fill_off);
+      if (l_fill_go & (~l_fill | l_fill_flt))
+         $fatal(1, "smolrv64_sq: load entry %0d started with no fill, or with its address fault", l_fill_ix);
       if (c_take & ~tv[ho])
          $fatal(1, "smolrv64_sq: a store drained without a translation");
    end

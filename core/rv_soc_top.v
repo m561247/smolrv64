@@ -148,6 +148,9 @@ module rv_soc_top #(
    wire                dmem_rfast, dmem_rvalid_c, dmem_rbusy;      // the tagged fast load path (C4a)
    wire [LQ_IB-1:0]    dmem_rtag, dmem_rtag_resp;
    wire [63:0]         dmem_rdata_c;
+   wire                dmem_fv, dmem_fhint, dmem_fcancel, dmem_fok;   // M's load in M's cycle, straight to the D$
+   wire [63:0]         dmem_fpa;
+   wire [LQ_IB-1:0]    dmem_ftag;
    wire [55:0]         ptw_addr, dptw_addr;
    wire                ptw_read, dptw_read;
    wire [63:0]         ptw_rdata, dptw_rdata;
@@ -167,6 +170,8 @@ module rv_soc_top #(
       .dmem_rdata(dmem_rdata), .dmem_rvalid(dmem_rvalid),
       .dmem_rfast(dmem_rfast), .dmem_rtag(dmem_rtag), .dmem_rvalid_c(dmem_rvalid_c),
       .dmem_rtag_resp(dmem_rtag_resp), .dmem_rdata_c(dmem_rdata_c), .dmem_rbusy(dmem_rbusy),
+      .dmem_fv(dmem_fv), .dmem_fpa(dmem_fpa), .dmem_ftag(dmem_ftag), .dmem_fhint(dmem_fhint),
+      .dmem_fcancel(dmem_fcancel), .dmem_fok(dmem_fok),
       .dmem_wen(dmem_wen), .dmem_wfsm(dmem_wfsm), .dmem_waddr(dmem_waddr), .dmem_wabase(dmem_wabase),
       .dmem_wdata(dmem_wdata), .dmem_wmask(dmem_wmask),
       .dmem_wuncached(dmem_wuncached),
@@ -697,9 +702,16 @@ module rv_soc_top #(
    wire [MC*512-1:0]   mc_q_wdata;
    wire [MSW-1:0]      mc_r_slot, mc_w_slot;
    wire [1:0]          mc_r_beat;  wire mc_r_last;  wire [127:0] mc_r_data;
+   // M'S LOAD GOES STRAIGHT TO THE D$, never through the door: it is presented only when the D$
+   // takes it (dmem_fok), which needs every other read source quiet -- no read waiting at the door,
+   // none presented by the LSU's port register, no walker asking (registers, all three). It is DRAM
+   // by its dTLB entry, so it never meets the device decode; it carries a load-queue tag.
+   wire                dc_rd_quiet;
    rv_dcache #(.SIZE_KB(DC_KB), .RTW(DRTW), .PABITS(PABITS), .SW(MSW)) u_dcache
      (.clk(clk), .reset(reset),
       .rd_req(dcr_req), .rd_pa(dcr_addr), .rd_tag(dcr_tag), .rd_ack(dc_rd_ack),
+      .rd_quiet(dc_rd_quiet), .f_hint(dmem_fhint), .f_req(dmem_fv), .f_pa(dmem_fpa),
+      .f_tag({2'b00, dmem_ftag}), .f_ok(dmem_fok), .f_cancel(dmem_fcancel),
       // Svpbmt: only a LSU load read can be NC (PTW reads share dcr but are always cacheable -> 0
       // when c_rd_req is low). The store's NC bit qualifies the write port.
       .rd_nc(c_rd_req & c_rd_unc),
@@ -873,6 +885,9 @@ module rv_soc_top #(
          end
    end endgenerate
    assign ptw_rdata=pw_rdata[0];   assign ptw_rvalid=pw_rvalid[0];
+   assign dc_rd_quiet = ~rq_hv & ~dmem_ren & ~(|pw_rq);
+   always @(posedge clk) if (!reset && dmem_fv && (dmem_fpa < BASE))
+      $fatal(1, "rv_soc_top: M's load presented to the D$ at pa=%h, below DRAM", dmem_fpa);
    assign dptw_rdata=pw_rdata[1];  assign dptw_rvalid=pw_rvalid[1];
 
    // D$ read-port arbiter: the LSU (c_rd_req/dmem_raddr) and the 3 PTW walks share the single D$

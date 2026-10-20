@@ -1088,7 +1088,7 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   arrived-and-unfilled entry in program order, read from the tail or head), so a load whose address
   is ready is not held up by an older op whose address is not. An address in a lane's adder goes
   straight into M when none is waiting. M takes a load or store every cycle. Everything M did for a load or store it still does: the dTLB lookup, the
-  LQ/SQ fill, a load's early start.
+  LQ/SQ fill, and a load's start in that same cycle (below).
 - **A store's data comes from the store queue (5.2d-b step 2).** A value already in a register
   file at allocation (`d_rdy`) is fetched by the SQ's data read: it registers its oldest entry
   with an address still waiting for one, and reads that preg on M's port `ra2` (which reads the
@@ -1158,7 +1158,11 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   cycle. The main lookup -- a released waiter, else a load, else a store-port op the store lookup
   does not take, that op first when it is urgent (its queue full, a CBO, an NC store or the I$'s
   clean at its head, or the head waiting `ST_WAIT` = 3 cycles) -- reads the arrays at T and
-  resolves at T+1; a load's answer is `rd_valid` at T+2, by its tag, and a hit behind a miss
+  resolves at T+1. A load comes through the read door or straight from M (the fast source,
+  `f_*`): M's load is presented only in a cycle `f_ok` says it is taken, the store lookup's turn
+  reads a registered hint (`f_hint`, M holds a load) rather than the late request, so the arrays'
+  address is a function of registers and M's address bits (rule I6), and `f_cancel` voids the
+  lookup at T+1; a load's answer is `rd_valid` at T+2, by its tag, and a hit behind a miss
   answers first. The store lookup takes the queue's plain stores beside it (below, §9.1). A miss never holds the lookup: it parks in the **waiter table**
   (one entry per requester tag, one for the store) on the MSHR filling its line, or on the next
   MSHR, write-back entry, NC slot or store to free. 8 MSHRs, each with a 64-byte **merge
@@ -1220,16 +1224,13 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   (SQLite) to 52% (PDF) of the cycles. Two consequences, both asserted: a redirect flushes only the UNCOMMITTED
   tail of the queue (`tailc <= kcc`; a committed store is architecturally done and survives),
   and "every older store is visible" is no longer implied by the ROB head or by `rob_empty`
-  -- the serialization drain (`drained`), the CBO start in M (`m_cbo_wait`) and a load's
-  early start (`ld_older`) each name the queue (rule C5). Since 2026-09-07 (plan item T1 (L)) the
-  early start reads the store queue's REGISTERED per-load copy of that answer (`l_older`,
-  the OR of the distance vector `l_block` already computes, one cycle old) at M's own load
-  index; for one load the set of older live stores only shrinks (its tag is fixed at
-  dispatch, later stores are younger, head only advances), so the copy can only be the more
-  conservative, and a load reaches M no sooner than two cycles after the dispatch that
-  wrote its tag. The live query port stays as the oracle the core asserts against. Why:
-  `u_lq/sqt -> ld_older -> lq_b_early -> m_done -> iss_ready -> pl_q` was gate W5fix's
-  largest family (362 endpoints, 21 levels). The alias block is a register per load the same way
+  -- the serialization drain (`drained`) and the CBO start in M (`m_cbo_wait`) each name the
+  queue (rule C5). The store queue keeps a REGISTERED per-load copy of "an older store is live"
+  (`l_older`, the OR of the distance vector `l_block` already computes, one cycle old), which
+  the reordering counter (`mem_reord`) reads at the candidate's index; for one load the set of
+  older live stores only shrinks (its tag is fixed at dispatch, later stores are younger, head
+  only advances), so the copy can only be the more conservative. The live query port stays as
+  the oracle the core asserts against. The alias block is a register per load the same way
   (`l_block_q`, T1 (L) step 2): once a load's address is in, its block only clears (oldm
   shrinks; a store's address arriving turns "unknown, blocks" into the overlap), and the
   fill cycle -- the one moment the copy would lag the wrong way -- computes it from the row
@@ -1332,18 +1333,35 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   allocation against the ring: those slices -0.62% of their cycles (Navigation -0.96%, HTML5
   -0.98%, SQLite -0.38%, PDF Rendering -0.19%, Camera -0.59%), pi -1.24%, the 60 M Linux lockstep
   +0.34% retires.
-- **A queued load's access is one cycle after its fill, unless nothing is ordering it.**
-  `smolrv64_lq` registers the address, then selects the oldest entry no older store can alias,
-  then accesses -- the oldest *ready* entry, in any order the loads become ready: filled and
-  translated, not faulting, no older store aliasing it (an older store with no address counts),
-  and, for a device load, its op at the ROB head. The SELECT cycle is what pays for the alias
-  test. Loads reach memory out of program order: a single hart cannot tell, a store never commits
-  ahead of an older load that has not landed (the irrevocable pointer), and a device load waits
-  for the head, which orders it against everything older. When no store older than
-  the load is live -- `smolrv64_sq`'s `ld_older`, which reads `v[]`/`head`/`ld_tag` and never an
-  address -- `req_early` collapses fill and access into that one pass, with `mem_raddr` taken
-  straight off `t_paddr`. Fill, M's early release and the landing path are all unchanged;
-  only the start moves. Worth **1 cycle per such load** (see the ldbench and Camera tables).
+- **A load's access starts in the cycle M fills it; an older store that blocks it cancels it a
+  cycle later (D$ plan step 2, 2026-10-19).** M presents a translated load straight to the D$ in
+  its own cycle (`smolrv64_lsu` `f_go`, the SoC's fast source): the arrays read at M's address bits
+  [11:3] -- the index is inside the page offset -- and the dTLB's page number, read in that cycle
+  by the lookup M already makes, is registered for the compare at T+1. The answer is at E+3 and
+  the dependent's address at E+4. The start is gated by the dTLB alone (a hit whose permissions
+  pass, the page in DRAM by a bit of the entry `mmu` sets at the fill, cached, inside one
+  doubleword), its tag free, and the D$'s word that it takes a load this cycle (`f_ok`, of
+  registers: no waiter replaying, no urgent store, the read door, the LSU's port register and
+  the walkers quiet), so a started load never waits at the door. Never by the store queue: the
+  alias test -- M's address against every store's, the filling load's block bit -- takes the
+  whole cycle (5.62 ns from `m_addr` on 039314ad's routed checkpoint, 0.117 ns of slack), so it
+  stays registered and its block CANCELS the start a cycle later (`smolrv64_sq` `l_cancel`: the
+  started-last-cycle bit AND the block): the D$ voids the lookup at T+1 (no answer, no fill, no
+  wait), the LSU drops the tag, `smolrv64_lq` unsends the entry, and the load forwards or waits as
+  any blocked entry does; the ordering check does not count it as having read memory. Any other
+  load goes the queue's way: `smolrv64_lq` registers the address, then selects the oldest *ready*
+  entry, in any order the loads become ready: filled and translated, not faulting, no older store
+  aliasing it (an older store with no address counts, unless its wait bit lets it go), and, for a
+  device load, its op at the ROB head; the port register presents it a cycle later. Loads reach
+  memory out of program order: a single hart cannot tell, a store never commits ahead of an older
+  load that has not landed (the irrevocable pointer), and a device load waits for the head, which
+  orders it against everything older. Fill, M's early release and the landing path are all
+  unchanged; only the start moves. Measured against 039314ad: GB5's 77 SimPoints -1.70% of the
+  single-core cycles, every subtest (SQLite -3.13%, Text Rendering -3.05%, Image Compression
+  -2.84%, HTML5 -2.82%, Navigation -2.28%, AES-XTS -0.14%); the 60 M Linux lockstep +1.66%
+  retires, Dhrystone -0.86% cycles, CoreMark -8.37%. On the SimPoints 59% (N-Body) to 96%
+  (Horizon Detection) of the loads start in M's cycle and stand, 0.6% to 19% are cancelled, 2% to
+  12% find the D$ taking no load, and 0.4% to 12% are not in the dTLB (`LDPATH-SIM`).
   **Do not extend it by also skipping the fill.** A version that dropped the queue entry and
   let M hold the load through its access was a REGRESSION -- ldbench 6.00 -> 7.00 cyc/load,
   Camera unmoved -- because releasing M lets the following non-memory instructions execute
@@ -1926,7 +1944,7 @@ has every event's exact description; this is the map by family:
 | redirects | r0005 / r0006 / r0007 / r0008 | restarts (a squash at the head, a mispredict's release) / conditional branches / jalr / exceptions, interrupts, faults and memory-ordering replays (xRET, sfence.vma, CSR-write redirects and fence.i are restarts of neither kind) |
 | `LOAD` / `STORE` | r0003 / r0004 | load landings (fast, slow or forwarded; wrong-path and replayed landings included; AMO and LR not) / stores the store queue hands the LSU after commit |
 | `MEM_HITSER` | r0319 | the LQ has a ready candidate the LSU port does not take |
-| `MEM_LDINFL` / `MEM_LDSENT` | r031a / r0323 | fast-path loads in flight (tags whose D$ response or store-queue forward is due), summed per cycle / fast-path load starts: their ratio is the mean fast-load latency in cycles, a hit's and a miss's together |
+| `MEM_LDINFL` / `MEM_LDSENT` | r031a / r0323 | fast-path loads in flight (tags whose D$ response or store-queue forward is due), summed per cycle / cycles with a fast-path load start (the port's or M's; two in one cycle count once, and a cancelled start counts): their ratio is the mean fast-load latency in cycles, a hit's and a miss's together |
 | `MEM_STDOOR` | r031b | a write at the D$ door that has no room and no device acknowledge |
 | `MEM_ALIAS_UNK` / `MEM_ALIAS_OVL` | r031c / r031d | an LQ candidate is alias-blocked, while a blocked load with its wait bit set waits on an older store's unknown address / and none does |
 | `MEM_REORD` | r031e | loads the port takes with an older store, committed or not, live in the store queue (count) |

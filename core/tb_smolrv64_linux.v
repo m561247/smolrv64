@@ -924,43 +924,57 @@ module tb;
       if (n >= 2) mf_c2 <= mf_c2 + 1;
       if (dut.core.m_lq_fill || dut.core.m_sq_fill) mf_fill <= mf_fill + 1;
    end
-   // ---- LDPATH-SIM: the path each plain load takes from M. An early start (the access starts in
-   // M's own pass) is what an access in M's cycle shortens by one; any other load goes the queue's
-   // way, counted by the first condition that kept it there. A load kept by an older live store is
-   // classed two cycles later, when its entry's registered state has caught up with the fill (the
-   // store queue's unknown-address bit lags a cycle): an older store overlaps it, an older address
-   // is unknown and the wait table holds it, one is unknown and it goes ahead, or every older
-   // address is known and clear -- a store-queue search at the access would have let it start.
-   // Each class is split by whether M took the load straight from its lane or from the arrival RAM.
-   reg [63:0] lp_n [0:15];             // [{class, from its lane}]
-   reg        lp_byp;
-   reg [1:0]  lp_st, lp_b;
-   reg [7:0]  lp_ix [0:1];
+   // ---- LDPATH-SIM: the path each plain load takes from M. It starts in M's own cycle (the D$
+   // takes it there), and then stands or is cancelled a cycle later by an older store that blocks
+   // it; or it goes the queue's way, counted by the first condition that kept it from starting:
+   // the dTLB does not hold it (or its perms, a page crossing), the D$ takes no load this cycle,
+   // or anything else (a page not in DRAM, NC, a doubleword straddle, its tag still busy). Each
+   // class is split by whether M took the load straight from its lane or from the arrival RAM.
+   reg [63:0] lp_n [0:11];             // [{class, from its lane}]
+   reg        lp_byp, lp_st, lp_b;
+   reg [7:0]  lp_ix;
    integer    lpi;
-   initial begin for (lpi = 0; lpi < 16; lpi = lpi + 1) lp_n[lpi] = 0;  lp_byp = 0;  lp_st = 0; end
+   initial begin for (lpi = 0; lpi < 12; lpi = lpi + 1) lp_n[lpi] = 0;  lp_byp = 0;  lp_st = 0; end
    always @(posedge clk) if (!reset) begin : ldpath
-      reg [2:0] c, s;
-      reg [7:0] x;
-      x = lp_ix[1];
-      lp_byp   <= dut.core.s_go & dut.core.s_byp & ~dut.core.s_st;   // M's next load came from its lane
-      lp_st    <= {lp_st[0], 1'b0};
-      lp_b[1]  <= lp_b[0];
-      lp_ix[1] <= lp_ix[0];
-      if (meas && lp_st[1]) begin
-         if (dut.core.lq_e_block[x] & dut.core.sq_l_unk_q[x] & dut.core.u_lq.wt[x]) s = 3'd6;   // unknown, waits
-         else if (dut.core.lq_e_block[x])                                         s = 3'd5;   // overlaps
-         else if (dut.core.sq_l_unk_q[x])                                         s = 3'd7;   // unknown, goes
-         else                                                                     s = 3'd4;   // all clear
-         lp_n[{s, lp_b[1]}] <= lp_n[{s, lp_b[1]}] + 1;
+      reg [2:0] c;
+      lp_byp <= dut.core.s_go & dut.core.s_byp & ~dut.core.s_st;   // M's next load came from its lane
+      lp_st  <= 1'b0;
+      if (meas && lp_st) begin
+         c = dut.core.sq_l_cancel[lp_ix] ? 3'd1 : 3'd0;              // cancelled / stands
+         lp_n[{c, lp_b}] <= lp_n[{c, lp_b}] + 1;
       end
       if (meas && dut.core.m_lq_fill) begin
-         if (dut.core.lsu_xo_early)                                       c = 3'd0;
-         else if (dut.core.sq_l_older[dut.core.m_lq_idx])                 c = 3'd1;
-         else if (~dut.core.u_lsu.xo_ok)                                  c = 3'd2;   // TLB miss, perms, page cross
-         else                                                             c = 3'd3;   // device, LSU or door busy
-         lp_n[{c, lp_byp}] <= lp_n[{c, lp_byp}] + 1;
-         if (c == 3'd1) begin lp_st[0] <= 1'b1;  lp_b[0] <= lp_byp;  lp_ix[0] <= 8'(dut.core.m_lq_idx); end
+         if (dut.core.lsu_xo_early) begin lp_st <= 1'b1;  lp_b <= lp_byp;  lp_ix <= 8'(dut.core.m_lq_idx); end
+         else begin
+            if (~dut.core.u_lsu.xo_ok)       c = 3'd2;   // the dTLB does not hold it, perms, page cross
+            else if (~dut.core.dmem_fok)     c = 3'd3;   // the D$ takes no load this cycle
+            else                             c = 3'd4;   // not DRAM, NC, a straddle, its tag busy
+            lp_n[{c, lp_byp}] <= lp_n[{c, lp_byp}] + 1;
+         end
       end
+   end
+   // ---- +ldtrace=<entry> [+ldtrace_from=<cycle>]: every event of one load-queue entry (rule G6) ---
+   integer    lt_ix;  reg [63:0] lt_from;  reg lt_on;
+   initial begin
+      lt_on = $value$plusargs("ldtrace=%d", lt_ix);
+      if (!$value$plusargs("ldtrace_from=%d", lt_from)) lt_from = 64'd0;
+   end
+   always @(posedge clk) if (!reset && lt_on && c >= lt_from) begin : ldtr
+      reg al, fl, go, cn, ps, pf, ld, rs, kl;
+      al = dut.core.d_ld_alloc && dut.core.lq_d_ready && (dut.core.lq_d_idx == lt_ix);
+      fl = dut.core.m_lq_fill && (dut.core.m_lq_idx == lt_ix);
+      go = dut.core.lsu_xo_early && (dut.core.m_lq_idx == lt_ix);
+      cn = dut.core.sq_l_cancel[lt_ix];
+      ps = dut.core.u_lsu.pt_start && !dut.core.u_lsu.pt_store && (dut.core.lq_x_idx == lt_ix);
+      pf = dut.core.u_lsu.ld_fast_ok && (dut.core.lq_x_idx == lt_ix);
+      ld = dut.core.ld_land && (dut.core.ld_land_idx == lt_ix);
+      rs = dut.core.dmem_rvalid_c && (dut.core.dmem_rtag_resp == lt_ix);
+      kl = dut.core.lq_kmask[lt_ix];
+      if (al | fl | go | cn | ps | pf | ld | rs | kl | dut.core.redirect)
+         $display("[c=%0d] LDTR e%0d: alloc=%b fill=%b go=%b(mv=%b dead=%b) cancel=%b pstart=%b pfast=%b land=%b(f%b s%b) resp=%b kill=%b flush=%b | v=%b av=%b sent=%b lnd=%b blk=%b o_v=%b o_kill=%b",
+                  c, lt_ix, al, fl, go, dut.core.m_valid, dut.core.m_dead, cn, ps, pf, ld, dut.core.ld_land_fast, dut.core.ld_land_slow,
+                  rs, kl, dut.core.redirect, dut.core.u_lq.v[lt_ix], dut.core.u_lq.av[lt_ix], dut.core.u_lq.sent[lt_ix],
+                  dut.core.u_lq.lnd[lt_ix], dut.core.lq_e_block[lt_ix], dut.core.u_lsu.o_v[lt_ix], dut.core.u_lsu.o_kill[lt_ix]);
    end
    // ---- RECOV-SIM: each restart's recovery against a forward rebuild ---------------------------
    // A restart (the ROB's k_v) walks the map back from the tail row to the branch's, a row a cycle,
@@ -1573,10 +1587,8 @@ module tb;
                rv_cke[0], rv_cke[1], rv_cke[2], rv_cwe, rv_nwk);
       $display("RECOV-SIM exposed with a compressed walk=%0d (distinct registers restored by released walks=%0d)", rv_cwk, rv_dist);
       $display("MFUN-SIM plain loads and stores M filled=%0d | waiting in the arrival RAMs: entry-cycles=%0d, cycles one or more=%0d, two or more=%0d", mf_fill, mf_wait, mf_c1, mf_c2);
-      $display("LDPATH-SIM loads M filled, from the lane/from the arrival RAM: early start=%0d/%0d | to the queue: older store live=%0d/%0d, not translated=%0d/%0d, other=%0d/%0d",
-               lp_n[1], lp_n[0], lp_n[3], lp_n[2], lp_n[5], lp_n[4], lp_n[7], lp_n[6]);
-      $display("LDPATH-SIM the older-store loads, from the lane/from the arrival RAM: all older addresses clear=%0d/%0d, an older store overlaps=%0d/%0d, unknown and waits=%0d/%0d, unknown and goes=%0d/%0d",
-               lp_n[9], lp_n[8], lp_n[11], lp_n[10], lp_n[13], lp_n[12], lp_n[15], lp_n[14]);
+      $display("LDPATH-SIM loads M filled, from the lane/from the arrival RAM: started in M's cycle and stood=%0d/%0d, cancelled=%0d/%0d | to the queue: not translated=%0d/%0d, the D$ took no load=%0d/%0d, other=%0d/%0d",
+               lp_n[1], lp_n[0], lp_n[3], lp_n[2], lp_n[5], lp_n[4], lp_n[7], lp_n[6], lp_n[9], lp_n[8]);
       $display("perf-stat-sim: begin");
       $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run
       $display("%0d instructions", mr);
