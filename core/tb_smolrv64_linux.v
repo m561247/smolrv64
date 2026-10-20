@@ -924,6 +924,44 @@ module tb;
       if (n >= 2) mf_c2 <= mf_c2 + 1;
       if (dut.core.m_lq_fill || dut.core.m_sq_fill) mf_fill <= mf_fill + 1;
    end
+   // ---- LDPATH-SIM: the path each plain load takes from M. An early start (the access starts in
+   // M's own pass) is what an access in M's cycle shortens by one; any other load goes the queue's
+   // way, counted by the first condition that kept it there. A load kept by an older live store is
+   // classed two cycles later, when its entry's registered state has caught up with the fill (the
+   // store queue's unknown-address bit lags a cycle): an older store overlaps it, an older address
+   // is unknown and the wait table holds it, one is unknown and it goes ahead, or every older
+   // address is known and clear -- a store-queue search at the access would have let it start.
+   // Each class is split by whether M took the load straight from its lane or from the arrival RAM.
+   reg [63:0] lp_n [0:15];             // [{class, from its lane}]
+   reg        lp_byp;
+   reg [1:0]  lp_st, lp_b;
+   reg [7:0]  lp_ix [0:1];
+   integer    lpi;
+   initial begin for (lpi = 0; lpi < 16; lpi = lpi + 1) lp_n[lpi] = 0;  lp_byp = 0;  lp_st = 0; end
+   always @(posedge clk) if (!reset) begin : ldpath
+      reg [2:0] c, s;
+      reg [7:0] x;
+      x = lp_ix[1];
+      lp_byp   <= dut.core.s_go & dut.core.s_byp & ~dut.core.s_st;   // M's next load came from its lane
+      lp_st    <= {lp_st[0], 1'b0};
+      lp_b[1]  <= lp_b[0];
+      lp_ix[1] <= lp_ix[0];
+      if (meas && lp_st[1]) begin
+         if (dut.core.lq_e_block[x] & dut.core.sq_l_unk_q[x] & dut.core.u_lq.wt[x]) s = 3'd6;   // unknown, waits
+         else if (dut.core.lq_e_block[x])                                         s = 3'd5;   // overlaps
+         else if (dut.core.sq_l_unk_q[x])                                         s = 3'd7;   // unknown, goes
+         else                                                                     s = 3'd4;   // all clear
+         lp_n[{s, lp_b[1]}] <= lp_n[{s, lp_b[1]}] + 1;
+      end
+      if (meas && dut.core.m_lq_fill) begin
+         if (dut.core.lsu_xo_early)                                       c = 3'd0;
+         else if (dut.core.sq_l_older[dut.core.m_lq_idx])                 c = 3'd1;
+         else if (~dut.core.u_lsu.xo_ok)                                  c = 3'd2;   // TLB miss, perms, page cross
+         else                                                             c = 3'd3;   // device, LSU or door busy
+         lp_n[{c, lp_byp}] <= lp_n[{c, lp_byp}] + 1;
+         if (c == 3'd1) begin lp_st[0] <= 1'b1;  lp_b[0] <= lp_byp;  lp_ix[0] <= 8'(dut.core.m_lq_idx); end
+      end
+   end
    // ---- RECOV-SIM: each restart's recovery against a forward rebuild ---------------------------
    // A restart (the ROB's k_v) walks the map back from the tail row to the branch's, a row a cycle,
    // racing the branch to the ROB head, where a squash and the sweep (dirty registers, IW a cycle)
@@ -1535,6 +1573,10 @@ module tb;
                rv_cke[0], rv_cke[1], rv_cke[2], rv_cwe, rv_nwk);
       $display("RECOV-SIM exposed with a compressed walk=%0d (distinct registers restored by released walks=%0d)", rv_cwk, rv_dist);
       $display("MFUN-SIM plain loads and stores M filled=%0d | waiting in the arrival RAMs: entry-cycles=%0d, cycles one or more=%0d, two or more=%0d", mf_fill, mf_wait, mf_c1, mf_c2);
+      $display("LDPATH-SIM loads M filled, from the lane/from the arrival RAM: early start=%0d/%0d | to the queue: older store live=%0d/%0d, not translated=%0d/%0d, other=%0d/%0d",
+               lp_n[1], lp_n[0], lp_n[3], lp_n[2], lp_n[5], lp_n[4], lp_n[7], lp_n[6]);
+      $display("LDPATH-SIM the older-store loads, from the lane/from the arrival RAM: all older addresses clear=%0d/%0d, an older store overlaps=%0d/%0d, unknown and waits=%0d/%0d, unknown and goes=%0d/%0d",
+               lp_n[9], lp_n[8], lp_n[11], lp_n[10], lp_n[13], lp_n[12], lp_n[15], lp_n[14]);
       $display("perf-stat-sim: begin");
       $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run
       $display("%0d instructions", mr);

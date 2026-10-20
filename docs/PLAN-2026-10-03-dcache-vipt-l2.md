@@ -246,6 +246,97 @@ largest memory stall:
 3. **The L2** (step 1 above), below both caches.
 4. **The second load port**, measured on the SimPoints against the end state, not today's.
 
+## Step 2: the access in M's cycle (design, 2026-10-19)
+
+Tommy, 2026-10-19: load-use 4 first, then load-hit speculation for 3.
+
+**Where the cycles are.** A lane generates a load's address at E. M takes it at E+1 (from the
+lane, or from the arrival RAM if it waited), reads the dTLB's second lookup, fills the load-queue
+entry and computes the store queue's alias row. A load with no older store live starts early: the
+LSU's port register takes it, the D$ takes it at E+2 (T), compares at E+3 and answers at E+4, and
+the dependent's address is E+5. Any other load goes the queue's way: its registered block is read
+at E+2, the port register at E+3 is the D$'s T, and the dependent's address is E+6. The index is in
+the page offset, so the arrays never needed the translation; only the tag compare at T+1 does,
+and it reads a registered PA.
+
+**Which loads take which path** (`LDPATH-SIM`, 94070582; GB5's 77 SimPoints weighted per subtest,
+the 60 M boot and Dhrystone; "start in M's cycle" is the first three columns, the loads the design
+below starts):
+
+| loads, % | start early today | older store live: all clear | ...one unknown, goes ahead | ...one overlaps | ...one unknown, waits | untranslated, device, busy | start in M's cycle | waited for M |
+|---|---|---|---|---|---|---|---|---|
+| AES-XTS | 68.7 | 24.4 | 3.6 | 2.7 | 0.3 | 0.4 | 96.7 | 44 |
+| Text Compression | 43.7 | 38.7 | 8.4 | 2.0 | 0.2 | 7.0 | 90.8 | 38 |
+| Image Compression | 15.0 | 66.5 | 9.8 | 1.8 | 0.5 | 6.5 | 91.3 | 36 |
+| Navigation | 12.0 | 44.5 | 22.9 | 13.0 | 3.2 | 4.4 | 79.4 | 50 |
+| HTML5 | 12.3 | 49.6 | 19.5 | 12.5 | 2.2 | 3.9 | 81.4 | 55 |
+| SQLite | 16.3 | 52.8 | 14.9 | 8.3 | 1.1 | 6.6 | 84.0 | 52 |
+| PDF Rendering | 12.7 | 64.6 | 12.5 | 4.1 | 0.6 | 5.5 | 89.8 | 54 |
+| Text Rendering | 18.3 | 56.5 | 13.6 | 6.3 | 0.6 | 4.7 | 88.4 | 53 |
+| Clang | 32.8 | 39.7 | 7.0 | 9.0 | 1.0 | 10.6 | 79.5 | 50 |
+| Camera | 6.0 | 83.2 | 6.4 | 2.7 | 0.3 | 1.4 | 95.6 | 27 |
+| N-Body Physics | 5.8 | 72.6 | 0.5 | 17.7 | 1.5 | 1.8 | 78.9 | 34 |
+| Rigid Body Physics | 25.4 | 54.6 | 7.7 | 5.6 | 0.5 | 6.1 | 87.7 | 46 |
+| Gaussian Blur | 0.7 | 97.0 | 1.3 | 0.6 | 0.3 | 0.1 | 99.0 | 6 |
+| Face Detection | 82.9 | 6.6 | 1.1 | 2.0 | 0.2 | 7.3 | 90.6 | 40 |
+| Horizon Detection | 15.1 | 79.5 | 1.2 | 0.7 | 0.1 | 3.6 | 95.8 | 17 |
+| Image Inpainting | 67.8 | 18.3 | 4.4 | 1.6 | 0.7 | 7.1 | 90.5 | 14 |
+| HDR | 26.8 | 53.2 | 16.1 | 1.2 | 0.2 | 2.5 | 96.1 | 38 |
+| Ray Tracing | 33.3 | 54.1 | 2.1 | 4.8 | 0.1 | 5.7 | 89.5 | 31 |
+| Structure from Motion | 9.5 | 84.8 | 3.5 | 1.7 | 0.1 | 0.4 | 97.8 | 26 |
+| Speech Recognition | 59.4 | 19.9 | 7.8 | 2.0 | 0.3 | 10.6 | 87.1 | 22 |
+| Machine Learning | 82.7 | 13.3 | 0.5 | 0.7 | 0.0 | 2.7 | 96.5 | 4 |
+| Linux boot, 60 M cycles | 22.7 | 47.4 | 10.5 | 8.4 | 4.3 | 6.6 | 80.6 | 51 |
+| Dhrystone | 22.0 | 38.1 | 18.1 | 13.3 | 1.9 | 6.5 | 78.2 | 52 |
+
+**The design: every translated DRAM load starts in M's cycle, and the alias test cancels it.**
+- **The start.** M presents the load to the D$ directly: the arrays read at M's address bits
+  [11:3] (T = E+1), and the page number from the dTLB lookup M already makes is registered into
+  the lookup's PA for the compare at T+1. The answer is at E+3 and the dependent's address at E+4.
+  The start is gated by the dTLB alone (a hit, its permissions, the page in DRAM, no page
+  crossing) and by the D$'s registered word that it takes a load this cycle; never by the store
+  queue. A load not started goes the queue's way as today (the walker fills its entry, the queue
+  sends its PA).
+- **The cancel.** The alias test stays where it is and registered: M's address reaches the
+  filling load's block bit in 5.62 ns, 0.117 ns of slack on 039314ad's routed checkpoint, so it
+  cannot gate a start in the same cycle (`smolrv64_core.v` says as much at `lq_b_early`). Its
+  register, one bit for the load M started, voids the lookup at T+1: no answer, no fill, no
+  wait. The entry's `sent` and the LSU's outstanding bit for its tag are cleared in that cycle,
+  and the load goes the queue's way blocked, to forward or wait, as today. Until the cancel
+  has passed, the store queue's ordering check must not count the started load as having read
+  memory, or a store arriving at E+2 replays a load that never did. A cancelled start costs the
+  lookup its cycle (the overlapping loads: 0.6-17.7%, N-Body the most), and the load must reach
+  the queue's forward or wait no later than it does today.
+- **One lookup, two users.** M's fill and the D$'s take read the same dTLB output in the same
+  cycle, so they agree by construction; there is no refusal protocol.
+- **Never queued at the door.** The fast load is presented only when the D$ takes it in that
+  cycle (no read waits at the door, no replay, no urgent store, the port register not
+  presenting: registered), so the cancel only ever finds it in the lookup. A store lookup yields
+  to a registered hint (M holds a load), so the arrays' read address is M's address bits through
+  registered selects; the late valid drives the lookup's valid, the per-tag outstanding bit and
+  the entry's `sent` alone.
+- **The DRAM test moves into the dTLB entry**: a bit computed at the fill (the whole page lies in
+  DRAM), so the start's late term is the dTLB's hit and permission check, as the early start's
+  is today.
+- **Timing (039314ad's routed checkpoint).** Today M's address reaches the port register's enable
+  through the dTLB read (113 LUTRAM loads on its address) and the tag compare in 4.85 ns, 0.875 ns
+  of slack; that decision now drives a few flops at the D$ instead of 64 enables. The port
+  register's own path into the arrays (the device decode, the take, the address: 0.234 ns, the
+  D$'s worst) is not on the new source.
+- **What it gives.** A started load's dependent issues at E+4: one cycle sooner for the loads
+  that start early today, two for those behind a live older store that neither overlaps them
+  nor holds them (78-99% of the loads start in M's cycle; the integer subtests' 12-18% early
+  starts today become 79-90%). The one-cycle price, measured by answering every load a cycle
+  late: GB5 SimPoints +1.44% cycles, the 60 M boot -1.49% retires.
+
+**Then: loads leave M's funnel.** A load stage beside M with its own pick (the oldest waiting load,
+else a lane's), its own dTLB read port (a LUTRAM copy, written by the same fills), the queue fill
+and the alias row; M keeps stores, AMOs, LR/SC and CBOs. 36-55% of the integer subtests' loads
+wait in the arrival RAM for M today (the last column), 0.5 to 1.9 cycles a memory op
+(`MFUN-SIM`). The store queue's alias row already compares a filling load with a store arriving
+in the same cycle (`fill_row`), a case M's one op a cycle never exercises today. The load queue's searched fields keep one writer, the load
+stage (two with the second load port), never the lanes.
+
 ## Open
 
 - **Where a store translates** once M is gone: a second dTLB read port (LUTRAM read ports are
