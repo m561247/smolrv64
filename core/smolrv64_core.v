@@ -57,9 +57,7 @@
 `ifndef SMOLRV64_QD
  `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif
-`ifndef SMOLRV64_ROB_ROWS
- `define SMOLRV64_ROB_ROWS 64          // the ROB's rows of IW entries (a power of two)
-`endif
+`include "smolrv64_tags.vh"             // SMOLRV64_ROB_ROWS
 module smolrv64_core
   #(parameter PCW  = 40,                 // a PC's bits (smolrv64_pc.vh): Sv39's 39 and the non-canonical flag
     parameter HW   = `SMOLRV64_HW,

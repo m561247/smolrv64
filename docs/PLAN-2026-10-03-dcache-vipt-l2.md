@@ -285,3 +285,43 @@ board gate prints the first two on every PASS):
   unnamed, which must be named before it goes back on).
 - **One page walker**: a footprint that walks on every load keeps 2.4 loads in flight against
   7 to 8 when the dTLB translates them. A second walker, or walks that overlap their PTE reads.
+
+## Deferred: recovery after a mispredict (Tommy, 2026-10-19: important)
+
+**What it costs today.** A mispredict resolved before the ROB head walks the rename map back from
+the tail to the branch, a row a cycle, racing the branch to the head, where a squash and the sweep
+of dirty registers restore it instead. `RECOV-SIM` (the Linux bench) counts the cycles of that
+restore beyond the frontend's refetch, which runs alongside it: over GB5's single-core section as
+its 77 SimPoints (039314ad), 0.96% of the cycles -- N-Body Physics 5.6%, Text Compression 3.4%,
+Navigation 2.4%, Speech Recognition 2.2%, most of the FP subtests under 0.5%; Dhrystone 4.2%, its
+strcmp exit resolving about 15 rows from the tail once the VIPT D$ made its loads faster. The
+share grows with the window: a wider machine and faster loads put more rows behind a branch.
+
+**The models measured** (the share of the single-core cycles still exposed):
+
+| restore | exposed |
+|---|---|
+| as built (the walk racing the head squash) | 0.96% |
+| a forward rebuild: the committed map, then the rows from the head to the branch | 0.86% |
+| three map checkpoints every 8 rows (4 rows: 0.34%, 16: 0.33%) | 0.18% |
+| three checkpoints right after weakly predicted conditionals | 0.51% |
+| a compressed walk: each register renamed after the branch restored once, IW a cycle | at most 0.39% |
+
+Weakly predicted conditionals are 14% of the boot's mispredicts and 41% of Navigation's, but 98%
+of Dhrystone's, which the weak checkpoints all but zero. The compressed walk restores 5 to 8
+distinct registers where the walk crosses 7 to 16 rows; it was credited only where the walk, not
+the head squash, ended the restart, so its figure is an upper bound.
+
+**The constraints.** A checkpoint is a map version, and on this FPGA a version is a write port: the
+map's copies and their live-value selector widen with each one (four is already a stretch and puts
+IW=4 at risk), and the map in flops is worse. Full checkpoint-based recovery without a ROB (CPR) was
+this repo's first out-of-order design and failed on its coarse atomic regions.
+
+**The evaluation, at the end state** (IW=4, the L2 in): checkpoints after weakly predicted
+conditionals -- one to three map versions held by the oldest unresolved weak branches, so a
+confident misprediction costs the walk -- against the compressed walk, which needs no version:
+the first rename of each register after the branch, found without a CAM, restored IW a cycle
+through the existing ports, with the new path renaming while it finishes (lazy recovery) as a
+possible second step. Score both with `RECOV-SIM` over the SimPoints, the compressed walk credited
+in the restarts the head squash wins too, and weigh each against `smolrv64_rename`'s out-of-context
+timing and size with its ports.

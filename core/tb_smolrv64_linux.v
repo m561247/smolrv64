@@ -911,6 +911,123 @@ module tb;
          else                             sm_wait  <= sm_wait + 1;
       end
    end
+   // ---- MFUN-SIM: M takes one plain load or store a cycle, in program order; an address the lanes
+   // generated waits in the arrival RAMs until M picks it. The waiting entries summed over the
+   // cycles over the fills is the mean wait (Little); cycles with two or more waiting ----------------
+   reg [63:0] mf_wait, mf_fill, mf_c2, mf_c1;
+   initial begin mf_wait = 0; mf_fill = 0; mf_c2 = 0; mf_c1 = 0; end
+   always @(posedge clk) if (!reset && meas) begin : mfun
+      integer n;
+      n = pop64(64'(dut.core.la_v)) + pop64(64'(dut.core.sa_v));
+      mf_wait <= mf_wait + 64'(n);
+      if (n >= 1) mf_c1 <= mf_c1 + 1;
+      if (n >= 2) mf_c2 <= mf_c2 + 1;
+      if (dut.core.m_lq_fill || dut.core.m_sq_fill) mf_fill <= mf_fill + 1;
+   end
+   // ---- RECOV-SIM: each restart's recovery against a forward rebuild ---------------------------
+   // A restart (the ROB's k_v) walks the map back from the tail row to the branch's, a row a cycle,
+   // racing the branch to the ROB head, where a squash and the sweep (dirty registers, IW a cycle)
+   // restore it instead. A forward rebuild would sweep to the committed map at once and replay the
+   // rows from the head through the branch's. Counted per restart: the recovery as it ran (to the
+   // release, or the squash plus its sweep), the rebuild's estimate, and the frontend's refetch (the
+   // first cycle after the restart its queue has a head again): only recovery beyond the refetch is
+   // exposed. A restart a later, older one supersedes is not scored. CKPT-K models three map
+   // checkpoints every K ROB rows (the oldest three past the head row; the committed map at the head
+   // the fourth version): a restore in a cycle, then a replay forward a row a cycle from the newest
+   // checkpoint at or before the branch's row, racing the walk and the head as the rebuild does.
+   // CKPT-WEAK models three checkpoints right after weakly predicted conditionals (the core's wk_e:
+   // dispatched, not yet resolved), held by the oldest three: a mispredicted weak branch holding one
+   // restores in a cycle; another replays from the youngest checkpointed weak branch before its row.
+   // CWALK models a compressed walk: each register renamed after the branch restored once, IW a
+   // cycle, in place of a row a cycle (the distinct destinations the walk wrote; a restart the head
+   // squash wins keeps its cost).
+   reg        rv_on, rv_fes;  reg [63:0] rv_t0, rv_fe, rv_fwd, rv_b;
+   reg [63:0] rv_ck [0:2];  reg [63:0] rv_cke [0:2];   // per K in {4, 8, 16}: the estimate, the exposed sum
+   initial begin rv_cke[0] = 0; rv_cke[1] = 0; rv_cke[2] = 0; end
+   localparam integer RV_CB = (RV_IW > 2) ? 2 : 1, RV_NC = 1 << RV_CB;
+   reg        rv_wk, rv_wkq;  reg [63:0] rv_cw, rv_cwe, rv_nwk;   // the branch was weak; the weak model
+   initial begin rv_wk = 0; rv_wkq = 0; rv_cwe = 0; rv_nwk = 0; end
+   reg [63:0] rv_set, rv_rows, rv_cwk, rv_dist;  integer rv_p;
+   initial begin rv_set = 0; rv_rows = 0; rv_cwk = 0; rv_dist = 0; end
+   always @(posedge clk) if (!reset && meas) begin : rvwalk     // the walk's restored destinations
+      reg [63:0] nset;
+      nset = rv_set;
+      for (rv_p = 0; rv_p < RV_IW; rv_p = rv_p + 1)
+         if (dut.core.u_rob.wl_v[rv_p]) nset[dut.core.u_rob.wl_rd[rv_p*6 +: 6]] = 1'b1;
+      if (dut.core.fr_rel || dut.core.cf_red_fire) begin rv_set <= 0;  rv_rows <= 0; end
+      else begin rv_set <= nset;  if (dut.core.u_rob.wl_run) rv_rows <= rv_rows + 1; end
+   end
+   always @(posedge clk) if (!reset && dut.core.fr_set)        // the resolve: the branch's wk_e bit still holds
+      rv_wkq <= dut.core.wk_e[((dut.core.cf_rob >> (RV_CB + 1)) << RV_CB) | (dut.core.cf_rob & (RV_NC - 1))];
+   function automatic [63:0] ck_weak(input integer hr, input integer kb, input wk, input [63:0] fwd);
+      integer r, col, n, last;
+      begin
+         n = 0;  last = -1;
+         for (r = 0; r < kb; r = r + 1)          // the weak branches in the rows before the branch's, oldest first
+            for (col = 0; col < RV_NC; col = col + 1)
+               if (dut.core.wk_e[((hr + r) % `SMOLRV64_ROB_ROWS) * RV_NC + col] && n < 3) begin n = n + 1;  last = r; end
+         if (wk && n < 3) ck_weak = 1;
+         else if (last >= 0) ck_weak = 64'(1 + kb - last + 1);
+         else ck_weak = fwd;
+      end
+   endfunction
+   function automatic [63:0] ck_cost(input integer K, input integer hr, input integer kb, input [63:0] fwd);
+      integer d0, j, best;
+      begin
+         d0 = (K - (hr % K)) % K;            // the first checkpoint row at or after the head, from the head
+         best = -1;
+         for (j = 0; j < 3; j = j + 1) if (d0 + j * K <= kb) best = d0 + j * K;
+         ck_cost = (best < 0) ? fwd : 64'(1 + kb - best + 1);
+      end
+   endfunction
+   reg [63:0] rv_n, rv_rel, rv_sq, rv_sup, rv_rows_b, rv_rows_f, rv_fe_sum, rv_now, rv_best, rv_win, rv_rec;
+   initial begin rv_on = 0; rv_fes = 0; rv_n = 0; rv_rel = 0; rv_sq = 0; rv_sup = 0; rv_rows_b = 0; rv_rows_f = 0;
+                 rv_fe_sum = 0; rv_now = 0; rv_best = 0; rv_win = 0; rv_rec = 0; end
+   function automatic integer pop64(input [63:0] x);
+      integer b; begin pop64 = 0; for (b = 0; b < 64; b = b + 1) pop64 = pop64 + x[b]; end
+   endfunction
+   localparam integer RV_IW = `SMOLRV64_IW;
+   always @(posedge clk) if (!reset && meas) begin : recov
+      reg [63:0] rec, fe, ex_now, ex_best, ex_ck, cwr;  integer k3;
+      if (dut.core.u_rob.k_v) begin
+         if (rv_on) rv_sup <= rv_sup + 1;
+         rv_on <= 1'b1;  rv_t0 <= c;  rv_fes <= 1'b0;
+         rv_fwd <= 64'((pop64(dut.core.u_rename.dirty) + RV_IW - 1) / RV_IW) + 64'(dut.core.u_rob.kb_rel) + 1;
+         rv_b   <= 64'((dut.core.u_rob.trow - dut.core.u_rob.kn_row - 1) & (`SMOLRV64_ROB_ROWS - 1)) + 1;
+         rv_wk <= rv_wkq;
+         rv_cw <= ck_weak(dut.core.u_rob.hrow, dut.core.u_rob.kb_rel, rv_wkq,
+                          64'((pop64(dut.core.u_rename.dirty) + RV_IW - 1) / RV_IW) + 64'(dut.core.u_rob.kb_rel) + 1);
+         rv_ck[0] <= ck_cost(4,  dut.core.u_rob.hrow, dut.core.u_rob.kb_rel,
+                             64'((pop64(dut.core.u_rename.dirty) + RV_IW - 1) / RV_IW) + 64'(dut.core.u_rob.kb_rel) + 1);
+         rv_ck[1] <= ck_cost(8,  dut.core.u_rob.hrow, dut.core.u_rob.kb_rel,
+                             64'((pop64(dut.core.u_rename.dirty) + RV_IW - 1) / RV_IW) + 64'(dut.core.u_rob.kb_rel) + 1);
+         rv_ck[2] <= ck_cost(16, dut.core.u_rob.hrow, dut.core.u_rob.kb_rel,
+                             64'((pop64(dut.core.u_rename.dirty) + RV_IW - 1) / RV_IW) + 64'(dut.core.u_rob.kb_rel) + 1);
+      end else if (rv_on) begin
+         if (!rv_fes && dut.core.fe_hd_v && c > rv_t0 + 1) begin rv_fes <= 1'b1;  rv_fe <= c - rv_t0; end
+         if (dut.core.fr_rel || dut.core.cf_red_fire) begin
+            rec = c - rv_t0 + (dut.core.fr_rel ? 64'd0 : 64'((pop64(dut.core.u_rename.dirty) + RV_IW - 1) / RV_IW));
+            fe  = rv_fes ? rv_fe : rec;
+            ex_now  = (rec > fe) ? rec - fe : 0;
+            ex_best = ((rec < rv_fwd ? rec : rv_fwd) > fe) ? (rec < rv_fwd ? rec : rv_fwd) - fe : 0;
+            rv_on <= 1'b0;  rv_n <= rv_n + 1;
+            if (dut.core.fr_rel) rv_rel <= rv_rel + 1; else rv_sq <= rv_sq + 1;
+            rv_rows_b <= rv_rows_b + rv_b;  rv_rows_f <= rv_rows_f + rv_fwd;  rv_fe_sum <= rv_fe_sum + fe;
+            rv_rec <= rv_rec + rec;  rv_now <= rv_now + ex_now;  rv_best <= rv_best + ex_best;
+            if (ex_best < ex_now) rv_win <= rv_win + 1;
+            ex_ck = ((rec < rv_cw ? rec : rv_cw) > fe) ? (rec < rv_cw ? rec : rv_cw) - fe : 0;
+            rv_cwe <= rv_cwe + ex_ck;  if (rv_wk) rv_nwk <= rv_nwk + 1;
+            cwr = dut.core.fr_rel ? rec - rv_rows + 64'((pop64(rv_set) + RV_IW - 1) / RV_IW) : rec;
+            if (cwr > rec) cwr = rec;
+            rv_cwk <= rv_cwk + ((cwr > fe) ? cwr - fe : 0);
+            if (dut.core.fr_rel) rv_dist <= rv_dist + 64'(pop64(rv_set));
+            for (k3 = 0; k3 < 3; k3 = k3 + 1) begin
+               ex_ck = ((rec < rv_ck[k3] ? rec : rv_ck[k3]) > fe) ? (rec < rv_ck[k3] ? rec : rv_ck[k3]) - fe : 0;
+               rv_cke[k3] <= rv_cke[k3] + ex_ck;
+            end
+         end
+      end
+   end
    // Cycles any fill is in flight and the MSHRs live over them, fills started, cycles a request is
    // parked in the waiter table, cycles the write-back buffer is full, and of the ST_MEM event's
    // cycles (M holds a head op, or issue waits on an integer load's, AMO's or CSR read's result),
@@ -1412,6 +1529,12 @@ module tb;
                sl_wr, sl_mg, sl_fw, sl_s1ld, sl_s1x, sl_fb, sl_flw, sl_flx, sl_miss, sl_back, sl_full, sl_main, sl_idle);
       $display("STLK-SIM a plain store in the main lookup: allocates=%0d deferred=%0d waits=%0d", sm_alloc, sm_defer, sm_wait);
       if (kan_on) begin kan_finish; $fclose(kf); end
+      $display("RECOV-SIM restarts=%0d released=%0d squashed-at-the-head=%0d superseded=%0d | cycles: recovery=%0d refetch=%0d exposed=%0d | rows walked back=%0d, forward rebuild (sweep + rows from the head)=%0d | exposed with the rebuild racing=%0d, the rebuild faster in %0d restarts",
+               rv_n, rv_rel, rv_sq, rv_sup, rv_rec, rv_fe_sum, rv_now, rv_rows_b, rv_rows_f, rv_best, rv_win);
+      $display("RECOV-SIM exposed with three checkpoints racing, every 4 rows=%0d 8 rows=%0d 16 rows=%0d, after weak branches=%0d (weakly predicted restarts=%0d)",
+               rv_cke[0], rv_cke[1], rv_cke[2], rv_cwe, rv_nwk);
+      $display("RECOV-SIM exposed with a compressed walk=%0d (distinct registers restored by released walks=%0d)", rv_cwk, rv_dist);
+      $display("MFUN-SIM plain loads and stores M filled=%0d | waiting in the arrival RAMs: entry-cycles=%0d, cycles one or more=%0d, two or more=%0d", mf_fill, mf_wait, mf_c1, mf_c2);
       $display("perf-stat-sim: begin");
       $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run
       $display("%0d instructions", mr);
