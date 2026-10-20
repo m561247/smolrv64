@@ -16,7 +16,7 @@ login prompt on the board with zero faults before it lands.
 
 | | |
 |---|---|
-| Geekbench 5.4.1, board, 2026-10-18 | **17** single-core (Integer 20, Crypto 2, Floating Point 12), **16** multi-core ([result 24734381](https://browser.geekbench.com/v5/cpu/24734381), [every subtest](workloads/gb5/result-2026-10-18b.md)); the whole suite in 1 h 49 min at IPC 1.18 |
+| Geekbench 5.4.1, board, 2026-10-19 | **17** single-core (Integer 20, Crypto 2, Floating Point 12), **17** multi-core ([result 24734832](https://browser.geekbench.com/v5/cpu/24734832), [every subtest](workloads/gb5/result-2026-10-19.md)); the whole suite in 1 h 48 min at IPC 1.19 |
 | Geekbench 6.7.1, board (4 GiB), 2026-10-15 to 16 | **10** single-core, **10** multi-core ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041), [every subtest](workloads/gb6/result-2026-10-16.md)); the whole suite in 17 h 48 min at IPC 1.00 |
 | Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-18 | **2.44** DMIPS/MHz: 233.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
 | CoreMark 1.0, the RTL in lockstep simulation, 2026-10-18 | **4.15** CoreMark/MHz: 241,079 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; 4.03 at `-O3 -funroll-all-loops`; `make run B=coremark`) |
