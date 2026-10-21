@@ -271,9 +271,10 @@ module smolrv64_lq
    // ANY FREE SLOT OF ITS BANK, the lowest. Loads land out of order (the tagged fast path; the
    // random bench lands them in any order), so the next slot of a ring can hold a load still in
    // flight while others are free; the age matrix keeps program order whichever slot an entry
-   // takes. A row's loads take the banks in turn from the bank pointer (bp), in program order, so
-   // each of them is a different bank's (an entry's bank is its low bits) and every array the
-   // allocation writes takes one write a bank. A slot whose killed load is still in flight is free
+   // takes. A row's loads take the banks that have a free entry in turn from the bank pointer (bp),
+   // in program order, so each of them is a different bank's (an entry's bank is its low bits) and
+   // every array the allocation writes takes one write a bank; a full bank is passed over, so the
+   // queue refuses a load only when fewer banks than the row's loads have room. A slot whose killed load is still in flight is free
    // here: the LSU starts nothing on a tag whose response is still due (its o_v).
    localparam integer ROWS = NENT / NB;
    reg  [BL-1:0]   bp;
@@ -287,15 +288,24 @@ module smolrv64_lq
       for (fr = ROWS - 1; fr >= 0; fr = fr - 1)
          if (~v[fr*NB + fb]) begin bfr[fb] = fr[BRB-1:0];  bhas[fb] = 1'b1;  bfc[fb] = bfc[fb] + 1'b1; end
    end
+   reg  [BL-1:0]   rbk [0:NB-1];        // the banks with room, from bp on: the r-th one a rank-r load takes
+   reg  [BL:0]     nbk;                 // ...how many
    reg  [BL-1:0]   wbk [0:NW-1];        // writer j's bank...
    reg  [IDXB-1:0] ws  [0:NW-1];        // ...and entry
    reg  [NENT-1:0] wahead [0:NW-1];     // the cycle's loads ahead of writer j's, by entry
    reg  [IDXB:0]   n_alloc;
    integer         fj, fi2;
+   reg  [BL-1:0]   rbb;
    always @* begin
+      nbk = {(BL+1){1'b0}};
+      for (fj = 0; fj < NB; fj = fj + 1) rbk[fj] = bp;
+      for (fj = 0; fj < NB; fj = fj + 1) begin
+         rbb = bp + fj[BL-1:0];
+         if (bhas[rbb]) begin rbk[nbk[BL-1:0]] = rbb;  nbk = nbk + 1'b1; end
+      end
       n_alloc = {(IDXB+1){1'b0}};
       for (fj = 0; fj < NW; fj = fj + 1) begin
-         wbk[fj] = bp + d_rank[fj*RKB +: RKB];
+         wbk[fj] = rbk[d_rank[fj*RKB +: RKB]];
          ws[fj]  = {bfr[wbk[fj]], wbk[fj]};
          n_alloc = n_alloc + {{IDXB{1'b0}}, d_alloc[fj]};
       end
@@ -313,7 +323,7 @@ module smolrv64_lq
       assign d_bfree[gw*(BRB+1) +: BRB+1] = bfc[gw];
    end endgenerate
    assign d_bp      = bp;
-   assign d_ready   = bhas[bp];             // room for the next load, the row's first
+   assign d_ready   = |bhas;                // room for the next load, the row's first
    assign occupancy = cnt;
    assign av_any    = |(v & av & ~lnd);
    genvar gd;
@@ -550,8 +560,8 @@ module smolrv64_lq
    integer ak, aj;
    always @(posedge clk) if (!reset) begin
       for (ak = 0; ak < NW; ak = ak + 1) if (d_alloc[ak]) begin
-         if (~bhas[wbk[ak]])
-            $fatal(1, "smolrv64_lq: load %0d of the row allocates into full bank %0d (%0d live)", ak, wbk[ak], cnt);
+         if ({{(BL+1-RKB){1'b0}}, d_rank[ak*RKB +: RKB]} >= nbk)
+            $fatal(1, "smolrv64_lq: load %0d of the row has rank %0d, and %0d banks have room (%0d live)", ak, d_rank[ak*RKB +: RKB], nbk, cnt);
          for (aj = ak + 1; aj < NW; aj = aj + 1)
             if (d_alloc[aj] & (d_rank[aj*RKB +: RKB] == d_rank[ak*RKB +: RKB]))
                $fatal(1, "smolrv64_lq: loads %0d and %0d of the row share rank %0d", ak, aj, d_rank[ak*RKB +: RKB]);

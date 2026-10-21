@@ -162,7 +162,8 @@ PDF Rendering and 0.03% in Camera. A member pops only with a **credit** for ever
 flops, counted against what is already between the head and there: the ROB against the IR
 group, each lane's scheduler against its dispatch-stage register and the IR's op, and per slot
 position (room for the op at position k with every slot before it of its kind too) the SQ against
-the IR's stores, the LQ's banks its loads would take against the IR's loads in them (§8), and the
+the IR's stores, the LQ's banks with room against the IR's loads, each of which may take a bank's
+last entry (§8), and the
 F stage against its FIFO (below) and the IR's FP ops, a full stage still taking one a cycle while
 the scheduler has room for two (`crd`, `CR_*`; this
 cycle's frees are not credited). The IR loads every cycle and
@@ -1340,9 +1341,10 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
     page, so two in one page compare exactly; synonyms share the offset, so they never miss each
     other; and the test runs the cycle the VA arrives, whatever the walker does.
 - **A load takes any free entry of its bank; program order is an age matrix.** The LQ is four
-  banks (an entry's low bits); a group's loads take them in turn from a bank pointer, in program
-  order, each the lowest free entry of its bank, so a row of loads allocates in one cycle and every
-  array the allocation writes takes one write a bank (`spl_ld` and `pcm` are `smolrv64_bankq`s;
+  banks (an entry's low bits); a group's loads take the banks that have a free entry in turn from
+  a bank pointer, in program order, each the lowest free entry of its bank, so a row of loads
+  allocates in one cycle and every array the allocation writes takes one write a bank, and the
+  queue refuses a load only when fewer banks than the row's loads have room (`spl_ld` and `pcm` are `smolrv64_bankq`s;
   the fields read at every entry are flops). An allocation sets its row to the live entries and
   the row's loads ahead of it (all older) and clears its column; every "oldest of these" (the
   access candidate, the walker's and the fault's picks, M's fill pick) is the member no other

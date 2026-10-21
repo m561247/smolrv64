@@ -228,8 +228,8 @@ module tb;
               nrow = 0;  nld = 0;  nst = 0;  rmax = 1 + rnd(0) % NW;
               while (nrow < rmax && p_disp + nrow < nops) begin
                  op = p_disp + nrow;
-                 // room: the SQ past the row's stores; the LQ bank the row's next load takes
-                 if (is_st[op] ? (32'(sq_free) <= nst) : (lq_bfree[((32'(lq_bp) + nld) % 2) * 2 +: 2] == 2'd0)) rmax = 0;
+                 // room: the SQ past the row's stores; a bank with room for each of the row's loads
+                 if (is_st[op] ? (32'(sq_free) <= nst) : (((lq_bfree[1:0] != 2'd0) + (lq_bfree[3:2] != 2'd0)) <= nld)) rmax = 0;
                  else begin
                     rowop[nrow] = op;
                     if (is_st[op]) begin

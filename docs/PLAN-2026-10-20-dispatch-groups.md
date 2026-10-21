@@ -141,5 +141,9 @@ a group is cut only beside a non-plain op, behind a DCR CTI, or by a credit it m
 - **Loads and stores fill a group.** As designed. The F FIFO, `spl_ld`, `spl_st` and the LQ's
   `pcm` are `smolrv64_bankq`s (its `PICK` mode: one read at any entry); `rdn` is flops (16 x 6, read
   at two entries the landing picks after the read). The LQ's `d_ready` is room in the bank the
-  next load takes. The random LQ/SQ bench dispatches rows of two (both queues `NW=2`, the LQ in 2
+  next load takes. A row's loads pass over a full bank (the banks with room, in turn from the
+  pointer): with the strict turn a bank of slow loads refused the row while three had room, and
+  Inpainting, HDR and SfM lost 0.5-1.8% on the SimPoints (LQ-full doubled); passing over it
+  recovers most of what a 32-entry LQ does (Inpainting -1.78% against -2.23%, HDR -0.96% against
+  -1.44%). The random LQ/SQ bench dispatches rows of two (both queues `NW=2`, the LQ in 2
   banks of 2). Bare-metal `bwread.c` in lockstep: 338,469 -> 272,474 cycles (~7.7 bytes a cycle).

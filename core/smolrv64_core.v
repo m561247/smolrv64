@@ -4647,21 +4647,24 @@ module smolrv64_core
    end
    wire cr_div = ~(&dt_v) & ~((|dt_v) & ir_m);
    // A load or store at slot position k with every slot before it one too: the SQ has room past
-   // the IR's stores; the LQ's banks from its pointer past the IR's loads each have an entry beyond
-   // the IR's (a position p takes bank bp + p, the p/QNB-th time round)
+   // the IR's stores; the LQ has k+1 banks with room past the IR's loads, each of which takes one
+   // bank -- at worst one with a single free entry, so the banks left are those with two or more
+   // and those with one beyond the IR's loads
    localparam integer LBW = LQ_IB - $clog2(QNB) + 1;
    reg  [IW-1:0] cr_ld, cr_st;
-   reg  [3:0]    crp;
-   reg  [$clog2(QNB)-1:0] crb;
+   reg  [3:0]    lb2, lb1, lbr;
    integer       crr;
-   always @* for (crk = 0; crk < IW; crk = crk + 1) begin
-      cr_ld[crk] = ~cbo_any;
-      for (crr = 0; crr <= crk; crr = crr + 1) begin
-         crp = ir_ld + crr[3:0];
-         crb = lq_bp + crp[$clog2(QNB)-1:0];
-         if ({{(8-LBW){1'b0}}, lq_bfree[crb*LBW +: LBW]} <= {4'd0, crp} / QNB) cr_ld[crk] = 1'b0;
+   always @* begin
+      lb2 = 4'd0;  lb1 = 4'd0;
+      for (crr = 0; crr < QNB; crr = crr + 1) begin
+         if (lq_bfree[crr*LBW +: LBW] >= 2) lb2 = lb2 + 4'd1;
+         if (lq_bfree[crr*LBW +: LBW] == 1) lb1 = lb1 + 4'd1;
       end
-      cr_st[crk] = ~cbo_any & ({{(7-SQ_IB){1'b0}}, sq_free} > {4'd0, ir_st} + crk[7:0]);
+      lbr = lb2 + ((lb1 > ir_ld) ? lb1 - ir_ld : 4'd0);
+      for (crk = 0; crk < IW; crk = crk + 1) begin
+         cr_ld[crk] = ~cbo_any & (lbr > crk[3:0]);
+         cr_st[crk] = ~cbo_any & ({{(7-SQ_IB){1'b0}}, sq_free} > {4'd0, ir_st} + crk[7:0]);
+      end
    end
    wire cr_cbo = ~lq_uf_any & ~sq_uf_any & (ir_ld == 4'd0) & (ir_st == 4'd0);
    reg  [IW-1:0] cr_rob;                              // a ROB row for the group (every bit)
