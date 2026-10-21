@@ -147,3 +147,11 @@ a group is cut only beside a non-plain op, behind a DCR CTI, or by a credit it m
   recovers most of what a 32-entry LQ does (Inpainting -1.78% against -2.23%, HDR -0.96% against
   -1.44%). The random LQ/SQ bench dispatches rows of two (both queues `NW=2`, the LQ in 2
   banks of 2). Bare-metal `bwread.c` in lockstep: 338,469 -> 272,474 cycles (~7.7 bytes a cycle).
+- **Landed (414eda07).** GB5's 77 SimPoints -0.28% of the single-core cycles against the FP row
+  (Rigid Body -1.32%, PDF -1.27%, Navigation -1.12%, SQLite -1.04%, the integer subtests -0.43% to
+  -1.27%; Structure from Motion +0.41%, Gaussian Blur +0.07%). The SQ's PC and seqno in banked
+  distributed RAM took the first build's 149,312 LUTs to 145,705 (the FP row's: 141,027). The
+  build missed by 0.154 ns routed and closed at WNS 0.000 with a second last-mile pass from the
+  first one's checkpoint (`make physopt DCP=...`): no family failed alone, 981 endpoints across
+  the fetch ring's Top-Down path, the SQ, the ROB's kill, rename and the LSU. Board gate PASS on
+  the 2g board (login with no fault, 900 s of Geekbench, load-use 3.0, a D$ miss 45.2 cycles).

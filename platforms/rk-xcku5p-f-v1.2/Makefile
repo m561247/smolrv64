@@ -202,8 +202,9 @@ paths:
 # Last-mile timing closure: targeted post-route phys_opt on the routed checkpoint
 # (no re-place/route). Writes the .bit iff it reaches WNS >= 0, and banks it like `make bit`
 # does: a missed build's start record is still there, so the entry carries its content id.
+#   make physopt [DCP=<checkpoint>]   # default: the run's post-route phys_opt result
 physopt:
-	$(VIVADO) $(VFLAGS) -source physopt_close.tcl
+	$(VIVADO) $(VFLAGS) -source physopt_close.tcl -tclargs '$(DCP)'
 	if [ -f $(RUNS_DIR)/impl_1/$(PROJECT)_closed.dcp ]; then ../../tools/bitcache.sh put $(CURDIR); fi
 
 cdc:

@@ -13,6 +13,8 @@ set rundir rk_xcku5p.runs/impl_1
 # judged; it is the one a last-mile pass starts from.
 set start_dcp $rundir/rk_xcku5p_postroute_physopt.dcp
 if {![file exists $start_dcp]} { set start_dcp $rundir/rk_xcku5p_routed.dcp }
+# `make physopt DCP=<checkpoint>` starts from another: a walk's rk_xcku5p_physopt2.dcp, for more rounds
+if {$argc > 0 && [lindex $argv 0] ne ""} { set start_dcp [lindex $argv 0] }
 # what a closed walk writes, and nothing an earlier walk left: `make physopt` banks what it finds
 file delete -force $rundir/rk_xcku5p_closed.dcp $rundir/rk_xcku5p_timing_summary_closed.rpt
 puts "PHYSOPT-CLOSE: opening $start_dcp"
