@@ -36,7 +36,8 @@ MC_OPT="$O"; MC_IP=192.168.1.166
 M5_ROOT=exp; FM_ROOT=/Volumes/tommy/exp; MC_ROOT=/scratch/tommy/exp          # M5's under its $HOME
 M5_CK='$HOME/gb5ck'; FM_CK=/Volumes/tommy/gb5ck; MC_CK=/scratch/tommy/gb5ck   # <ckpt>.ckpt, pi/ck/<n>.ckpt, sp/<n>.ckpt
 CF_ROOT=$HOME/exp-runs; CF_CK=$HOME/gb5ck      # coffee itself, local, between builds
-cf_ok=0; [ "${SET:-}" = sp ] && ! ps -eo comm | grep -qx vivado && [ -d "$CF_CK/sp" ] && cf_ok=1
+cf_build() { ps -eo comm | grep -qx vivado || ps -eo args | grep -qE '[t]ools/gate\.sh|[b]oard-gate\.sh'; }   # a gate in any phase is a build
+cf_ok=0; [ "${SET:-}" = sp ] && ! cf_build && [ -d "$CF_CK/sp" ] && cf_ok=1
 
 table() { python3 "$here/tools/exp-table.py" "$R/$1" ${2:+"$R/$2"}; }
 if [ "${1:-}" = "-t" ]; then table "${2:?tag}" "${3:-}"; exit; fi
