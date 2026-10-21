@@ -50,12 +50,12 @@ col[*].mem x3 : ROB entries, one column per slot {pold, noret, rd, prd}
 rob_ffr : an FP op's exception flags by ROB slot: written when its result lands, read by the retire ports
 # The banked queues (smolrv64_bankq): a bank per position mod NB, one write each. The decoupling
 # queue's QNB = next_pow2(FW) = 8, the fetch ring's 8, the training queue's 4, each lane's landing
-# buffer's 2 (6 at IW=3).
-bank[*].mem x26 : the decoupling queue's records, the fetch ring's halfwords, the training queue's payload, the landing buffers' data
+# buffer's 2 (6 at IW=3), and next_pow2(IW) = 4 each for what a dispatch group's row writes: the
+# F stage's FIFO, the LQ's and SQ's dispatch records (spl_ld, spl_st) and the LQ's PC (pcm).
+bank[*].mem x42 : the decoupling queue's records, the fetch ring's halfwords, the training queue's payload, the landing buffers' data, the F FIFO, spl_ld, spl_st, the LQ's PC
 # Multi-writer arrays (smolrv64_mwram), a bank per writer: the arrived addresses' (a bank per lane,
 # the LQ's 3 and the SQ's 3) and the load queue's PA (M's fill, the walker's answer: 2).
 wb[*].mem x8 : a lane load's or store's VA by LQ/SQ entry (written by its lane, read at M's fill); a load's PA (written by the fill and the walk)
-pcm : a load's PC in the load queue: written at dispatch, read at the fault pick
 mdw : the memory-dependence wait table: one write a cycle (a replay, a training event, the forget's step), read at dispatch and by training
 ras     : return address stack
 bank[*].way[*].btb x16 : BTB, 8 halfword banks x 2 skewed ways, 128 x 53 -- read as the fetch stream moves and by training
@@ -71,7 +71,6 @@ bank[6].yc  : YAGS corrector, halfword bank 6 of 8, 256 x 10 -- read as the fetc
 bank[7].yc  : YAGS corrector, halfword bank 7 of 8, 256 x 10 -- read as the fetch stream moves
 pq0     : the predictor's queue of predictions, even positions (one write a cycle per bank)
 pq1     : the predictor's queue of predictions, odd positions
-rdn     : load queue
 tlb_tag : iTLB/dTLB
 tlb_ppn : iTLB/dTLB
 tlb_perm: iTLB/dTLB
@@ -90,7 +89,5 @@ way[*].da x32 : D$ dirty
 way[*].ua x32 : D$ not recently used
 mbd_e   : D$ merge buffers, even chunks (as flops they were 4.6k registers and their muxes)
 mbd_o   : D$ merge buffers, odd chunks
-spl_ld : a lane load's record by LQ entry, written at dispatch, read at M's fill
-spl_st : a lane store's record by SQ entry, written at dispatch, read at M's fill
 fva_l : a load entry's full VA, a trap's tval
 fva_s : a store entry's full VA, a trap's tval

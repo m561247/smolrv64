@@ -37,19 +37,23 @@ module smolrv64_sq
     parameter LQN   = 4,               // smolrv64_lq's NENT
     parameter LQIB  = 2,               // smolrv64_lq's IDXB
     parameter VAW   = 39,              // Sv39: the VA an entry keeps beside its PA
-    parameter SEQW  = 8)               // the op's sequence number (a trap restarts fetch at it)
+    parameter SEQW  = 8,               // the op's sequence number (a trap restarts fetch at it)
+    parameter NW    = 1,               // stores allocated a cycle: a dispatch group's row
+    parameter RKB   = (NW > 1) ? $clog2(NW) : 1)   // derived: a rank among a row's stores
    (input  wire                  clk,
     input  wire                  reset,
 
     // ---- allocate: at dispatch, program order, one per cycle ----
-    input  wire                  d_alloc,
-    input  wire [ROBB-1:0]       d_rob,       // rides with the store; commit is at the head
-    input  wire [PBITS-1:0]      d_dpreg,     // renamed rs2 AT DISPATCH -- see the snoop
-    input  wire                  d_rdy,       // ...and its value is already in a register file: no writeback is coming
-    input  wire [VAW-1:0]        d_pc,        // the store's PC and seq, for a trap from its translation
-    input  wire [SEQW-1:0]       d_seq,
+    // up to NW a cycle, writer j a dispatch slot ([j*w +: w]), at the tail plus its rank
+    input  wire [NW-1:0]         d_alloc,
+    input  wire [NW*RKB-1:0]     d_rank,      // writer j's rank among the cycle's stores, in program order
+    input  wire [NW*ROBB-1:0]    d_rob,       // rides with the store; commit is at the head
+    input  wire [NW*PBITS-1:0]   d_dpreg,     // renamed rs2 AT DISPATCH -- see the snoop
+    input  wire [NW-1:0]         d_rdy,       // ...and its value is already in a register file: no writeback is coming
+    input  wire [NW*VAW-1:0]     d_pc,        // the store's PC and seq, for a trap from its translation
+    input  wire [NW*SEQW-1:0]    d_seq,
     output wire                  d_ready,
-    output wire                  d_ready2,    // room for two (the dispatch credit's)
+    output wire [IDXB:0]         d_free,      // free entries, from flops (the dispatch credit's)
     output wire [IDXB-1:0]       d_idx,
     // An entry with an ADDRESS is a store older than whatever M holds: M translates in
     // program order, and an entry is allocated at dispatch, so the queue can also hold
@@ -241,7 +245,7 @@ module smolrv64_sq
    wire [IDXB-1:0]       ho = hoc[IDXB-1:0];
    wire [IDXB:0]         ho_n = hoc - headc, kc_n = kcc - headc;   // handed off and not freed / committed
    reg [IDXB:0]          cnt;
-   integer               k;
+   integer               k, aw;
    // the kill's entries, and how many
 `include "smolrv64_kill.vh"
    reg  [NENT-1:0]       kmk, kds;
@@ -282,14 +286,18 @@ module smolrv64_sq
    initial if (NWB > 7) $fatal(1, "smolrv64_sq: ln_w holds a slot index of at most 3 bits, NWB=%0d ports and the data read", NWB);
    wire [63:0]           ln_data = wb_q[ln_w*64 +: 64];
    // THE SNOOP, ARMED FROM ALLOCATE (see the writeback loop): entry k's register is written back this
-   // cycle, on one port at most -- a register is written once. The entry allocated this cycle (the
-   // tail, whose dpr is written at this edge) matches on its own, al_m: it is the youngest, so the
-   // landing takes it last, and the dispatch's renamed register reaches no other entry's choice.
+   // cycle, on one port at most -- a register is written once. The entries allocated this cycle
+   // (the tail on, whose dpr is written at this edge) match on their own, al_m: they are the
+   // youngest, so the landing takes one of them last (al_k), and the dispatch's renamed registers
+   // reach no other entry's choice.
    reg  [NENT-1:0]       sn_m;
    reg  [2:0]            sn_w [0:NENT-1];
-   reg                   al_m;
-   reg  [2:0]            al_w;
-   integer               sk, sw;
+   reg  [NW-1:0]         al_m;
+   reg  [2:0]            al_w [0:NW-1];
+   reg  [IDXB-1:0]       al_e [0:NW-1];       // writer j's entry: the tail plus its rank
+   reg  [RKB-1:0]        al_k;
+   reg  [IDXB:0]         n_alloc;
+   integer               sk, sw, aj;
    always @* begin
       for (sk = 0; sk < NENT; sk = sk + 1) begin
          sn_m[sk] = 1'b0;  sn_w[sk] = 3'd0;
@@ -298,19 +306,27 @@ module smolrv64_sq
                sn_m[sk] = 1'b1;  sn_w[sk] = sw[2:0];
             end
       end
-      al_m = 1'b0;  al_w = 3'd0;
-      for (sw = 0; sw < NWB; sw = sw + 1)
-         if (d_alloc & d_ready & (d_dpreg != {PBITS{1'b0}}) & wb_v[sw] & (wb_preg[sw*PBITS +: PBITS] == d_dpreg)) begin
-            al_m = 1'b1;  al_w = sw[2:0];
-         end
+      n_alloc = {(IDXB+1){1'b0}};  al_k = {RKB{1'b0}};
+      for (aj = NW - 1; aj >= 0; aj = aj - 1) begin
+         al_e[aj] = tail + {{(IDXB-RKB){1'b0}}, d_rank[aj*RKB +: RKB]};
+         n_alloc = n_alloc + {{IDXB{1'b0}}, d_alloc[aj]};
+         al_m[aj] = 1'b0;  al_w[aj] = 3'd0;
+         for (sw = 0; sw < NWB; sw = sw + 1)
+            if (d_alloc[aj] & (d_dpreg[aj*PBITS +: PBITS] != {PBITS{1'b0}}) & wb_v[sw]
+                & (wb_preg[sw*PBITS +: PBITS] == d_dpreg[aj*PBITS +: PBITS])) begin
+               al_m[aj] = 1'b1;  al_w[aj] = sw[2:0];
+            end
+         if (al_m[aj]) al_k = aj[RKB-1:0];
+      end
    end
+   wire                  al_any = |al_m;
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; dv = {NENT{1'b0}}; rd = {NENT{1'b0}}; cmt = {NENT{1'b0}};
                  headc = {(IDXB+1){1'b0}}; tailc = {(IDXB+1){1'b0}}; kcc = {(IDXB+1){1'b0}};
                  hoc = {(IDXB+1){1'b0}}; cnt = {(IDXB+1){1'b0}}; end
 
    assign d_ready   = (cnt != NENT[IDXB:0]);
-   assign d_ready2  = (cnt <= NENT[IDXB:0] - 2);
+   assign d_free    = NENT[IDXB:0] - cnt;
    assign d_idx     = tail;
    assign d_tag     = tailc;
    assign av_any    = |(v & av);
@@ -654,15 +670,15 @@ module smolrv64_sq
             v[head] <= 1'b0; av[head] <= 1'b0; dv[head] <= 1'b0; cmt[head] <= 1'b0;
             headc <= headc + 1'b1;
          end
-         // allocate at the tail
-         if (d_alloc & d_ready) begin
-            v[tail] <= 1'b1; av[tail] <= 1'b0; dv[tail] <= 1'b0; cmt[tail] <= 1'b0;
-            rob[tail] <= d_rob;  dpr[tail] <= d_dpreg;  pc[tail] <= d_pc;  sqn[tail] <= d_seq;
-            rd[tail] <= d_rdy;
-            tailc <= tailc + 1'b1;
+         // allocate at the tail: a row's stores at the tail plus their ranks
+         for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw]) begin
+            v[al_e[aw]] <= 1'b1; av[al_e[aw]] <= 1'b0; dv[al_e[aw]] <= 1'b0; cmt[al_e[aw]] <= 1'b0;
+            rob[al_e[aw]] <= d_rob[aw*ROBB +: ROBB];  dpr[al_e[aw]] <= d_dpreg[aw*PBITS +: PBITS];
+            pc[al_e[aw]] <= d_pc[aw*VAW +: VAW];  sqn[al_e[aw]] <= d_seq[aw*SEQW +: SEQW];
+            rd[al_e[aw]] <= d_rdy[aw];
          end
-         if ((d_alloc & d_ready) & ~c_done) cnt <= cnt + 1'b1;
-         else if (~(d_alloc & d_ready) & c_done) cnt <= cnt - 1'b1;
+         tailc <= tailc + n_alloc;
+         cnt <= cnt + n_alloc - {{IDXB{1'b0}}, c_done};
          // A FLUSH KEEPS THE COMMITTED ENTRIES. They are the oldest, so the queue is cut at
          // the first uncommitted one; a drain in this same cycle still counts (the arm above
          // ran). An allocation in the redirect cycle (dispatch is not gated on the redirect
@@ -715,17 +731,17 @@ module smolrv64_sq
          // in. A landing for an entry a flush or the kill ends goes to a slot nothing reads: the
          // slot is allocated again no sooner than the cycle it lands, and its new entry's bytes
          // land later still.
-         ln_v   <= rd_ln | sn_any | al_m;
-         ln_idx <= rd_ln ? rq_idx : sn_any ? sn_k : tail;
-         ln_w   <= rd_ln ? NWB[2:0] : sn_any ? sn_w[sn_k] : al_w;
+         ln_v   <= rd_ln | sn_any | al_any;
+         ln_idx <= rd_ln ? rq_idx : sn_any ? sn_k : al_e[al_k];
+         ln_w   <= rd_ln ? NWB[2:0] : sn_any ? sn_w[sn_k] : al_w[al_k];
          for (k = 0; k < NENT; k = k + 1)
             if (sn_m[k]) begin
                if (~rd_ln & (sn_k == k[IDXB-1:0])) dv[k] <= 1'b1;
                else                                 rd[k] <= 1'b1;
             end
-         if (al_m) begin
-            if (~rd_ln & ~sn_any) dv[tail] <= 1'b1;
-            else                  rd[tail] <= 1'b1;
+         for (aw = 0; aw < NW; aw = aw + 1) if (al_m[aw]) begin
+            if (~rd_ln & ~sn_any & (al_k == aw[RKB-1:0])) dv[al_e[aw]] <= 1'b1;
+            else                                          rd[al_e[aw]] <= 1'b1;
          end
       end
       wb_q <= {r_data, wb_data};
@@ -757,17 +773,18 @@ module smolrv64_sq
    integer    lno;
    initial begin ln_n = 0; ln_out = 0; end
    always @(posedge clk) if (!reset) begin
-      if (rd_ln | sn_any | al_m) ln_n = ln_n + 1;
+      if (rd_ln | sn_any | al_any) ln_n = ln_n + 1;
       for (lno = 0; lno < NENT; lno = lno + 1)
          if (sn_m[lno] & (rd_ln | (sn_k != lno[IDXB-1:0]))) ln_out = ln_out + 1;
-      if (al_m & (rd_ln | sn_any)) ln_out = ln_out + 1;
+      for (lno = 0; lno < NW; lno = lno + 1)
+         if (al_m[lno] & (rd_ln | sn_any | (al_k != lno[RKB-1:0]))) ln_out = ln_out + 1;
    end
 `endif
 
    // Invariants (docs/rtl-rules.md A1): anything the design would otherwise drop silently.
    always @(posedge clk) if (!reset) begin
-      if (d_alloc & ~d_ready)
-         $fatal(1, "smolrv64_sq: allocate into a full buffer");
+      if ({1'b0, cnt} + {1'b0, n_alloc} > {1'b0, NENT[IDXB:0]})
+         $fatal(1, "smolrv64_sq: %0d stores allocate into a buffer holding %0d of %0d", n_alloc, cnt, NENT);
       if (a_v & ~v[a_idx])
          $fatal(1, "smolrv64_sq: address written to a slot with no live entry (idx %0d)", a_idx);
       if (a_v & av[a_idx])
@@ -777,15 +794,17 @@ module smolrv64_sq
       // assertion rather than a comment. dpreg 0 is LEGAL (rs2 = x0, or any value already in
       // the PRF): it means no writeback is coming, which is only a bug if a_data_v did not
       // supply the value either.
-      if (d_alloc & d_ready & ~d_rdy & (d_dpreg == {PBITS{1'b0}}))
-         $fatal(1, "smolrv64_sq: a store allocated with no data and no producer -- it can never commit");
+      for (li = 0; li < NW; li = li + 1)
+         if (d_alloc[li] & ~d_rdy[li] & (d_dpreg[li*PBITS +: PBITS] == {PBITS{1'b0}}))
+            $fatal(1, "smolrv64_sq: a store allocated with no data and no producer -- it can never commit");
       for (li = 0; li < NENT; li = li + 1)
          if (sn_m[li] & (rd[li] | (rq_v & (rq_idx == li[IDXB-1:0]))))
             $fatal(1, "smolrv64_sq: entry %0d snooped a writeback for a value already in a register file (rd %b, read %b)",
                    li, rd[li], rq_v & (rq_idx == li[IDXB-1:0]));
-      if (al_m & d_rdy)
-         $fatal(1, "smolrv64_sq: a store allocated into entry %0d with its value in a register file sees p%0d written back",
-                tail, d_dpreg);
+      for (li = 0; li < NW; li = li + 1)
+         if (al_m[li] & d_rdy[li])
+            $fatal(1, "smolrv64_sq: a store allocated into entry %0d with its value in a register file sees p%0d written back",
+                   al_e[li], d_dpreg[li*PBITS +: PBITS]);
       if (c_take & ~c_v)
          $fatal(1, "smolrv64_sq: handoff with no committed, ready entry");
       // the freed entry is one handed off, now or before; at most one waits for memory
@@ -799,7 +818,7 @@ module smolrv64_sq
          $fatal(1, "smolrv64_sq: commit with no uncommitted, ready entry");
       if (k_take & flush)
          $fatal(1, "smolrv64_sq: a store committed in a redirect cycle (the redirecting op is at the irrevocable point)");
-      if (|kmk & d_alloc & ~flush)
+      if ((|kmk) & (|d_alloc) & ~flush)
          $fatal(1, "smolrv64_sq: a kill in a cycle that allocates");
       if (k_take & kmk[kc])
          $fatal(1, "smolrv64_sq: a dead store committed");

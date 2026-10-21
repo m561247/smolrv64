@@ -19,7 +19,8 @@
 // Bank b is read once, at the entry at or after rp in it, so any offset below NB names an entry
 // some bank holds, and a read port is an NB:1 pick of the banks by (rp + ro[k]) % NB. rp must be
 // a register's value or close to it: it is every bank's read address (rule I6); the offsets select
-// only among the banks' outputs.
+// only among the banks' outputs. PICK=1 is the array read at any one position (NR = 1, no offset):
+// every bank reads rp's row, and rp's bank is the one taken.
 module smolrv64_bankq
   #(parameter W     = 16,                 // entry width
     parameter DEPTH = 32,                 // entries, a multiple of NB
@@ -27,6 +28,7 @@ module smolrv64_bankq
     parameter NR    = 8,                  // consecutive entries read a cycle
     parameter NB    = 8,                  // banks: a power of two, at least NW and NR
     parameter BYBANK = 0,                 // 1: writer j is bank j's (NW = NB)
+    parameter PICK  = 0,                  // 1: one read at any position (NR = 1)
     parameter AB    = $clog2(DEPTH))
    (input  wire               clk,
     input  wire               reset,      // only the invariant checks: the array has no reset
@@ -42,7 +44,7 @@ module smolrv64_bankq
    localparam integer IB = (BD > 1) ? $clog2(BD) : 1;
    localparam integer JB = (NW > 1) ? $clog2(NW) : 1;
    initial if ((1 << BB) != NB || NB < NW || DEPTH % NB != 0 || BD < 1 || (1 << AB) != DEPTH
-               || (BYBANK && NW != NB))
+               || (BYBANK && NW != NB) || (PICK && NR != 1))
       $fatal(1, "smolrv64_bankq: DEPTH=%0d NB=%0d NW=%0d AB=%0d BYBANK=%0d: NB is a power of two >= NW, dividing DEPTH = 2**AB (= NW when BYBANK)",
              DEPTH, NB, NW, AB, BYBANK);
 
@@ -81,7 +83,7 @@ module smolrv64_bankq
       // its read: the entry at or after rp
       wire [BB-1:0] off  = gb[BB-1:0] - rp[BB-1:0];
       wire [AB-1:0] rpos = rp + {{(AB-BB){1'b0}}, off};
-      wire [IB-1:0] ridx = (BD > 1) ? rpos[AB-1 -: IB] : {IB{1'b0}};
+      wire [IB-1:0] ridx = (BD == 1) ? {IB{1'b0}} : PICK ? rp[AB-1 -: IB] : rpos[AB-1 -: IB];
       assign brd[gb] = mem[ridx];
    end endgenerate
    generate for (gk = 0; gk < NR; gk = gk + 1) begin: rk

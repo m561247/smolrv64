@@ -126,3 +126,20 @@ The lockstep and the userspace locksteps; the LQ/SQ unit benches drive two alloc
 (random); asserted: a row's allocations never share a slot or a bank, a group's later load is younger
 than its earlier ones in the age matrix, `ld_sqtag` equals the stores dispatched ahead of the load,
 a group is cut only beside a non-plain op, behind a DCR CTI, or by a credit it misses.
+
+## Built (2026-10-20, wip/disp)
+
+- **The FP queue's kill (a3b322f9, rule D19).** The FP row exposed a latent bug: `smolrv64_iq`'s
+  kill tested an entry's stored ROB slot, and an entry the F stage filled while a kill held still
+  stored its previous occupant's, so a live op vanished (a PDF SimPoint hung 770 K cycles in). The
+  entry being filled is now tested by its incoming op.
+- **FP ops fill a group (d3dd7b52).** As designed; divides keep one a group. GB5's 77 SimPoints
+  -2.48% of the single-core cycles (Structure from Motion -5.42%, Gaussian Blur -5.00%, Camera
+  -2.74%, Rigid Body -1.67%, Horizon -1.42%, HDR -1.18%, N-Body -1.01%; integer within 0.06%). The free lists hand a
+  row's registers out in program order, not slot order: the committed head and the walk move in
+  program order, and slot order reused a committed register after a squash inside a row.
+- **Loads and stores fill a group.** As designed. The F FIFO, `spl_ld`, `spl_st` and the LQ's
+  `pcm` are `smolrv64_bankq`s (its `PICK` mode: one read at any entry); `rdn` is flops (16 x 6, read
+  at two entries the landing picks after the read). The LQ's `d_ready` is room in the bank the
+  next load takes. The random LQ/SQ bench dispatches rows of two (both queues `NW=2`, the LQ in 2
+  banks of 2). Bare-metal `bwread.c` in lockstep: 338,469 -> 272,474 cycles (~7.7 bytes a cycle).

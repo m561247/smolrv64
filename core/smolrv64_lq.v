@@ -52,6 +52,11 @@ module smolrv64_lq
     parameter VAW   = 39,              // Sv39: the VA an entry keeps beside its PA
     parameter SEQW  = 8,               // the op's sequence number (a trap restarts fetch at it)
     parameter PCHB  = 8,               // bits of the load's PC the wait table is indexed by (PC[PCHB:1])
+    parameter NW    = 1,               // loads allocated a cycle: a dispatch group's row
+    parameter NB    = 4,               // banks: the entry's low bits; a row's loads take one each
+    parameter RKB   = (NW > 1) ? $clog2(NW) : 1,   // derived: a rank among a row's loads
+    parameter BL    = $clog2(NB),                  // derived: the bank bits
+    parameter BRB   = IDXB - BL,                   // derived: the row bits
     // The memory map, for the D12 cross-check below only (smolrv64_lsu's LSU_DRAM_BASE / LRAM_*).
     // A unit bench with synthetic addresses declares everything memory: DRAM_BASE = 0.
     parameter [55:0] DRAM_BASE = 56'h8000_0000,
@@ -60,19 +65,21 @@ module smolrv64_lq
    (input  wire                  clk,
     input  wire                  reset,
 
-    // ---- allocate: at dispatch, program order, one per cycle ----
-    input  wire                  d_alloc,
-    input  wire [ROBB-1:0]       d_rob,
-    input  wire [PBITS-1:0]      d_prd,
-    input  wire [5:0]            d_rd,
-    input  wire                  d_rd_v,
-    input  wire [SQIB-1:0]       d_sqtag,     // store-seqno captured at the same dispatch
-    input  wire                  d_wt,        // the load's wait bit: it waits for older stores' unknown addresses
-    input  wire [VAW-1:0]        d_pc,        // the load's PC and seq, for a trap from its translation
-    input  wire [SEQW-1:0]       d_seq,
+    // ---- allocate: at dispatch, up to NW a cycle, writer j a dispatch slot ([j*w +: w]) ----
+    input  wire [NW-1:0]         d_alloc,
+    input  wire [NW*RKB-1:0]     d_rank,      // writer j's rank among the cycle's loads, in program order
+    input  wire [NW*ROBB-1:0]    d_rob,
+    input  wire [NW*PBITS-1:0]   d_prd,
+    input  wire [NW*6-1:0]       d_rd,
+    input  wire [NW-1:0]         d_rd_v,
+    input  wire [NW*SQIB-1:0]    d_sqtag,     // store-seqno captured at the same dispatch
+    input  wire [NW-1:0]         d_wt,        // the load's wait bit: it waits for older stores' unknown addresses
+    input  wire [NW*VAW-1:0]     d_pc,        // the load's PC and seq, for a trap from its translation
+    input  wire [NW*SEQW-1:0]    d_seq,
     output wire                  d_ready,
-    output wire                  d_ready2,    // room for two (the dispatch credit's)
-    output wire [IDXB-1:0]       d_idx,
+    output wire [NB*(BRB+1)-1:0] d_bfree,     // each bank's free entries, from flops (the dispatch credit's)
+    output wire [BL-1:0]         d_bp,        // the bank the next cycle's first load takes
+    output wire [NW*IDXB-1:0]    d_idx,       // writer j's entry
 
     // ---- fill: the address is translated; M lets go here ----
     // a_sent says the SAME cycle also handed the access to memory (see the header). The
@@ -209,7 +216,6 @@ module smolrv64_lq
    // pa: M's fill and the walker's answer each write it, three ports read it -- a bank per writer
    // (u_pa below). pc: read at one entry, but its wait-table bits at every one -- those are flops.
    reg [VAW-1:0]         va   [0:NENT-1];
-   reg [VAW-1:0]         pcm  [0:NENT-1];       // the load's PC, read at the fault pick
    reg [PCHB:1]          pch  [0:NENT-1];       // ...its wait-table bits, read at every entry
    reg [SEQW-1:0]        sqn  [0:NENT-1];
    reg [NENT-1:0]        tv, flt;             // translated / ...and the translation faulted
@@ -245,6 +251,8 @@ module smolrv64_lq
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; sent = {NENT{1'b0}};
                  wt = {NENT{1'b0}}; lnd = {NENT{1'b0}}; rpl = {NENT{1'b0}}; fwd = {NENT{1'b0}};
                  om = {(NENT*NENT){1'b0}}; cnt = {(IDXB+1){1'b0}}; end
+   initial if ((NB & (NB - 1)) != 0 || NB < NW || NENT % NB != 0 || ((NENT / NB) & (NENT / NB - 1)) != 0)
+      $fatal(1, "smolrv64_lq: %0d banks for %0d loads a row and %0d entries", NB, NW, NENT);
 
    // PROGRAM ORDER IS AN AGE MATRIX. An allocation sets its row to the live entries (all older)
    // and clears its column (younger than every one of them); a freed entry's bits are never read,
@@ -260,20 +268,52 @@ module smolrv64_lq
       end
    endfunction
 
-   // ANY FREE SLOT, the lowest. Loads land out of order (the tagged fast path; the random bench
-   // lands them in any order), so the next slot of a ring can hold a load still in flight while
-   // others are free; the age matrix keeps program order whichever slot an entry takes. A slot
-   // whose killed load is still in flight is free here: the LSU starts nothing on a tag whose
-   // response is still due (its o_v).
-   reg [IDXB-1:0] fs;
-   integer        fk;
-   always @* begin
-      fs = {IDXB{1'b0}};
-      for (fk = NENT - 1; fk >= 0; fk = fk - 1) if (~v[fk]) fs = fk[IDXB-1:0];
+   // ANY FREE SLOT OF ITS BANK, the lowest. Loads land out of order (the tagged fast path; the
+   // random bench lands them in any order), so the next slot of a ring can hold a load still in
+   // flight while others are free; the age matrix keeps program order whichever slot an entry
+   // takes. A row's loads take the banks in turn from the bank pointer (bp), in program order, so
+   // each of them is a different bank's (an entry's bank is its low bits) and every array the
+   // allocation writes takes one write a bank. A slot whose killed load is still in flight is free
+   // here: the LSU starts nothing on a tag whose response is still due (its o_v).
+   localparam integer ROWS = NENT / NB;
+   reg  [BL-1:0]   bp;
+   initial bp = {BL{1'b0}};
+   reg  [BRB-1:0]  bfr [0:NB-1];        // bank b's lowest free row
+   reg  [NB-1:0]   bhas;                // ...it has one
+   reg  [BRB:0]    bfc [0:NB-1];        // ...its free entries
+   integer         fb, fr;
+   always @* for (fb = 0; fb < NB; fb = fb + 1) begin
+      bfr[fb] = {BRB{1'b0}};  bhas[fb] = 1'b0;  bfc[fb] = {(BRB+1){1'b0}};
+      for (fr = ROWS - 1; fr >= 0; fr = fr - 1)
+         if (~v[fr*NB + fb]) begin bfr[fb] = fr[BRB-1:0];  bhas[fb] = 1'b1;  bfc[fb] = bfc[fb] + 1'b1; end
    end
-   assign d_ready   = (cnt != NENT[IDXB:0]);
-   assign d_ready2  = (cnt <= NENT[IDXB:0] - 2);
-   assign d_idx     = fs;
+   reg  [BL-1:0]   wbk [0:NW-1];        // writer j's bank...
+   reg  [IDXB-1:0] ws  [0:NW-1];        // ...and entry
+   reg  [NENT-1:0] wahead [0:NW-1];     // the cycle's loads ahead of writer j's, by entry
+   reg  [IDXB:0]   n_alloc;
+   integer         fj, fi2;
+   always @* begin
+      n_alloc = {(IDXB+1){1'b0}};
+      for (fj = 0; fj < NW; fj = fj + 1) begin
+         wbk[fj] = bp + d_rank[fj*RKB +: RKB];
+         ws[fj]  = {bfr[wbk[fj]], wbk[fj]};
+         n_alloc = n_alloc + {{IDXB{1'b0}}, d_alloc[fj]};
+      end
+      for (fj = 0; fj < NW; fj = fj + 1) begin
+         wahead[fj] = {NENT{1'b0}};
+         for (fi2 = 0; fi2 < NW; fi2 = fi2 + 1)
+            if (d_alloc[fi2] & (d_rank[fi2*RKB +: RKB] < d_rank[fj*RKB +: RKB])) wahead[fj][ws[fi2]] = 1'b1;
+      end
+   end
+   genvar gw;
+   generate for (gw = 0; gw < NW; gw = gw + 1) begin: g_widx
+      assign d_idx[gw*IDXB +: IDXB] = ws[gw];
+   end endgenerate
+   generate for (gw = 0; gw < NB; gw = gw + 1) begin: g_bfree
+      assign d_bfree[gw*(BRB+1) +: BRB+1] = bfc[gw];
+   end endgenerate
+   assign d_bp      = bp;
+   assign d_ready   = bhas[bp];             // room for the next load, the row's first
    assign occupancy = cnt;
    assign av_any    = |(v & av & ~lnd);
    genvar gd;
@@ -333,7 +373,6 @@ module smolrv64_lq
    assign f_rp  = rpl[fi];
    assign f_rob = rob[fi];
    assign f_fc  = fc[fi];
-   assign f_pc  = pcm[fi];
    assign f_seq = sqn[fi];
    // M's load can start its access in its fill pass whenever the entry is live and unfilled
    assign b_ok = v[b_idx] & ~av[b_idx];
@@ -386,7 +425,7 @@ module smolrv64_lq
 
    // THE KILL. The dead entries are the youngest live ones; their slots free.
    reg  [NENT-1:0] kmk, kds;
-   integer         kq, kw;
+   integer         kq, kw, aw;
    always @* begin
       for (kq = 0; kq < NENT; kq = kq + 1) begin
          kds[kq] = kdead(kd_v, kh, kb, rob[kq]);
@@ -425,15 +464,20 @@ module smolrv64_lq
             if (viol[kw] & v[kw]) rpl[kw] <= 1'b1;
          end
          if (x_v & x_take) begin sent[x_idx] <= 1'b1;  fwd[x_idx] <= x_fwd; end
-         if (d_alloc & d_ready) begin
-            v[fs] <= 1'b1; av[fs] <= 1'b0; sent[fs] <= 1'b0;  lnd[fs] <= 1'b0;  rpl[fs] <= 1'b0;  wt[fs] <= d_wt;
-            fwd[fs] <= 1'b0;
-            rob[fs] <= d_rob; prd[fs] <= d_prd; rdn[fs] <= d_rd;
-            rdv[fs] <= d_rd_v; sqt[fs] <= d_sqtag;  pch[fs] <= d_pc[PCHB:1];  sqn[fs] <= d_seq;
-            for (kw = 0; kw < NENT; kw = kw + 1) om[kw*NENT + fs] <= 1'b0;
-            om[fs*NENT +: NENT] <= v;
+         // a row's allocations: each its entry's fields, then every one's column cleared (younger
+         // than every live entry), then each one's row: the live entries and the row's loads ahead
+         for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw]) begin
+            v[ws[aw]] <= 1'b1;  av[ws[aw]] <= 1'b0;  sent[ws[aw]] <= 1'b0;  lnd[ws[aw]] <= 1'b0;  rpl[ws[aw]] <= 1'b0;
+            wt[ws[aw]] <= d_wt[aw];  fwd[ws[aw]] <= 1'b0;
+            rob[ws[aw]] <= d_rob[aw*ROBB +: ROBB];  prd[ws[aw]] <= d_prd[aw*PBITS +: PBITS];  rdn[ws[aw]] <= d_rd[aw*6 +: 6];
+            rdv[ws[aw]] <= d_rd_v[aw];  sqt[ws[aw]] <= d_sqtag[aw*SQIB +: SQIB];  pch[ws[aw]] <= d_pc[aw*VAW + 1 +: PCHB];
+            sqn[ws[aw]] <= d_seq[aw*SEQW +: SEQW];
          end
-         cnt <= cnt + {{IDXB{1'b0}}, (d_alloc & d_ready)} - gone_n;
+         for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw])
+            for (kw = 0; kw < NENT; kw = kw + 1) om[kw*NENT + ws[aw]] <= 1'b0;
+         for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw]) om[ws[aw]*NENT +: NENT] <= v | wahead[aw];
+         cnt <= cnt + n_alloc - gone_n;
+         bp  <= bp + n_alloc[BL-1:0];
 
          if (a_v) begin
             va[a_idx] <= a_va;  sz[a_idx] <= a_size;
@@ -469,7 +513,9 @@ module smolrv64_lq
       end
    end
 
-   always @(posedge clk) if (!reset & d_alloc & d_ready) pcm[fs] <= d_pc;
+   // the load's PC, read at the fault pick: a bank of the allocation's, one write each
+   smolrv64_bankq #(.W(VAW), .DEPTH(NENT), .NW(NW), .NR(1), .NB(NB), .PICK(1), .AB(IDXB)) u_pcm
+     (.clk(clk), .reset(reset), .wv(d_alloc), .wp(d_idx), .wd(d_pc), .rp(fi), .ro({BL{1'b0}}), .rd(f_pc));
 
    // D12 (2026-09-17): the "DRAM, idempotent, may issue speculatively" bit names the entry's OWN
    // address. smolrv64_lsu derives it from the translate; here it is recomputed from the PA the
@@ -501,13 +547,19 @@ module smolrv64_lq
          f_n = f_n + {{IDXB{1'b0}}, v_first[ia]};
       end
    end
+   integer ak, aj;
    always @(posedge clk) if (!reset) begin
-      if (d_alloc & ~d_ready)
-         $fatal(1, "smolrv64_lq: allocate into a full queue");
-      if (d_alloc & kd_v & ~flush)
+      for (ak = 0; ak < NW; ak = ak + 1) if (d_alloc[ak]) begin
+         if (~bhas[wbk[ak]])
+            $fatal(1, "smolrv64_lq: load %0d of the row allocates into full bank %0d (%0d live)", ak, wbk[ak], cnt);
+         for (aj = ak + 1; aj < NW; aj = aj + 1)
+            if (d_alloc[aj] & (d_rank[aj*RKB +: RKB] == d_rank[ak*RKB +: RKB]))
+               $fatal(1, "smolrv64_lq: loads %0d and %0d of the row share rank %0d", ak, aj, d_rank[ak*RKB +: RKB]);
+      end
+      if ((|d_alloc) & kd_v & ~flush)
          $fatal(1, "smolrv64_lq: an allocation while the kill holds");
-      if (d_alloc & d_ready & v[fs])
-         $fatal(1, "smolrv64_lq: allocate into live slot %0d", fs);
+      if (n_alloc > NB[IDXB:0])
+         $fatal(1, "smolrv64_lq: %0d loads in a row, %0d banks", n_alloc, NB);
       if (cnt != v_n)
          $fatal(1, "smolrv64_lq: the count %0d is not the live entries' %0d", cnt, v_n);
       if ((|v) && (f_n != {{IDXB{1'b0}}, 1'b1}))

@@ -562,7 +562,7 @@ module tb;
    // LQ-SIM: the load queue's occupancy summed per cycle, and the cycles the queue head has no
    // load-queue credit (smolrv64_core st_lq) by why: a head op in flight or in the IR (cbo_any: cbo),
    // every entry live (full),
-   // or one free but the IR's load takes it (two); and the entries live in those cycles by state: no address yet, an address but
+   // or room by the count but none in a bank the row's loads take (two); and the entries live in those cycles by state: no address yet, an address but
    // not sent (of them: an older store aliases it, or it is not translated yet), at memory, landed
    // and watched.
    localparam integer LQS_N = 1 << `SMOLRV64_LQB;
@@ -571,14 +571,24 @@ module tb;
                  lq_mem = 0; lq_lnd = 0; end
    wire [LQS_N-1:0] lq_v = dut.core.u_lq.v, lq_av = dut.core.u_lq.av, lq_sent = dut.core.u_lq.sent, lq_lnd_m = dut.core.u_lq.lnd;
    wire [31:0]      lq_cnt = 32'(dut.core.u_lq.cnt);
+   reg  [31:0]      lq_bmin;                      // the fewest free entries a bank of the LQ has (a row takes one a bank)
+   always @* begin : lqb
+      integer b, e;  reg [31:0] f;
+      lq_bmin = 32'hffffffff;
+      for (b = 0; b < dut.core.QNB; b = b + 1) begin
+         f = 0;
+         for (e = b; e < LQS_N; e = e + dut.core.QNB) if (!lq_v[e]) f = f + 1;
+         if (f < lq_bmin) lq_bmin = f;
+      end
+   end
    always @(posedge clk) if (!reset && meas) begin
       n_lqocc <= n_lqocc + 64'(lq_cnt);
       if (dut.core.st_lq) begin
          if (dut.core.cbo_any)     lq_cbo  <= lq_cbo + 1;
          else if (lq_cnt == LQS_N) lq_full <= lq_full + 1;
          else                      lq_two  <= lq_two + 1;
-         if (!dut.core.cbo_any && (lq_cnt < LQS_N - (dut.core.ir_ld ? 1 : 0)))
-            $fatal(1, "tb: the load queue refuses a credit with room by the count (%0d live, IR load %b)", lq_cnt, dut.core.ir_ld);
+         if (!dut.core.cbo_any && (lq_bmin >= 2))
+            $fatal(1, "tb: the load queue refuses a credit with two free entries in every bank (%0d live, IR loads %0d)", lq_cnt, dut.core.ir_ld);
          lq_noa  <= lq_noa  + 64'($countones(lq_v & ~lq_av));
          lq_wait <= lq_wait + 64'($countones(lq_v & lq_av & ~lq_sent & ~lq_lnd_m));
          lq_blk  <= lq_blk  + 64'($countones(lq_v & lq_av & ~lq_sent & ~lq_lnd_m & dut.core.u_lq.e_block));
@@ -961,7 +971,8 @@ module tb;
    end
    always @(posedge clk) if (!reset && lt_on && c >= lt_from) begin : ldtr
       reg al, fl, go, cn, ps, pf, ld, rs, kl;
-      al = dut.core.d_ld_alloc && dut.core.lq_d_ready && (dut.core.lq_d_idx == lt_ix);
+      al = 1'b0;
+      for (int k = 0; k < IW; k = k + 1) if (dut.core.g_ld[k] && (dut.core.s_lqi[k] == lt_ix)) al = 1'b1;
       fl = dut.core.m_lq_fill && (dut.core.m_lq_idx == lt_ix);
       go = dut.core.lsu_xo_early && (dut.core.m_lq_idx == lt_ix);
       cn = dut.core.sq_l_cancel[lt_ix];
@@ -1220,19 +1231,19 @@ module tb;
    endfunction
    // the group the IR's head would dispatch with the rules in rx relaxed: [0] loads, [1] stores, [2] unit
    function automatic integer ds_grp(input [2:0] rx);
-      reg [15:0] g0, gk;  reg [CRW-1:0] cr;  reg ok, fc, ld, st, rm;  integer k, n;
+      reg [15:0] g0, gk;  reg [CRW-1:0] cr;  reg ok, fc, rm;  integer k, n;
       cr = dut.core.fe.crd;  g0 = dut.core.fe.g[0];
       ok = dut.core.fe.take[0];  n = ok ? 1 : 0;
-      fc = ds_unit(g0);  ld = g0[dut.core.GC_LD];  st = g0[dut.core.GC_ST];
+      fc = ds_unit(g0);
       for (k = 1; k < IW; k = k + 1) begin
          gk = dut.core.fe.g[k];
-         rm = (~gk[dut.core.GC_I] | dut.core.fe.ia[k]) & (~gk[dut.core.GC_L] | cr[CR_L]) & (~gk[dut.core.GC_LD] | cr[CR_LD])
-            & (~gk[dut.core.GC_ST] | cr[CR_ST]) & (~gk[dut.core.GC_FC] | cr[CR_F + k]) & (~gk[dut.core.GC_M] | cr[CR_DIV]);
+         rm = (~gk[dut.core.GC_I] | dut.core.fe.ia[k]) & (~gk[dut.core.GC_L] | cr[CR_L]) & (~gk[dut.core.GC_LD] | cr[CR_LD + k])
+            & (~gk[dut.core.GC_ST] | cr[CR_ST + k]) & (~gk[dut.core.GC_FC] | cr[CR_F + k]) & (~gk[dut.core.GC_M] | cr[CR_DIV]);
          ok = ok & (32'(dut.core.fe.q_cnt) > k) & g0[dut.core.GC_PLAIN] & gk[dut.core.GC_PLAIN]
             & ~dut.core.fe.g[k-1][dut.core.GC_DCR] & ~(ds_unit(gk) & fc & ~rx[2])
-            & ~(gk[dut.core.GC_LD] & ld & ~rx[0]) & ~(gk[dut.core.GC_ST] & st & ~rx[1]) & cr[CR_ROB1 + k] & rm;
+            & cr[CR_ROB1 + k] & rm;
          if (ok) n = n + 1;
-         fc = fc | ds_unit(gk);  ld = ld | gk[dut.core.GC_LD];  st = st | gk[dut.core.GC_ST];
+         fc = fc | ds_unit(gk);
       end
       ds_grp = n;
    endfunction
@@ -1244,12 +1255,10 @@ module tb;
             g = dut.core.fe.g[k];
             if (!dut.core.fe.rule[k])
                dsj = (!dut.core.fe.g[0][dut.core.GC_PLAIN] || !g[dut.core.GC_PLAIN]) ? 0
-                   : dut.core.fe.g[k-1][dut.core.GC_DCR] ? 2
-                   : (g[dut.core.GC_LD] && dut.core.fe.c_ld[k-1]) ? 8
-                   : (g[dut.core.GC_ST] && dut.core.fe.c_st[k-1]) ? 9 : 1;
+                   : dut.core.fe.g[k-1][dut.core.GC_DCR] ? 2 : 1;
             else if (g[dut.core.GC_I] && !dut.core.fe.ia[k]) dsj = 3;   // its lane's (the lanes rotate)
-            else if (g[dut.core.GC_LD] && !cr[CR_LD])    dsj = 4;
-            else if (g[dut.core.GC_ST] && !cr[CR_ST])    dsj = 5;
+            else if (g[dut.core.GC_LD] && !cr[CR_LD + k]) dsj = 4;
+            else if (g[dut.core.GC_ST] && !cr[CR_ST + k]) dsj = 5;
             else if (g[dut.core.GC_FC] && !cr[CR_F + k]) dsj = 6;
             else if (g[dut.core.GC_M] && !cr[CR_DIV])    dsj = 7;
             else $fatal(1, "tb: slot %0d is cut with its group rule and every credit it needs (crd %b, class %h)", k, cr, g);
@@ -1510,13 +1519,13 @@ module tb;
    reg mq_tr_on;
    initial mq_tr_on = $test$plusargs("mq_trace");
    always @(posedge clk) if (!reset && mq_tr_on && trace_on)
-      $display("MQ c=%0d M v=%b ld=%b seq=%0d rob=%0d lqi=%0d dead=%b adv=%b | go=%b byp=%b rwin=%b uld=%b sli=%0d pk=%b/%0d/%0d | lm=%b%b%b lqi=%0d,%0d,%0d seq=%0d,%0d,%0d rob=%0d,%0d,%0d | la_v=%b | lq v=%b av=%b alloc=%b@%0d seq=%0d rob=%0d kmask=%b | kd=%b rel=%b frv=%b red=%b | land=%b@%0d",
+      $display("MQ c=%0d M v=%b ld=%b seq=%0d rob=%0d lqi=%0d dead=%b adv=%b | go=%b byp=%b rwin=%b uld=%b sli=%0d pk=%b/%0d/%0d | lm=%b%b%b lqi=%0d,%0d,%0d seq=%0d,%0d,%0d rob=%0d,%0d,%0d | la_v=%b | lq v=%b av=%b alloc=%b@%h kmask=%b | kd=%b rel=%b frv=%b red=%b | land=%b@%0d",
                c, dut.core.m_valid, dut.core.m_ld_nb, dut.core.m_seq, dut.core.m_rob_idx, dut.core.m_lq_idx, dut.core.m_dead, dut.core.m_advance,
                dut.core.s_go, dut.core.s_byp, dut.core.r_win, dut.core.u_ld, dut.core.s_li, dut.core.lq_pk_v, dut.core.lq_pk_idx, dut.core.lq_pk_seq,
                dut.core.l_lm[0], dut.core.l_lm[1], dut.core.l_lm[2], dut.core.l_lqi[0], dut.core.l_lqi[1], dut.core.l_lqi[2],
                dut.core.l_seq[0], dut.core.l_seq[1], dut.core.l_seq[2], dut.core.l_rob[0], dut.core.l_rob[1], dut.core.l_rob[2],
                dut.core.la_v,
-               dut.core.u_lq.v, dut.core.u_lq.av, dut.core.d_ld_alloc, dut.core.lq_d_idx, dut.core.gld_seq, dut.core.gld_rob, dut.core.lq_kmask,
+               dut.core.u_lq.v, dut.core.u_lq.av, dut.core.g_ld, dut.core.lq_d_idxv, dut.core.lq_kmask,
                dut.core.rob_kd_v, dut.core.fr_rel, dut.core.fr_v, dut.core.redirect,
                dut.core.ld_land, dut.core.ld_land_idx);
 

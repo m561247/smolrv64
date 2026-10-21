@@ -33,7 +33,7 @@ module tb;
    reg [PAW-1:0]    lq_a_pa=0;   reg [1:0] lq_a_size=2;  reg lq_a_signed=0, lq_a_fp=0, lq_a_unc=0;
    wire             lq_x_head;   // the LQ candidate's head compare (2026-09-17); unused here
    wire             lq_x_devwait; wire [NENT-1:0] sq_l_block_unk_q;   // counter-only outputs (2026-09-17)
-   wire             lq_d_ready2, sq_d_ready2;
+   wire [3:0]       lq_bfree;  wire lq_bp;  wire [IDXB:0] sq_free;
    wire             lq_uf_any, sq_uf_any;
    wire [NENT*PBITS-1:0] lq_e_dprd;
    wire             lq_pk_v, sq_pk_v;
@@ -81,10 +81,10 @@ module tb;
    wire [NENT-1:0] lq_kmask_nc, sq_kmask_nc;   // the kill is not exercised here
    wire            sq_c_fast_nc;               // the core's store register is not modelled: every drain is a handoff and a free
    wire [NENT*28-1:0] e_vpn_nc;  wire x_fwd_nc;  wire [NENT-1:0] l_fwd_nc;  wire [63:0] f_data_nc;   // forwarding is off here
-   smolrv64_lq #(.DRAM_BASE(56'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1)) u_lq
+   smolrv64_lq #(.DRAM_BASE(56'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1),.NB(2)) u_lq
      (.clk(clk),.reset(reset),
       .d_alloc(lq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(lq_d_rob),.d_prd(lq_d_prd),.d_rd(lq_d_rd),.d_rd_v(lq_d_rd_v),
-      .d_sqtag(lq_d_sqtag),.d_wt(1'b1),.d_ready(lq_d_ready),.d_ready2(lq_d_ready2),.d_idx(lq_d_idx),
+      .d_sqtag(lq_d_sqtag),.d_wt(1'b1),.d_rank(1'b0),.d_ready(lq_d_ready),.d_bfree(lq_bfree),.d_bp(lq_bp),.d_idx(lq_d_idx),
       .a_v(lq_a_v),.a_sent(lq_a_sent),.a_cancel(sq_l_cancel),.a_idx(lq_a_idx),.a_pa(lq_a_pa),.a_va(39'(lq_a_pa)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(lq_a_size),
       .a_signed(lq_a_signed),.a_fp(lq_a_fp),.a_unc(lq_a_unc),
       .e_off(e_off),.e_size(e_size),.e_tag(e_tag),.e_av(e_av),.e_wt(e_wt),.e_pch(e_pch),.e_acc(e_acc),.unk_q(sq_unk_q),.viol(sq_viol),.e_block(e_block),.x_block(lq_x_block),
@@ -102,7 +102,7 @@ module tb;
    // fills the load queue -- exactly smolrv64_core's m_lq_fill wiring
    smolrv64_sq #(.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.NWB(NWB),.LQN(NENT),.LQIB(IDXB)) u_sq
      (.clk(clk),.reset(reset),
-      .d_alloc(sq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(sq_d_rob),.d_dpreg(sq_d_dpreg),.d_rdy(sq_d_rdy),.d_ready(sq_d_ready),.d_ready2(sq_d_ready2),.d_idx(sq_d_idx),.d_tag(sq_d_tag), .av_any(sq_av_any),.uf_any(sq_uf_any),.ar({NENT{1'b1}}),.pk_v(sq_pk_v),.pk_idx(sq_pk_idx),.pk_seq(sq_pk_seq),
+      .d_alloc(sq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(sq_d_rob),.d_dpreg(sq_d_dpreg),.d_rdy(sq_d_rdy),.d_rank(1'b0),.d_ready(sq_d_ready),.d_free(sq_free),.d_idx(sq_d_idx),.d_tag(sq_d_tag), .av_any(sq_av_any),.uf_any(sq_uf_any),.ar({NENT{1'b1}}),.pk_v(sq_pk_v),.pk_idx(sq_pk_idx),.pk_seq(sq_pk_seq),
       .a_v(sq_a_v),.a_idx(sq_a_idx),.a_addr(sq_a_addr),.a_va(39'(sq_a_addr)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(sq_a_size),.a_unc(sq_a_unc),.a_mem(1'b1),
       .r_v(sq_r_v),.r_preg(sq_r_preg),.r_data(rfv[sq_r_preg]),
       .wb_v(wb_v),.wb_preg(wb_preg),.wb_data(wb_data),

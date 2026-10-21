@@ -583,7 +583,6 @@ module smolrv64_core
    assign rob_wix[4*ROB_IDXB-1:0] = {sq_kc_rob, ft_rob, l_wix[0], rob_w_idx};
    assign rob_wv[ROB_NW-1 -: 2] = {md_wb & ~(md_wr & few_int & ~(|by2)), cf_red_fire | fr_rel};
    assign rob_wix[ROB_NW*ROB_IDXB-1 -: 2*ROB_IDXB] = {md_rob, fr_rob};
-   wire                lq_d_ready2, sq_d_ready2;
    wire [IBF:0]        rf_free;
 `include "smolrv64_credits.vh"
    wire [CRW-1:0]      crd;               // the dispatch credits
@@ -891,7 +890,7 @@ module smolrv64_core
                             q_fault_cause, q_fault_hi,
                             q_alu_op, q_alu_w, q_alu_uw, q_op1_sel, q_op2_imm, q_res_link,
                             q_br_func, (dcr ? 1'b0 : q_mis_taken), (dcr ? 1'b1 : q_mis_nt),
-                            q_rs1_v, q_rs2_v, q_rs3_v, q_gc[GC_ORD], sq_d_idx, lq_d_idx};
+                            q_rs1_v, q_rs2_v, q_rs3_v, q_gc[GC_ORD], s_sqi[gs], s_lqi[gs]};
       assign s_v[gs] = fe_dv[gs];
       assign s_takev[gs] = fe_dv[gs] & d_take;       // a group dispatches whole
       assign s_cls_i[gs] = q_gc[GC_I];  assign s_cls_l[gs] = q_gc[GC_L];  assign s_cls_fc[gs] = q_gc[GC_FC];
@@ -1008,15 +1007,14 @@ module smolrv64_core
    // readiness and the ROB slot in flops (every entry's sources watch the wakes, the kill reads
    // every ROB slot)
    localparam integer FSQW = RN_PBITS + PLW;
-   localparam integer FBL = $clog2(IW), FBN = 1 << FBL;   // the banks: next_pow2(IW)
-   wire [FSQW-1:0]         fsq_rd [0:FBN-1];
+   localparam integer FBN = 1 << $clog2(IW);              // the banks: next_pow2(IW)
    reg  [ROB_IDXB-1:0]     fsq_rob [0:(1<<FSQB)-1];
    reg  [3*RN_PBITS-1:0]   fsq_ps  [0:(1<<FSQB)-1];
    reg  [2:0]              fsq_r   [0:(1<<FSQB)-1];
    reg  [FSQB-1:0]          fsq_hd, fsq_tl;
    reg  [FSQB:0]            fsq_n;
    initial begin fsq_hd = {FSQB{1'b0}}; fsq_tl = {FSQB{1'b0}}; fsq_n = {(FSQB+1){1'b0}}; end
-   wire [FSQW-1:0]          fsq_o = fsq_rd[fsq_hd[FBL-1:0]];        // the FIFO's oldest, the next head
+   wire [FSQW-1:0]          fsq_o;                                  // the FIFO's oldest, the next head
    wire [FQB-1:0]          fpq_n = {{(FQB-1){1'b0}}, stg_v_f} + {{(FQB-FSQB-1){1'b0}}, fsq_n};
    // The scheduler accepts the stage op when it has room; back-pressure to the frontend below.
    wire mv_f  = stg_v_f  & rf_ready;
@@ -1324,22 +1322,16 @@ module smolrv64_core
       end
    end
    // the banks: a group's FP ops take consecutive entries, so each bank takes at most one of them
+   wire [IW-1:0]      ft_wv;
+   wire [IW*FSQB-1:0] ft_wp;
+   wire [IW*FSQW-1:0] ft_wd;
    genvar gfb;
-   generate for (gfb = 0; gfb < FBN; gfb = gfb + 1) begin: fsqb
-      (* ram_style = "distributed" *) reg [FSQW-1:0] mem [0:(1<<FSQB)/FBN-1];
-      reg             wen;
-      reg [FSQB-1:0]  wix;
-      reg [FSQW-1:0]  wd;
-      integer         k;
-      always @* begin
-         wen = 1'b0;  wix = ft_ix[0];  wd = {s_prd_g[0], s_pl_in[0]};
-         for (k = 0; k < IW; k = k + 1)
-            if (ft_v[k] & (ft_ix[k][FBL-1:0] == gfb[FBL-1:0])) begin wen = 1'b1;  wix = ft_ix[k];  wd = {s_prd_g[k], s_pl_in[k]}; end
-      end
-      always @(posedge clk) if (wen) mem[wix[FSQB-1:FBL]] <= wd;
-      assign fsq_rd[gfb] = mem[fsq_hd[FSQB-1:FBL]];
+   generate for (gfb = 0; gfb < IW; gfb = gfb + 1) begin: fsqw
+      assign ft_wv[gfb] = ft_v[gfb];  assign ft_wp[gfb*FSQB +: FSQB] = ft_ix[gfb];
+      assign ft_wd[gfb*FSQW +: FSQW] = {s_prd_g[gfb], s_pl_in[gfb]};
    end endgenerate
-   initial if ((1 << FSQB) <= FBN) $fatal(1, "smolrv64_core: the F FIFO's %0d entries do not fill %0d banks", 1 << FSQB, FBN);
+   smolrv64_bankq #(.W(FSQW), .DEPTH(1 << FSQB), .NW(IW), .NR(1), .NB(FBN), .PICK(1), .AB(FSQB)) u_fsq
+     (.clk(clk), .reset(reset), .wv(ft_wv), .wp(ft_wp), .wd(ft_wd), .rp(fsq_hd), .ro({$clog2(FBN){1'b0}}), .rd(fsq_o));
    // every entry's sources against the registered wakes, then the pushed entries' dispatch state
    integer fse;
    always @(posedge clk) begin
@@ -1726,39 +1718,43 @@ module smolrv64_core
    wire                lsu_pt_done, lsu_pt_ack, lsu_pt_is_store, lsu_pt_ld_done, lsu_pt_ld_kill, lsu_xo_v, lsu_xo_unc, lsu_xo_mem;
    wire                lsu_pt_fast_done;  wire [LQ_IB-1:0] lsu_pt_rtag;   // the fast path's landing, by tag
    wire [55:0]         lsu_xo_pa;
-   wire [IW-1:0] g_st = s_takev & s_st_nb, g_ld = s_takev & s_ld_nb;   // the group's store and load
-   wire d_st_alloc = |g_st;                           // a group holds at most one store...
-   wire d_ld_alloc = |g_ld;                           // ...and one load
-   // each one's slot: its ROB slot, payload, data register and readiness, destination, pc and seq
-   reg  [ROB_IDXB-1:0] gst_rob, gld_rob;
-   reg  [PLW-1:0]      gst_pl, gld_pl;
-   reg  [RN_PBITS-1:0] gst_dpreg, gld_prd;
-   reg                 rdy_st, gld_rdv;
-   reg  [5:0]          gld_rd;
-   reg  [38:0]         gst_pc, gld_pc;
-   reg  [SEQW-1:0]     gst_seq, gld_seq;
-   reg                 gld_behind_st;                  // the load is younger than the group's store
-   integer             mqk, mqj;
-   always @* begin
-      gst_rob = s_rob[0];  gst_pl = s_pl_in[0];  gst_dpreg = s_prs2[0];  rdy_st = s_r2rdy[0];
-      gst_pc = s_pc[0][38:0];  gst_seq = s_seq[0];
-      gld_rob = s_rob[0];  gld_pl = s_pl_in[0];  gld_prd = s_prd_g[0];  gld_rd = s_rd[0];  gld_rdv = s_rd_vv[0];
-      gld_pc = s_pc[0][38:0];  gld_seq = s_seq[0];
-      gld_behind_st = 1'b0;
-      for (mqk = IW - 1; mqk >= 0; mqk = mqk - 1) begin
-         if (g_st[mqk]) begin
-            gst_rob = s_rob[mqk];  gst_pl = s_pl_in[mqk];  gst_dpreg = s_prs2[mqk];  rdy_st = s_r2rdy[mqk];
-            gst_pc = s_pc[mqk][38:0];  gst_seq = s_seq[mqk];
-         end
-         if (g_ld[mqk]) begin
-            gld_rob = s_rob[mqk];  gld_pl = s_pl_in[mqk];  gld_prd = s_prd_g[mqk];  gld_rd = s_rd[mqk];
-            gld_rdv = s_rd_vv[mqk];  gld_pc = s_pc[mqk][38:0];  gld_seq = s_seq[mqk];
-         end
+   // A ROW OF EACH: every slot's load (store) goes to its queue in the group's cycle, ranked by its
+   // program position among the group's loads (stores), from the IR's flops. A load's LQ entry is
+   // the queue's pick for its rank (one bank each), a store's SQ entry the tail plus its rank, and
+   // a load captures the store-seqno past the group's stores ahead of it.
+   localparam integer RKQ = (IW > 1) ? $clog2(IW) : 1;
+   localparam integer QNB = 1 << $clog2(IW);         // the queues' banks: a row's entries one each
+   wire [IW-1:0] g_st = s_takev & s_st_nb, g_ld = s_takev & s_ld_nb;   // the group's stores and loads
+   reg  [RKQ-1:0]       ld_ahead [0:IW-1], st_ahead [0:IW-1];   // the group's loads (stores) ahead of slot k
+   integer              mqk, mqj;
+   always @* for (mqk = 0; mqk < IW; mqk = mqk + 1) begin
+      ld_ahead[mqk] = {RKQ{1'b0}};  st_ahead[mqk] = {RKQ{1'b0}};
+      for (mqj = 0; mqj < IW; mqj = mqj + 1) if (s_v[mqj] & (s_pos[mqj] < s_pos[mqk])) begin
+         if (s_ld_nb[mqj]) ld_ahead[mqk] = ld_ahead[mqk] + 1'b1;
+         if (s_st_nb[mqj]) st_ahead[mqk] = st_ahead[mqk] + 1'b1;
       end
-      for (mqk = 0; mqk < IW; mqk = mqk + 1)
-         for (mqj = 0; mqj < IW; mqj = mqj + 1)
-            if (g_st[mqj] & g_ld[mqk] & (s_pos[mqj] < s_pos[mqk])) gld_behind_st = 1'b1;
    end
+   wire [IW*RKQ-1:0]      q_ldrk, q_strk;         // each slot's, packed for the queues' writers
+   wire [IW*ROB_IDXB-1:0] q_rob;
+   wire [IW*RN_PBITS-1:0] q_prs2;
+   wire [IW*39-1:0]       q_pc;
+   wire [IW*SEQW-1:0]     q_seq;
+   wire [IW*SQ_TB-1:0]    q_sqtag;
+   wire [IW-1:0]          q_wt;
+   wire [SQ_IB-1:0]       s_sqi [0:IW-1];         // slot k's SQ entry, if it is a store
+   wire [LQ_IB-1:0]       s_lqi [0:IW-1];         // ...its LQ entry, if a load
+   wire [IW*LQ_IB-1:0]    lq_d_idxv;
+   wire [IW*SQ_IB-1:0]    q_sqiv;
+   genvar gq;
+   generate for (gq = 0; gq < IW; gq = gq + 1) begin: qslot
+      assign q_ldrk[gq*RKQ +: RKQ] = ld_ahead[gq];  assign q_strk[gq*RKQ +: RKQ] = st_ahead[gq];
+      assign q_rob[gq*ROB_IDXB +: ROB_IDXB] = s_rob[gq];  assign q_prs2[gq*RN_PBITS +: RN_PBITS] = s_prs2[gq];
+      assign q_pc[gq*39 +: 39] = s_pc[gq][38:0];  assign q_seq[gq*SEQW +: SEQW] = s_seq[gq];
+      assign q_sqtag[gq*SQ_TB +: SQ_TB] = sq_d_tag + {{(SQ_TB-RKQ){1'b0}}, st_ahead[gq]};
+      assign s_sqi[gq] = sq_d_idx + {{(SQ_IB-RKQ){1'b0}}, st_ahead[gq]};
+      assign s_lqi[gq] = lq_d_idxv[gq*LQ_IB +: LQ_IB];
+      assign q_sqiv[gq*SQ_IB +: SQ_IB] = s_sqi[gq];
+   end endgenerate
    // The head entry may go to memory only once it IS the ROB head: that is the point at
    // which no older instruction can still trap and no redirect can still squash it.
    // A committed store drains whenever the port is free: it was released by the ROB's
@@ -1827,11 +1823,11 @@ module smolrv64_core
    end
 
    smolrv64_sq #(.NENT(SQ_N), .IDXB(SQ_IB), .PAW(56), .PBITS(RN_PBITS),
-             .ROBB(ROB_IDXB), .NWB(NWB_C), .LQN(LQ_N), .LQIB(LQ_IB), .SEQW(SEQW)) u_sq
+             .ROBB(ROB_IDXB), .NWB(NWB_C), .LQN(LQ_N), .LQIB(LQ_IB), .SEQW(SEQW), .NW(IW)) u_sq
      (.clk(clk), .reset(reset),
-      .d_alloc(d_st_alloc), .d_rob(gst_rob), .d_dpreg(gst_dpreg), .d_rdy(rdy_st),
-      .d_pc(gst_pc), .d_seq(gst_seq),
-      .d_ready(sq_d_ready), .d_ready2(sq_d_ready2), .d_idx(sq_d_idx), .d_tag(sq_d_tag), .av_any(sq_av_any),
+      .d_alloc(g_st), .d_rank(q_strk), .d_rob(q_rob), .d_dpreg(q_prs2), .d_rdy(s_r2rdy),
+      .d_pc(q_pc), .d_seq(q_seq),
+      .d_ready(sq_d_ready), .d_free(sq_free), .d_idx(sq_d_idx), .d_tag(sq_d_tag), .av_any(sq_av_any),
       .uf_any(sq_uf_any), .ar(sa_v), .pk_v(sq_pk_v), .pk_idx(sq_pk_idx), .pk_seq(sq_pk_seq),
       .a_v(m_sq_fill), .a_idx(m_sq_tag), .a_addr(lsu_xo_pa), .a_va(m_addr[38:0]), .a_tv(lsu_xo_tv | lsu_xo_flt),
       .a_flt(lsu_xo_flt), .a_fc(lsu_xo_fc), .a_size(m_mem_size),
@@ -1865,7 +1861,10 @@ module smolrv64_core
    wire                lq_x_fwd, lsu_fw_busy, lsu_fw_inj, lsu_fw_any;
    wire [LQ_IB-1:0]    lsu_fw_lt;
    wire [63:0]         sq_f_data;
-   wire [LQ_IB-1:0]    lq_d_idx, lq_x_idx;
+   wire [LQ_IB-1:0]    lq_x_idx;
+   wire [QNB*(LQ_IB-$clog2(QNB)+1)-1:0] lq_bfree;   // the LQ's free entries by bank, and its bank pointer
+   wire [$clog2(QNB)-1:0] lq_bp;
+   wire [SQ_IB:0]      sq_free;
    wire [55:0]         lq_x_pa;
    wire [1:0]          lq_x_size;
    wire [LQ_N*12-1:0]  lq_e_off;
@@ -1874,7 +1873,6 @@ module smolrv64_core
    wire [LQ_N-1:0]     lq_e_av, lq_e_block, lq_e_wt, lq_e_acc, sq_l_unk_q, sq_l_viol, sq_l_res_c, sq_l_res_a;
    wire [LQ_N*8-1:0]   lq_e_pch;
    wire                lq_f_rp;
-   wire                ld_wt;
    wire [SQ_TB-1:0]    lq_q_tag;
    wire [RN_PBITS-1:0] lq_l_prd;
    wire [5:0]          lq_l_rd;
@@ -1886,7 +1884,6 @@ module smolrv64_core
    wire                lq_x_devwait;        // counters: a device load waiting for the head
    wire d_ld_nb    = d_gq[GC_LD];  // plain load, rule C1
    // a load behind a store in the same cycle captures the tag AFTER that store's
-   wire [SQ_TB-1:0] ld_sqtag = sq_d_tag + {{SQ_IB{1'b0}}, gld_behind_st};
 
    // THE MEMORY-DEPENDENCE WAIT TABLE: a 2-bit saturating counter per load-PC hash. A load waits for
    // older stores' unknown addresses while its counter is 2 or 3, and goes ahead of them below.
@@ -1928,8 +1925,11 @@ module smolrv64_core
    wire [1:0]                md_new = md_a_q ? ((md_cur == 2'd3) ? 2'd3 : md_cur + 2'd1)
                                              : ((md_cur == 2'd0) ? 2'd0 : md_cur - 2'd1);
    wire [MDW_B-1:0]          rp_p   = sy_pc_w[MDW_B:1];
-   wire [1:0]                md_rd  = mdw[gld_pc[MDW_B:1]];
-   assign ld_wt = (`SMOLRV64_MDSPEC == 0) ? 1'b1 : (`SMOLRV64_MDSPEC == 2) ? 1'b0 : md_rd[1];
+   // a read per slot (a load in any of them): copies of the table, one write
+   generate for (gq = 0; gq < IW; gq = gq + 1) begin: mdr
+      wire [1:0] md_rd = mdw[s_pc[gq][MDW_B:1]];
+      assign q_wt[gq] = (`SMOLRV64_MDSPEC == 0) ? 1'b1 : (`SMOLRV64_MDSPEC == 2) ? 1'b0 : md_rd[1];
+   end endgenerate
    wire                      mw_fg = &mdw_age[13:0];           // the forget's step
    wire                      mw_we = rp_fire | md_v_q | mw_fg;
    wire [MDW_B-1:0]          mw_a  = rp_fire ? rp_p : md_v_q ? md_p_q : mdw_age[MDW_B+13:14];
@@ -1938,12 +1938,12 @@ module smolrv64_core
    always @(posedge clk) if (mw_we) mdw[mw_a] <= mw_d;
 
    smolrv64_lq #(.NENT(LQ_N), .IDXB(LQ_IB), .PAW(56), .PBITS(RN_PBITS),
-             .ROBB(ROB_IDXB), .SQIB(SQ_TB), .SEQW(SEQW), .LRAM_BASE(LBASE), .LRAM_LG2(LRAM_LG2)) u_lq
+             .ROBB(ROB_IDXB), .SQIB(SQ_TB), .SEQW(SEQW), .NW(IW), .NB(QNB), .LRAM_BASE(LBASE), .LRAM_LG2(LRAM_LG2)) u_lq
      (.clk(clk), .reset(reset),
-      .d_alloc(d_ld_alloc), .d_rob(gld_rob), .d_prd(gld_prd),
-      .d_rd(gld_rd), .d_rd_v(gld_rdv), .d_sqtag(ld_sqtag), .d_wt(ld_wt),
-      .d_pc(gld_pc), .d_seq(gld_seq),
-      .d_ready(lq_d_ready), .d_ready2(lq_d_ready2), .d_idx(lq_d_idx),
+      .d_alloc(g_ld), .d_rank(q_ldrk), .d_rob(q_rob), .d_prd(s_prd_gv),
+      .d_rd(s_rdv), .d_rd_v(s_rd_vv), .d_sqtag(q_sqtag), .d_wt(q_wt),
+      .d_pc(q_pc), .d_seq(q_seq),
+      .d_ready(lq_d_ready), .d_bfree(lq_bfree), .d_bp(lq_bp), .d_idx(lq_d_idxv),
       .a_v(m_lq_fill), .a_sent(lsu_xo_early), .a_cancel(sq_l_cancel), .a_idx(m_lq_idx),
       .a_pa(lsu_xo_pa), .a_va(m_addr[38:0]), .a_tv(lsu_xo_tv | lsu_xo_flt), .a_flt(lsu_xo_flt), .a_fc(lsu_xo_fc),
       .a_size(m_mem_size),
@@ -2186,14 +2186,14 @@ module smolrv64_core
    // queues keep the oldest unfilled entry as a pointer that steps when M takes it (uf_take), so M
    // takes the next one in the cycle it fills the last. The rest of the op rides in a record written at dispatch.
    localparam integer SPW = ROB_IDXB + PLW;        // {ROB slot, payload}
-   reg  [SPW-1:0] spl_ld [0:LQ_N-1];
-   reg  [SPW-1:0] spl_st [0:SQ_N-1];
-   // rs2 already in a register file at dispatch: the store queue reads it. Otherwise its snoop,
-   // armed at allocation, takes it from the writeback, so the two never overlap.
-   always @(posedge clk) begin
-      if (d_ld_alloc) spl_ld[lq_d_idx] <= {gld_rob, gld_pl};
-      if (d_st_alloc) spl_st[sq_d_idx] <= {gst_rob, gst_pl};
-   end
+   // A row's records land together: the LQ's in one bank each (its bank pointer), the SQ's at
+   // consecutive entries (the tail on), so each array is banked by the entry's low bits, one write
+   // a bank (smolrv64_bankq); M reads the one it takes.
+   wire [IW*SPW-1:0] spl_wd;
+   wire [SPW-1:0]    spl_ld_rd, spl_st_rd;
+   generate for (gq = 0; gq < IW; gq = gq + 1) begin: splw
+      assign spl_wd[gq*SPW +: SPW] = {s_rob[gq], s_pl_in[gq]};
+   end endgenerate
    initial begin la_v = {LQ_N{1'b0}}; sa_v = {SQ_N{1'b0}}; end
    // the arrived addresses: each lane writes its op's own entry, M reads the one it takes (a bank
    // per lane, smolrv64_mwram)
@@ -2235,7 +2235,11 @@ module smolrv64_core
    wire [LQ_IB-1:0]  s_li = r_win ? lq_pk_idx : by_li;                    // ...its queue entry
    wire [SQ_IB-1:0]  s_si = r_win ? sq_pk_idx : by_si;
    wire              s_go = s_win & m_advance & ~redirect;
-   wire [SPW-1:0]    s_rec = s_st ? spl_st[s_si] : spl_ld[s_li];
+   smolrv64_bankq #(.W(SPW), .DEPTH(LQ_N), .NW(IW), .NR(1), .NB(QNB), .PICK(1), .AB(LQ_IB)) u_spl_ld
+     (.clk(clk), .reset(reset), .wv(g_ld), .wp(lq_d_idxv), .wd(spl_wd), .rp(s_li), .ro({$clog2(QNB){1'b0}}), .rd(spl_ld_rd));
+   smolrv64_bankq #(.W(SPW), .DEPTH(SQ_N), .NW(IW), .NR(1), .NB(QNB), .PICK(1), .AB(SQ_IB)) u_spl_st
+     (.clk(clk), .reset(reset), .wv(g_st), .wp(q_sqiv), .wd(spl_wd), .rp(s_si), .ro({$clog2(QNB){1'b0}}), .rd(spl_st_rd));
+   wire [SPW-1:0]    s_rec = s_st ? spl_st_rd : spl_ld_rd;
    // THE HEAD-OP REGISTER. An AMO, LR/SC or CBO goes alone, so in slot A and lane A; the lane
    // generates its address and reads rs2 (an AMO's or SC's data), and the op waits here, its
    // record written at dispatch, for M, which runs it at the ROB head. One is in flight at a
@@ -3169,8 +3173,8 @@ module smolrv64_core
    wire hd_wait   = fe_hd_v & ~fe_hd_take & ~redirect_q & ~fr_v & ~dec_red_q;
    wire hd_sched  = (~fe_hd_gc[GC_I] | cr_i[fe_hd_lane]) & (~fe_hd_gc[GC_L] | cr_l) & (~fe_hd_gc[GC_FC] | cr_f[0])
                   & (~fe_hd_gc[GC_M] | cr_div);                      // the MD stage's room is a divide's
-   wire hd_sq     = fe_hd_gc[GC_ST] & ~cr_st;
-   wire hd_lq     = fe_hd_gc[GC_LD] & ~cr_ld;
+   wire hd_sq     = fe_hd_gc[GC_ST] & ~cr_st[0];
+   wire hd_lq     = fe_hd_gc[GC_LD] & ~cr_ld[0];
    wire st_dsp    = m_advance & hd_wait & ~dep_ld & ~dep_fp & ~st_rob;
    wire st_iq     = st_dsp & ~hd_sched;                              // the class's scheduler is full
    wire st_rn     = st_dsp &  hd_sched & rn_stall;                   // rename: a free list is low
@@ -4577,8 +4581,8 @@ module smolrv64_core
    wire [NL-1:0] ir_i = s_v & s_cls_i;              // the IR's group holds lane k's op
    wire       ir_l  = |(s_v & s_cls_l);
    wire [3:0] ir_f  = ones_nl(s_v & s_cls_fc);             // the IR group's FP ops: any number
-   wire       ir_ld = |(s_v & s_ld_nb);
-   wire       ir_st = |(s_v & s_st_nb);
+   wire [3:0] ir_ld = ones_nl(s_v & s_ld_nb);             // the IR group's loads and stores: any number
+   wire [3:0] ir_st = ones_nl(s_v & s_st_nb);
    wire [3:0] ir_n  = ones_nl(s_v);
    wire [ROB_IDXB-ROB_CB:0] rob_inflt = {1'b0, rob_occ} + {{(ROB_IDXB-ROB_CB){1'b0}}, |s_v};   // rows: the ROB's and the IR group's
    reg  [NL-1:0] cr_i;                                 // ...and lane k has room for one more
@@ -4642,9 +4646,24 @@ module smolrv64_core
          $fatal(1, "smolrv64_core: the MD stage completes a divide (rob %0d) that is not in flight", md_rob);
    end
    wire cr_div = ~(&dt_v) & ~((|dt_v) & ir_m);
-   wire cr_ld = ~cbo_any & (ir_ld ? lq_d_ready2 : lq_d_ready);
-   wire cr_st = ~cbo_any & (ir_st ? sq_d_ready2 : sq_d_ready);
-   wire cr_cbo = ~lq_uf_any & ~sq_uf_any & ~ir_ld & ~ir_st;
+   // A load or store at slot position k with every slot before it one too: the SQ has room past
+   // the IR's stores; the LQ's banks from its pointer past the IR's loads each have an entry beyond
+   // the IR's (a position p takes bank bp + p, the p/QNB-th time round)
+   localparam integer LBW = LQ_IB - $clog2(QNB) + 1;
+   reg  [IW-1:0] cr_ld, cr_st;
+   reg  [3:0]    crp;
+   reg  [$clog2(QNB)-1:0] crb;
+   integer       crr;
+   always @* for (crk = 0; crk < IW; crk = crk + 1) begin
+      cr_ld[crk] = ~cbo_any;
+      for (crr = 0; crr <= crk; crr = crr + 1) begin
+         crp = ir_ld + crr[3:0];
+         crb = lq_bp + crp[$clog2(QNB)-1:0];
+         if ({{(8-LBW){1'b0}}, lq_bfree[crb*LBW +: LBW]} <= {4'd0, crp} / QNB) cr_ld[crk] = 1'b0;
+      end
+      cr_st[crk] = ~cbo_any & ({{(7-SQ_IB){1'b0}}, sq_free} > {4'd0, ir_st} + crk[7:0]);
+   end
+   wire cr_cbo = ~lq_uf_any & ~sq_uf_any & (ir_ld == 4'd0) & (ir_st == 4'd0);
    reg  [IW-1:0] cr_rob;                              // a ROB row for the group (every bit)
    always @* for (crk = 0; crk < IW; crk = crk + 1) cr_rob[crk] = rob_inflt < ROB_ROWS;   // a row for the group
    // the head pops nothing while dispatch is frozen (what the IR holds then is the wrong path and
@@ -4762,10 +4781,8 @@ module smolrv64_core
    wire [GHL-1:0] fe_red_ghr = (m_red_fire | sy_red) ? {GHL{1'b0}} : fr_set ? fr_ghr : dec_ghr;
    always @(posedge clk) fe_red_ghr_q <= fe_red_ghr;
    always @(posedge clk) if (!reset) begin
-      // a group dispatches whole and holds at most one load, one store and one divide
+      // a group dispatches whole and holds at most one divide
       if (|(s_takev & ~s_v))           $fatal(1, "smolrv64_core: a slot dispatched without an instruction");
-      if ((ones_nl(g_st) > 4'd1) | (ones_nl(g_ld) > 4'd1))
-         $fatal(1, "smolrv64_core: two allocations into one memory queue");
       if (ones_nl(s_md) > 4'd1)        $fatal(1, "smolrv64_core: two divides in one group");
    end
 

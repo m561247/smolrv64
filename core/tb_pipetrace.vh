@@ -120,8 +120,8 @@
          else if (!cr[CR_ROB1 + k])                        head_why = "O";
          else if ((g[dut.core.GC_I] & !dut.core.fe.ia[k]) | (g[dut.core.GC_FC] & !cr[CR_F + k]) | (g[dut.core.GC_M] & !cr[CR_DIV]))
                                                            head_why = "I";   // its lane's scheduler, the FP queue, the MD stage
-         else if (g[dut.core.GC_ST] & !cr[CR_ST])          head_why = "S";
-         else if (g[dut.core.GC_LD] & !cr[CR_LD])          head_why = "L";
+         else if (g[dut.core.GC_ST] & !cr[CR_ST + k])      head_why = "S";
+         else if (g[dut.core.GC_LD] & !cr[CR_LD + k])      head_why = "L";
          else                                              head_why = "?";
       end
    endfunction

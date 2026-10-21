@@ -137,10 +137,10 @@ speculation, front-end or back-end, and a cause beneath each. The stall counters
 Nothing after the decoupling queue holds. The queue head forms a dispatch group of up to three
 instructions that may go together: every member plain (a serialising op, `fence.i`, a CBO, an
 AMO, a CSR op, a trap at dispatch or the interrupt pseudo-op goes alone), at most one divide
-(the MD stage tracks two in flight), one load and one store (the LQ's and SQ's single allocation
-ports), any number of FP ops (the F stage takes a group's together, §2's credits), and nothing
+(the MD stage tracks two in flight), any number of loads, stores and FP ops (the LQ, the SQ and
+the F stage take a group's together, the credits below counting each slot position), and nothing
 behind a CTI that redirects fetch at decode (`smolrv64_gclass`, read from the queue record). A
-load behind a store in its group takes the store-seqno after the store's.
+load takes the store-seqno past its group's stores ahead of it.
 
 **The lanes rotate.** Instruction j of a group goes to lane `(lc + j) % IW`, `lc` the lane the
 next instruction takes, so consecutive instructions go to consecutive lanes whatever the groups'
@@ -160,10 +160,11 @@ and the boot retires 3.82% more (52,794,871 against 50,850,470). The GB5 checkpo
 retires each) take 11.89% fewer cycles in Navigation, 6.79% in HTML5, 6.18% in SQLite, 1.45% in
 PDF Rendering and 0.03% in Camera. A member pops only with a **credit** for everything it allocates, from
 flops, counted against what is already between the head and there: the ROB against the IR
-group, the LQ and SQ against the IR's load or store, each lane's scheduler against its
-dispatch-stage register and the IR's op, the F stage against its FIFO (below) and the IR's FP
-ops, per slot position: an FP op at position k has room with every slot before it an FP op too,
-and a full stage still takes one a cycle while the scheduler has room for two (`crd`, `CR_*`; this
+group, each lane's scheduler against its dispatch-stage register and the IR's op, and per slot
+position (room for the op at position k with every slot before it of its kind too) the SQ against
+the IR's stores, the LQ's banks its loads would take against the IR's loads in them (§8), and the
+F stage against its FIFO (below) and the IR's FP ops, a full stage still taking one a cycle while
+the scheduler has room for two (`crd`, `CR_*`; this
 cycle's frees are not credited). The IR loads every cycle and
 dispatches the next, and a lane's dispatch-stage register never waits for its scheduler; both are
 always-on assertions. **The F stage is a FIFO of 8** (`FQ`) whose head is the register its
@@ -1104,8 +1105,9 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   file at allocation (`d_rdy`) is fetched by the SQ's data read: it registers its oldest entry
   with an address still waiting for one, and reads that preg on M's port `ra2` (which reads the
   integer and FP files) the next cycle. A value produced later comes from the snoop, armed at
-  allocation; the two never meet (asserted). `ra2` is the SQ's alone. **One entry's bytes land a
-  cycle**, so the data array is distributed RAM with one write (§10.1): the data read's when one
+  allocation; the two never meet (asserted). A group's stores take the entries from the tail on,
+  in program order, so their records bank by entry (`spl_st`, a `smolrv64_bankq`) and each
+  arms its own snoop. `ra2` is the SQ's alone. **One entry's bytes land a cycle**, so the data array is distributed RAM with one write (§10.1): the data read's when one
   lands, else the oldest entry a writeback names; an entry the landing leaves out keeps `dv` clear
   and is fetched by the data read, its value being in a register file by then. 60 M lockstep boot:
   9,181,990 landings and 667,265 entries left out, 46,498,426 -> 46,473,281 retires (-0.05%); 300 M:
@@ -1337,10 +1339,14 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   - **The alias matrix compares page offsets,** VA[11:0] = PA[11:0]. No queued access crosses a
     page, so two in one page compare exactly; synonyms share the offset, so they never miss each
     other; and the test runs the cycle the VA arrives, whatever the walker does.
-- **A load takes any free entry; program order is an age matrix.** An allocation takes the lowest
-  free slot, sets its row to the live entries (all older) and clears its column; every "oldest of
-  these" (the access candidate, the walker's and the fault's picks, M's fill pick) is the member no
-  other member is older than. Loads land out of order, so a ring's next slot could hold a load
+- **A load takes any free entry of its bank; program order is an age matrix.** The LQ is four
+  banks (an entry's low bits); a group's loads take them in turn from a bank pointer, in program
+  order, each the lowest free entry of its bank, so a row of loads allocates in one cycle and every
+  array the allocation writes takes one write a bank (`spl_ld` and `pcm` are `smolrv64_bankq`s;
+  the fields read at every entry are flops). An allocation sets its row to the live entries and
+  the row's loads ahead of it (all older) and clears its column; every "oldest of these" (the
+  access candidate, the walker's and the fault's picks, M's fill pick) is the member no other
+  member is older than. Loads land out of order, so a ring's next slot could hold a load
   still in flight while others were free: on the GB5 checkpoint slices 76% (Navigation) to 88%
   (SQLite) of the cycles the queue head had no load-queue credit had room by the count. Free-slot
   allocation against the ring: those slices -0.62% of their cycles (Navigation -0.96%, HTML5
@@ -1774,14 +1780,14 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `rob_ffr` | `smolrv64_core` | 256 (192 used) | 5 | 960 | LUTRAM | an FP op's exception flags by ROB slot: 1W (the landing result), 1R per retire port |
 | `rob_ffv` | `smolrv64_core` | 256 (192 used) | 1 | 192 | flops | the slot's FP result landed: cleared by its allocation, set by the landing |
 | `mdw` | `smolrv64_core` | 256 | 2 | 512 | LUTRAM | the memory-dependence wait table: read at dispatch by the load's PC and by training, 1W (a replay, else one training event, else the forget's step; §8) |
-| `spl_ld`, `spl_st` | `smolrv64_core` | 16, 32 | 8+274 = 282 | 13 536 | LUTRAM | a lane load's or store's record by LQ/SQ entry: 1W dispatch, 1R at M's pick (§8) |
+| `spl_ld`, `spl_st` | `smolrv64_core` | 16, 32 | 8+274 = 282 | 13 536 | LUTRAM | a lane load's or store's record by LQ/SQ entry: four banks by entry, 1W each (a group's row), 1R at M's pick (§8) |
 | `u_la`, `u_sa` `wb[0..IW-1].mem` | `smolrv64_mwram` (in `smolrv64_core`) | 16, 32 a bank | 64 | 9 216 | LUTRAM | the lanes' arrived VAs, a bank per lane (1W, its lane), 1R at M's pick; `lvt` (2 bits an entry, flops) names the bank that wrote the entry last (§8) |
 | `la_v`, `sa_v` | `smolrv64_core` | 16, 32 | 1 | 48 | flops | an entry's address has arrived and M has not taken it |
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 274 | 10 412 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each; the immediate is stored as its low 32 bits, which it sign-extends (the queue's write asserts it), and a fetch fault's address as one bit, set for a straddler's pc+2 (`imm` and `fault_tval` are rebuilt from them) |
 | `ipend`, `fpend` | `smolrv64_pending` | 192, 128 | 1 | 320 | flops | readiness, a table per file indexed by {shard, index}: 18R that read both and let the number's file pick (the slots' rs1/rs2, 6; the lanes' operands, 6), 6R of the FP table alone (the slots' rs3, 3; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 3 sets, 5 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
 | `u_pa` `wb[0..1].mem` | `smolrv64_mwram` (in `smolrv64_lq`) | 16 a bank | 56 | 1 792 | LUTRAM | the load queue's PA, a bank per writer (M's fill, the walker's answer), 3R (the start's entry, the landing's two candidates); `lvt` (a bit an entry, flops) names the writer |
-| `pcm` | `smolrv64_lq` | 16 | 39 | 624 | LUTRAM | a load's PC: 1W dispatch, 1R the fault pick; `pch` (16 × 8 flops) keeps its wait-table bits, which every entry reports |
+| `pcm` | `smolrv64_lq` | 16 | 39 | 624 | LUTRAM | a load's PC: four banks by entry, 1W each at dispatch, 1R the fault pick; `pch` (16 × 8 flops) keeps its wait-table bits, which every entry reports |
 | `om` | `smolrv64_lq` | 16 | 16 | 256 | flops | the load queue's program order: an entry's row names the entries older than it, written at its allocation (the row the live entries, its column cleared); every "oldest of these" reads it |
 | `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the handoff entry, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
 | `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the handoff entry; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
@@ -2117,7 +2123,8 @@ dispatch behind slot k-1: a group rule, or the credit it lacks), `FWD-SIM` (the 
 queue holds, by whether they can forward; an older store at the same offset in another page,
 which the offset compare holds it behind, apart), `SQ-DRAIN` (the store queue's head: the door
 unaccepted, drainable with the LSU idle, not drainable), `LQ-SIM` (the load queue's occupancy, its no-credit
-cycles by why: a head op in flight or in the IR, full, or room for one beside the IR's load; and
+cycles by why: a head op in flight or in the IR, full, or room by the count but none in a bank its
+row would take; and
 the entries then by state), `STLK-SIM` (the D$'s store queue: the store lookup's writes and merges,
 what its head waits for, its misses, and a plain store's outcome in the main lookup), `PORT-SIM`
 (a ready queued load the port
@@ -2325,15 +2332,14 @@ closure above is real; the branch cannot ship until that defect is found (handof
   reads 2.4 bytes a cycle from DRAM, 26.7 cycles a line, with under two of the 8 MSHRs busy;
   counted over the whole run, its 64 MiB fill included, the queue holds 13.3 entries on average
   and its head waits for a credit in 60% of the cycles.
-- **A dispatch group holds one load, one store and one divide, and a cut slot cuts every slot
-  behind it** (`smolrv64_frontend` `rule`; the load and store queues each allocate one entry a
-  cycle). FP ops fill a group (2026-10-20, `docs/PLAN-2026-10-20-dispatch-groups.md`, which takes
-  loads and stores next). A run of loads dispatches one a cycle with nothing beside it: `bw r 32`
-  (`tools/board/membench`, da5d52b3) reads 5.79 bytes a cycle against the D$ port's 8, and its
-  bare-metal twin (`workloads/rvbench/local/bwread.c`) in lockstep dispatches one instruction in
-  59% of its cycles, slot B cut by the rule in 197,046 of 338,454, every load still starting in M's
-  cycle. Tommy, 2026-10-20: a major pain point -- many microbenchmarks are explained by it -- and
-  a group is to be cut only where it must be: beside a system op.
+- **A dispatch group holds one divide, and a cut slot cuts every slot behind it**
+  (`smolrv64_frontend` `rule`). Loads, stores and FP ops fill a group (2026-10-20,
+  `docs/PLAN-2026-10-20-dispatch-groups.md`). A run of loads dispatches a row a cycle and M
+  fills one a cycle: the bare-metal `workloads/rvbench/local/bwread.c` (64 passes over 32 KiB) in
+  lockstep takes 272,474 cycles, about 7.7 bytes a cycle against the D$ port's 8, where one load a
+  group took 338,454 (slot B cut by the rule in 197,046 of them); the LQ's credit now holds slot B
+  in 97,643, its 16 entries filling while M drains one a cycle. Tommy, 2026-10-20: a group is cut
+  only where it must be, beside a system op.
 - **One load lookup a cycle.** Stores have a lookup of their own (§9.1), so a ready load waits for
   the D$ in 0.9% (SQLite) to 1.7% (PDF Rendering) of the GB5 checkpoint slices' cycles, against 3.6%
   to 35.9% with one lookup for both. Two or more loads are ready to go to memory in 10% of
@@ -2354,7 +2360,10 @@ closure above is real; the branch cannot ship until that defect is found (handof
   below 1% of cycles in all four and the stall moves on: Navigation's ROB fills (0 -> 10.7%)
   with loads waiting on older stores (a load blocked in 19.5% -> 35.2% of cycles), PDF
   Rendering's ROB and load queue (24.5% and 21.9%).
-- **The FP scheduler holds `NF`=8 ops, behind a FIFO of `FQ`=8** (§2). The FIFO, not a bigger
+- **The FP scheduler holds `NF`=8 ops, behind a FIFO of `FQ`=8** (§2), which takes a group's FP
+  ops together: one a group, against a row, cost GB5's 77 SimPoints 2.48% of the single-core cycles
+  (2026-10-20, d3dd7b52: Structure from Motion -5.42%, Gaussian Blur -5.00%, Camera -2.74%, Rigid
+  Body -1.67%; the integer subtests within 0.06%). The FIFO, not a bigger
   scheduler: GB5 slices restored from Simmerv checkpoints (§11.2), in cycles, FIFO 1 -> 8: Camera
   39,230,305 -> 32,826,256 (-16.3%), Gaussian Blur 39,653,597 -> 33,357,181 (-15.9%), Structure from
   Motion 36,336,791 -> 29,204,556 (-19.6%); Navigation unchanged. `be:iq-full` falls from ~21% to

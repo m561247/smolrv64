@@ -17,8 +17,9 @@
 //
 // The stimulus is a random program-order stream of loads and stores over a handful of
 // addresses in one line (sizes 1/2/4/8, so partial overlaps are common), driven the way
-// smolrv64_core drives the queues: dispatch in order (a load captures the store-seqno the queue
-// hands out that cycle, a full store queue stalls a store's dispatch but not a load's),
+// smolrv64_core drives the queues: dispatch in order, a row of up to NW ops a cycle (a load
+// captures the store-seqno past the row's stores ahead of it; a row stops at the first op its
+// queue has no room for, so a full store queue stalls a store's dispatch but not a load's),
 // addresses in order (M is in-order for memory ops), stores commit in order once every older
 // load has landed (the ROB head), loads land in any order, and an occasional wholesale flush
 // when nothing is in flight. One action per cycle, chosen at random among those enabled.
@@ -27,18 +28,20 @@
 // Configuration is stated in the output: NENT=4 both queues, small, so both fill and wrap all the time.
 module tb;
    localparam NENT=4, IDXB=2, PAW=56, PBITS=9, ROBB=4, NWB=3;
+   localparam NW=2;                           // a row: two ops dispatch together (the LQ's 2 banks of 2)
    reg clk=0, reset=1, flush=0;
    always #5 clk = ~clk;
 
    // ---- load queue ports ----
-   reg              lq_d_alloc=0, lq_a_v=0, lq_a_sent=0, lq_x_take=0, lq_l_v=0;
-   reg [ROBB-1:0]   lq_d_rob=0;  reg [PBITS-1:0] lq_d_prd=0;  reg [5:0] lq_d_rd=0;  reg lq_d_rd_v=1;
-   reg [IDXB:0]     lq_d_sqtag=0;
+   reg              lq_a_v=0, lq_a_sent=0, lq_x_take=0, lq_l_v=0;
+   reg [NW-1:0]     lq_d_alloc=0, lq_d_rank=0;
+   reg [NW*ROBB-1:0] lq_d_rob=0;  reg [NW*PBITS-1:0] lq_d_prd=0;
+   reg [NW*(IDXB+1)-1:0] lq_d_sqtag=0;
    reg [IDXB-1:0]   lq_a_idx=0, lq_b_idx=0, lq_l_idx=0;
    reg [PAW-1:0]    lq_a_pa=0;   reg [1:0] lq_a_size=2;  reg lq_a_signed=0, lq_a_fp=0, lq_a_unc=0;
    wire             lq_x_head;   // the LQ candidate's head compare (2026-09-17); unused here
    wire             lq_x_devwait; wire [NENT-1:0] sq_l_block_unk_q;   // counter-only outputs (2026-09-17)
-   wire             lq_d_ready2, sq_d_ready2;
+   wire [3:0]       lq_bfree;  wire lq_bp;  wire [IDXB:0] sq_free;
    wire             lq_uf_any, sq_uf_any;
    wire [NENT*PBITS-1:0] lq_e_dprd;
    wire             lq_pk_v, sq_pk_v;
@@ -49,7 +52,7 @@ module tb;
    wire [NENT*28-1:0] e_vpn;
    wire             lq_x_fwd;                 // ...the candidate taking its bytes from a store...
    wire [63:0]      sq_f_data;                // ...and those bytes
-   wire [IDXB-1:0]  lq_d_idx, lq_x_idx;  wire [IDXB:0] lq_q_tag;
+   wire [NW*IDXB-1:0] lq_d_idx;  wire [IDXB-1:0] lq_x_idx;  wire [IDXB:0] lq_q_tag;
    wire [PAW-1:0]   lq_x_pa, lq_l_pa;  wire [1:0] lq_x_size;
    wire [PBITS-1:0] lq_l_prd;  wire [5:0] lq_l_rd;  wire [ROBB-1:0] lq_l_rob;  wire [IDXB:0] lq_occ;
    wire [NENT*12-1:0] e_off;
@@ -69,10 +72,11 @@ module tb;
       $fatal(1, "FAIL: a walker or trap request from translated fills (lk %b sk %b lf %b sf %b)", lk_v, sk_v, lf_v, sf_v);  wire [NENT*2-1:0] e_size;  wire [NENT*(IDXB+1)-1:0] e_tag;
    wire [NENT-1:0]  e_av, e_block;
    // ---- store queue ports ----
-   reg              sq_d_alloc=0, sq_a_v=0, sq_a_unc=0, sq_c_take=0, sq_k_take=0;
+   reg              sq_a_v=0, sq_a_unc=0, sq_c_take=0, sq_k_take=0;
+   reg [NW-1:0]     sq_d_alloc=0, sq_d_rank=0;
    reg  [63:0]      rfv [0:(1<<PBITS)-1];      // the register file the store queue's data read answers from
    wire             sq_r_v;  wire [PBITS-1:0] sq_r_preg;
-   reg [ROBB-1:0]   sq_d_rob=0;  reg [PBITS-1:0] sq_d_dpreg=0;
+   reg [NW*ROBB-1:0] sq_d_rob=0;  reg [NW*PBITS-1:0] sq_d_dpreg=0;
    reg [IDXB-1:0]   sq_a_idx=0;  reg [PAW-1:0] sq_a_addr=0;  reg [1:0] sq_a_size=2;
    reg [NWB-1:0]    wb_v=0;  reg [NWB*PBITS-1:0] wb_preg=0;  reg [NWB*64-1:0] wb_data=0;
    wire             sq_d_ready, sq_c_v, sq_c_unc, ld_older, sq_kc_v, sq_av_any, lq_av_any;
@@ -85,10 +89,10 @@ module tb;
 
    wire [NENT-1:0] lq_kmask_nc, sq_kmask_nc;   // the kill is not exercised here
    wire            sq_c_fast_nc;               // the core's store register is not modelled: every drain is a handoff and a free
-   smolrv64_lq #(.DRAM_BASE(56'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1)) u_lq
+   smolrv64_lq #(.DRAM_BASE(56'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1),.NW(NW),.NB(2)) u_lq
      (.clk(clk),.reset(reset),
-      .d_alloc(lq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(lq_d_rob),.d_prd(lq_d_prd),.d_rd(lq_d_rd),.d_rd_v(lq_d_rd_v),
-      .d_sqtag(lq_d_sqtag),.d_wt(1'b1),.d_ready(lq_d_ready),.d_ready2(lq_d_ready2),.d_idx(lq_d_idx),
+      .d_alloc(lq_d_alloc),.d_pc({NW{39'd0}}),.d_seq({NW{8'd0}}),.d_rob(lq_d_rob),.d_prd(lq_d_prd),.d_rd({NW{6'd0}}),.d_rd_v({NW{1'b1}}),
+      .d_sqtag(lq_d_sqtag),.d_wt({NW{1'b1}}),.d_rank(lq_d_rank),.d_ready(lq_d_ready),.d_bfree(lq_bfree),.d_bp(lq_bp),.d_idx(lq_d_idx),
       .a_v(lq_a_v),.a_sent(lq_a_sent),.a_cancel(sq_l_cancel),.a_idx(lq_a_idx),.a_pa(lq_a_pa),.a_va(39'(lq_a_pa)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(lq_a_size),
       .a_signed(lq_a_signed),.a_fp(lq_a_fp),.a_unc(lq_a_unc),
       .e_off(e_off),.e_size(e_size),.e_tag(e_tag),.e_av(e_av),.e_wt(e_wt),.e_pch(e_pch),.e_acc(e_acc),.unk_q(sq_unk_q),.viol(sq_viol),.e_block(e_block),.x_block(lq_x_block),
@@ -101,9 +105,9 @@ module tb;
       // every bench address is DRAM (speculates freely), so the device head-gate is never taken
       .a_mem(1'b1),.rob_head({ROBB{1'b0}}));
 
-   smolrv64_sq #(.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.NWB(NWB),.LQN(NENT),.LQIB(IDXB)) u_sq
+   smolrv64_sq #(.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.NWB(NWB),.LQN(NENT),.LQIB(IDXB),.NW(NW)) u_sq
      (.clk(clk),.reset(reset),
-      .d_alloc(sq_d_alloc),.d_pc(39'd0),.d_seq(8'd0),.d_rob(sq_d_rob),.d_dpreg(sq_d_dpreg),.d_rdy(1'b1),.d_ready(sq_d_ready),.d_ready2(sq_d_ready2),.d_idx(sq_d_idx),.d_tag(sq_d_tag), .av_any(sq_av_any),.uf_any(sq_uf_any),.ar({NENT{1'b1}}),.pk_v(sq_pk_v),.pk_idx(sq_pk_idx),.pk_seq(sq_pk_seq),
+      .d_alloc(sq_d_alloc),.d_pc({NW{39'd0}}),.d_seq({NW{8'd0}}),.d_rob(sq_d_rob),.d_dpreg(sq_d_dpreg),.d_rdy({NW{1'b1}}),.d_rank(sq_d_rank),.d_ready(sq_d_ready),.d_free(sq_free),.d_idx(sq_d_idx),.d_tag(sq_d_tag), .av_any(sq_av_any),.uf_any(sq_uf_any),.ar({NENT{1'b1}}),.pk_v(sq_pk_v),.pk_idx(sq_pk_idx),.pk_seq(sq_pk_seq),
       .a_v(sq_a_v),.a_idx(sq_a_idx),.a_addr(sq_a_addr),.a_va(39'(sq_a_addr)), .a_tv(1'b1),.a_flt(1'b0),.a_fc(4'd0),.a_size(sq_a_size),.a_unc(sq_a_unc),.a_mem(1'b1),
       .r_v(sq_r_v),.r_preg(sq_r_preg),.r_data(rfv[sq_r_preg]),
       .wb_v(wb_v),.wb_preg(wb_preg),.wb_data(wb_data),
@@ -132,6 +136,8 @@ module tb;
    reg [IDXB-1:0] qix  [0:MAXOPS-1];        // the entry the op holds in its queue
    integer lq_op [0:NENT-1];                // queue entry -> op, for the candidate and landings
    integer nops, seed, i, j, op, act, n_early, n_reord, n_full, n_take, n_flush, n_err, n_cyc, n_fwd, fw_op, fw_n;
+   integer nrow, nld, nst, rmax, n_row2;    // a dispatch row: its ops, loads and stores, its length; rows of two
+   integer rowop [0:NW-1];
    integer p_disp, p_addr, p_scmt;          // program-order cursors: dispatch, address, store commit
    integer live_ld_inflight, verbose, vfrom, vto;
    integer pend_op, n_cancel;               // the early start of last cycle, and the cancels seen
@@ -191,7 +197,7 @@ module tb;
          sgn[i]   = rnd(0) % 2;  unc[i] = (rnd(0) % 32) == 0;
          st[i]    = 0;
       end
-      n_early = 0; n_reord = 0; n_full = 0; n_take = 0; n_flush = 0; n_err = 0; n_cyc = 0; n_fwd = 0;
+      n_early = 0; n_reord = 0; n_full = 0; n_take = 0; n_flush = 0; n_err = 0; n_cyc = 0; n_fwd = 0; n_row2 = 0;
       p_disp = 0; p_addr = 0; p_scmt = 0; live_ld_inflight = 0;  pend_op = -1;  pend_cx = 0;  n_cancel = 0;
       repeat (3) @(posedge clk); #1; reset = 0; step;
 
@@ -218,20 +224,34 @@ module tb;
             $display("  c=%0d act=%0d p_disp=%0d p_addr=%0d lq_occ=%0d sq_occ=%0d x_v=%b x_idx=%0d(op %0d) c_v=%b",
                      n_cyc, act, p_disp, p_addr, lq_occ, sq_occ, lq_x_v, lq_x_idx, lq_op[lq_x_idx], sq_c_v);
          case (act)
-           0, 1: begin // ---- dispatch the next op, in program order ----
-              if (p_disp < nops) begin
-                 op = p_disp;
-                 if (is_st[op] && sq_d_ready) begin
-                    sq_d_alloc = 1; sq_d_rob = op; sq_d_dpreg = 9'd1 + op[8:0]; qix[op] = sq_d_idx;
-                    rfv[9'd1 + op[8:0]] = {32'hDA7A, op[31:0]};   // its data, in the register file
-                    p_disp = p_disp + 1;
-                 end else if (!is_st[op] && lq_d_ready) begin
-                    lq_d_alloc = 1; lq_d_rob = op; lq_d_prd = 9'd40 + op % 100; lq_d_sqtag = sq_d_tag;
-                    qix[op] = lq_d_idx; lq_op[lq_d_idx] = op;
-                    if (sq_occ == NENT) n_full = n_full + 1;   // a load dispatched against a FULL store queue
-                    p_disp = p_disp + 1;
+           0, 1: begin // ---- dispatch the next ops, in program order: a row of up to NW ----
+              nrow = 0;  nld = 0;  nst = 0;  rmax = 1 + rnd(0) % NW;
+              while (nrow < rmax && p_disp + nrow < nops) begin
+                 op = p_disp + nrow;
+                 // room: the SQ past the row's stores; the LQ bank the row's next load takes
+                 if (is_st[op] ? (32'(sq_free) <= nst) : (lq_bfree[((32'(lq_bp) + nld) % 2) * 2 +: 2] == 2'd0)) rmax = 0;
+                 else begin
+                    rowop[nrow] = op;
+                    if (is_st[op]) begin
+                       sq_d_alloc[nrow] = 1;  sq_d_rank[nrow] = nst[0];  sq_d_rob[nrow*ROBB +: ROBB] = op[ROBB-1:0];
+                       sq_d_dpreg[nrow*PBITS +: PBITS] = 9'd1 + op[8:0];  qix[op] = sq_d_idx + nst[IDXB-1:0];
+                       rfv[9'd1 + op[8:0]] = {32'hDA7A, op[31:0]};   // its data, in the register file
+                       nst = nst + 1;
+                    end else begin
+                       lq_d_alloc[nrow] = 1;  lq_d_rank[nrow] = nld[0];  lq_d_rob[nrow*ROBB +: ROBB] = op[ROBB-1:0];
+                       lq_d_prd[nrow*PBITS +: PBITS] = 9'd40 + 9'(op % 100);
+                       lq_d_sqtag[nrow*(IDXB+1) +: IDXB+1] = sq_d_tag + nst[IDXB:0];
+                       if (sq_occ == NENT) n_full = n_full + 1;   // a load dispatched against a FULL store queue
+                       nld = nld + 1;
+                    end
+                    nrow = nrow + 1;
                  end
               end
+              #1;   // the LQ's picks for the row's ranks
+              for (j = 0; j < nrow; j = j + 1)
+                 if (!is_st[rowop[j]]) begin qix[rowop[j]] = lq_d_idx[j*IDXB +: IDXB];  lq_op[qix[rowop[j]]] = rowop[j]; end
+              if (nrow > 1) n_row2 = n_row2 + 1;
+              p_disp = p_disp + nrow;
            end
            2, 3: begin // ---- the next address, in program order ----
               if (p_addr < p_disp) begin
@@ -355,8 +375,9 @@ module tb;
             $display("   op %0d %s addr=%h sz=%0d st=%0d qix=%0d", i, is_st[i] ? "st" : "ld", addr[i], 1 << sz[i], st[i], qix[i]);
          n_err = n_err + 1;
       end
-      $display("---- tb_smolrv64_lqsq_rand: ops=%0d cycles=%0d takes=%0d early=%0d cancelled=%0d reordered-past-older-store=%0d full-queue-loads=%0d flushes=%0d forwards=%0d errors=%0d",
-               nops, n_cyc, n_take, n_early, n_cancel, n_reord, n_full, n_flush, n_fwd, n_err);
+      $display("---- tb_smolrv64_lqsq_rand: ops=%0d cycles=%0d rows-of-two=%0d takes=%0d early=%0d cancelled=%0d reordered-past-older-store=%0d full-queue-loads=%0d flushes=%0d forwards=%0d errors=%0d",
+               nops, n_cyc, n_row2, n_take, n_early, n_cancel, n_reord, n_full, n_flush, n_fwd, n_err);
+      if (n_row2 == 0) begin $display("FAIL: no row of two ever dispatched"); n_err = n_err + 1; end
       if (n_cancel == 0) begin $display("FAIL: no early start was ever cancelled"); n_err = n_err + 1; end
       if (n_err != 0) begin $display("LQSQ-RAND FAIL"); $fatal(1, "tb_smolrv64_lqsq_rand FAILED"); end
       $display("LQSQ-RAND PASS");
