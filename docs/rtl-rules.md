@@ -646,6 +646,20 @@ drives exactly the interleaving (it fails on the old line). Two parts of the rul
 - An ordering a structure relies on (here: picks in age order) is asserted or tested when the
   design change that produced the order is made, not left to whichever workload notices.
 
+**D19. A test applied to every entry tests what each entry holds AFTER the edge.** A kill, a
+flush by age or a wake that loops over a structure's entries reads their stored fields; an entry
+another arm writes in the same edge still stores its previous occupant's. `smolrv64_iq`'s kill
+tested `e_rob[k]` for every entry, so an op dispatched into an entry whose previous occupant's
+ROB slot fell inside the kill's dead range was cleared in the edge that filled it: a live op
+vanished from the FP queue and its ROB entry never completed. The lanes' schedulers never fill
+during a kill, so the shape needed the FP queue, which fills from the F stage while a kill holds;
+it hid there until the F stage took a full row of FP ops a group (2026-10-20) and kept the FIFO
+full, and a GB5 PDF SimPoint hung 770 K cycles in (the training queue's 50,000-cycle watchdog).
+The ROB's `head_done` and the cosim side array paid for the same read-in-the-write-cycle shape.
+The fix tests the entry being filled by its incoming value (`kd_new = kdead(d_rob)`), which also
+kills a dead op the F stage moves in during a kill at once. When a structure starts filling in a
+new circumstance (here: during a kill), every per-entry arm is checked for the write it races.
+
 ## E. Widths and lint
 
 **E1. The lint gate is `-Werror` on the load-bearing rules.**

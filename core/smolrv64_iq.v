@@ -223,6 +223,7 @@ module smolrv64_iq
    // the flush arm, ordered last below, clears it. Gating them put M's completion (which a
    // landing load decides) in front of every entry write (gate V3, 2026-09-05).
    wire do_disp = d_valid & d_ready;
+   wire kd_new  = kdead(kd_v, kh, kb, d_rob);              // the kill takes the op dispatched now
    wire do_iss  = iss_v & iss_take;
 
    // WAKE-AT-SELECT AS A DEPENDENCY MATRIX (fixed-latency schedulers). dep[k*NSRC+q][j] says
@@ -306,8 +307,13 @@ module smolrv64_iq
          // wakeup -> select) on 359 dep endpoints.
          if (do_iss) for (k = 0; k < NENT*NSRC; k = k + 1) dep[k][isel] <= 1'b0;
          // the kill: a dead entry's dependents are dead too (a source is an older op's), so
-         // no live row keeps a bit for it
-         for (k = 0; k < NENT; k = k + 1) if (kdead(kd_v, kh, kb, e_rob[k])) begin v[k] <= 1'b0;  e_sp[k] <= 1'b0; end
+         // no live row keeps a bit for it. Each entry is tested by the op it holds after this edge:
+         // the entry dispatched into now by its new op's ROB slot, not its previous occupant's
+         // (rule D19: the FP queue fills from the F stage while a kill holds)
+         for (k = 0; k < NENT; k = k + 1)
+            if ((do_disp & (fsel == k[IDXB-1:0])) ? kd_new : kdead(kd_v, kh, kb, e_rob[k])) begin
+               v[k] <= 1'b0;  e_sp[k] <= 1'b0;
+            end
          if (flush) begin                                  // last: wins over the dispatch above
             v <= {NENT{1'b0}};  e_sp <= {NENT{1'b0}};
             qhead <= {IDXB{1'b0}}; qtail <= {IDXB{1'b0}};

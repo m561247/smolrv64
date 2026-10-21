@@ -679,7 +679,9 @@ without waiting for the branch to reach the head:
   structure that holds an op clears its dead ones each cycle the kill holds: the schedulers,
   dispatch stages, multiplies, landing buffers (a dead entry drains as a bubble), F, MD (the
   divider aborts), the SYSQ, M and the head-op register, the arrival flags, the walker lock,
-  the resolve registers and the training queue. The load and store queues drop their dead
+  the resolve registers and the training queue; an entry filled in a cycle the kill holds is
+  tested by the op it takes, not the one it held (the FP queue fills from the F stage then, rule
+  D19). The load and store queues drop their dead
   entries, their youngest, and step their tails back; the LSU drops a dead load's response by
   tag. fpnew has no per-op kill: a table of its ops in flight (by ROB index) holds the release
   until no dead one is left.
