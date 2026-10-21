@@ -29,8 +29,10 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 for t in "${tests[@]}"; do
     # zicsr is not implied by rv64ima on modern binutils, and every directed test
-    # touches CSRs to observe the trap it provokes.
-    "$CC" -march=rv64ima_zicsr -mabi=lp64 -mcmodel=medany -nostdlib -nostartfiles \
+    # touches CSRs to observe the trap it provokes. A linux-gnu cross gcc (Ubuntu's) links
+    # position-independent with a build-id note by default, and the image then starts with the
+    # note: static, no PIE, no build-id gives every toolchain the bare image the .ld lays out.
+    "$CC" -march=rv64ima_zicsr -mabi=lp64 -mcmodel=medany -nostdlib -nostartfiles -static -no-pie -Wl,--build-id=none \
           -T directed/"$t".ld -o "$tmp/$t" directed/"$t".S || { echo "$t BUILD FAIL"; fail=1; continue; }
     "$OC" -O binary "$tmp/$t" "$tmp/$t.bin"
     th=$("$NM" "$tmp/$t" | awk '/ tohost$/{print $1}'); [ -z "$th" ] && th=80001000
