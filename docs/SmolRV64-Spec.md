@@ -1388,7 +1388,8 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   starts do not wake speculatively. Checks: every speculative issue is decided in the next cycle
   and not issued again before; a base that stands is that cycle's D$ response, by its register;
   only an address generator executes on one. Measured against da5d52b3: a bare-metal pointer
-  chase (`workloads/rvbench/local/chase.c`, 16 KiB, the lockstep) 3.00 cycles a load; CoreMark
+  chase (`workloads/rvbench/local/chase.c`, 16 KiB, the lockstep) 3.00 cycles a load, and the
+  board's `chase2` 3.0 at 16 KiB (f644696c, was 4.0); CoreMark
   -3.48% cycles, Dhrystone -2.59%, the 60 M Linux lockstep +0.19% retires; GB5's 77 SimPoints
   -0.13% of the single-core cycles (Text Compression -0.38%, AES-XTS -0.33%, SQLite -0.31%, Clang
   -0.30%; the FP kernels within 0.03% either way). 83% (the boot) to 89% (Dhrystone) of the
@@ -1675,9 +1676,9 @@ lines, as one chain or as k independent ones; the gate runs the first three on e
 
 | | cycles |
 |---|---|
-| a load to its dependent load, a D$ hit | 4.0 (da5d52b3, the 4 GiB board; 5.7 on 2ed18026) |
-| the same, a D$ miss whose page the dTLB's first level holds (256 KiB) | 45.2 (da5d52b3) |
-| a first-level dTLB miss that the second level holds (4 MiB) | 6.9 more (da5d52b3) |
+| a load to its dependent load, a D$ hit | 3.0 (f644696c, the 4 GiB board; 4.0 on da5d52b3, 5.7 on 2ed18026) |
+| the same, a D$ miss whose page the dTLB's first level holds (256 KiB) | 45.1 (f644696c) |
+| a first-level dTLB miss that the second level holds (4 MiB) | 7.0 more (f644696c) |
 | a walk on every load (32 MiB: 0.99 first-level misses and 1.37 D$ misses a load) | 80.8, the walker busy 30 of them (2ed18026, the 2 GiB board) |
 
 `ddr_port_cdc`'s FIFOs cross through `CDC_SYNC_STAGES` of synchronizers each way (their clocks
