@@ -722,7 +722,7 @@ module tb;
       if (dut.core.fe.realign) rot_ra <= rot_ra + 64'd1;
    end
    wire [4:0]  iq_now = {|(dut.core.cr_i & ~iq_hl),
-                         iq_gc[dut.core.GC_M] & ~dut.core.cr_div, iq_gc[dut.core.GC_FC] & ~dut.core.cr_f,
+                         iq_gc[dut.core.GC_M] & ~dut.core.cr_div, iq_gc[dut.core.GC_FC] & ~dut.core.cr_f[0],
                          iq_gc[dut.core.GC_L] & ~dut.core.cr_l,   iq_gc[dut.core.GC_I]  & ~|(dut.core.cr_i & iq_hl)};
    wire [4:0]  iq_f   = td_rf ? iq_fp : iq_now;
    always @(posedge clk) begin
@@ -1193,7 +1193,7 @@ module tb;
    // ---- DISP-SIM: the dispatch group rules and the lanes' schedulers, printed with TOPDOWN-SIM ----
    // Per slot k > 0, the cycles slot k holds an op while slot k-1 dispatches and slot k does not:
    // cut by a group rule (smolrv64_frontend) -- beside a non-plain op (alone); a second load, a
-   // second store, a second op for the F stage, MD stage or SYSQ (unit), in that order when it is
+   // second store, a second divide (unit), in that order when it is
    // more than one; after a CTI that redirects fetch at decode (resteer) -- or by the credit it
    // misses: its lane's scheduler, the LQ, the SQ, the FP queue, the divide credit. And what each
    // of the three one-per-group rules costs at most: the instructions the dispatching groups would
@@ -1215,8 +1215,8 @@ module tb;
       ds_hd = 0; al_wait = 0; al_wait_idle = 0; al_young = 0; ls_st = 0; ls_b2b = 0; ls_st_q = 0; ds_n = 0;
       for (dsi = 1; dsi < 8; dsi = dsi + 1) ds_rx[dsi] = 0;
    end
-   function automatic ds_unit(input [15:0] g);   // smolrv64_frontend's unit_op
-      ds_unit = g[dut.core.GC_FC] | (g[dut.core.GC_FPV] & g[dut.core.GC_I]) | g[dut.core.GC_M] | g[dut.core.GC_S];
+   function automatic ds_unit(input [15:0] g);   // smolrv64_frontend's one-a-group divide
+      ds_unit = g[dut.core.GC_M];
    endfunction
    // the group the IR's head would dispatch with the rules in rx relaxed: [0] loads, [1] stores, [2] unit
    function automatic integer ds_grp(input [2:0] rx);
@@ -1227,7 +1227,7 @@ module tb;
       for (k = 1; k < IW; k = k + 1) begin
          gk = dut.core.fe.g[k];
          rm = (~gk[dut.core.GC_I] | dut.core.fe.ia[k]) & (~gk[dut.core.GC_L] | cr[CR_L]) & (~gk[dut.core.GC_LD] | cr[CR_LD])
-            & (~gk[dut.core.GC_ST] | cr[CR_ST]) & (~gk[dut.core.GC_FC] | cr[CR_F]) & (~gk[dut.core.GC_M] | cr[CR_DIV]);
+            & (~gk[dut.core.GC_ST] | cr[CR_ST]) & (~gk[dut.core.GC_FC] | cr[CR_F + k]) & (~gk[dut.core.GC_M] | cr[CR_DIV]);
          ok = ok & (32'(dut.core.fe.q_cnt) > k) & g0[dut.core.GC_PLAIN] & gk[dut.core.GC_PLAIN]
             & ~dut.core.fe.g[k-1][dut.core.GC_DCR] & ~(ds_unit(gk) & fc & ~rx[2])
             & ~(gk[dut.core.GC_LD] & ld & ~rx[0]) & ~(gk[dut.core.GC_ST] & st & ~rx[1]) & cr[CR_ROB1 + k] & rm;
@@ -1250,7 +1250,7 @@ module tb;
             else if (g[dut.core.GC_I] && !dut.core.fe.ia[k]) dsj = 3;   // its lane's (the lanes rotate)
             else if (g[dut.core.GC_LD] && !cr[CR_LD])    dsj = 4;
             else if (g[dut.core.GC_ST] && !cr[CR_ST])    dsj = 5;
-            else if (g[dut.core.GC_FC] && !cr[CR_F]) dsj = 6;
+            else if (g[dut.core.GC_FC] && !cr[CR_F + k]) dsj = 6;
             else if (g[dut.core.GC_M] && !cr[CR_DIV])    dsj = 7;
             else $fatal(1, "tb: slot %0d is cut with its group rule and every credit it needs (crd %b, class %h)", k, cr, g);
             ds_cut[k][dsj] = ds_cut[k][dsj] + 1;
@@ -1666,10 +1666,10 @@ module tb;
       $display("FWD-SIM forwards=%0d | held load-cycles, forwardable: busy=%0d drain=%0d lsu=%0d older-load=%0d start=%0d | not forwardable: next-cycle=%0d unknown-address=%0d several-stores=%0d partial=%0d page-alias=%0d no-data=%0d other=%0d",
                fw_go_n, fw_c[0], fw_c[1], fw_c[2], fw_c[3], fw_c[4], fw_c[5], fw_c[6], fw_c[7], fw_c[8], fw_c[11], fw_c[9], fw_c[10]);
       for (dsi = 1; dsi < IW; dsi = dsi + 1)
-         $display("DISP-SIM slot %c cut behind a dispatching slot %c, cycles: alone=%0d load=%0d store=%0d unit=%0d resteer=%0d | credit: lane=%0d load=%0d store=%0d fp=%0d divide=%0d",
+         $display("DISP-SIM slot %c cut behind a dispatching slot %c, cycles: alone=%0d load=%0d store=%0d divide=%0d resteer=%0d | credit: lane=%0d load=%0d store=%0d fp=%0d divide=%0d",
                   8'("A" + dsi), 8'("A" + dsi - 1), ds_cut[dsi][0], ds_cut[dsi][8], ds_cut[dsi][9], ds_cut[dsi][1],
                   ds_cut[dsi][2], ds_cut[dsi][3], ds_cut[dsi][4], ds_cut[dsi][5], ds_cut[dsi][6], ds_cut[dsi][7]);
-      $display("DISP-SIM the dispatching groups took %0d instructions; at most more with any number of loads=%0d stores=%0d units=%0d | loads+stores=%0d loads+units=%0d stores+units=%0d all three=%0d",
+      $display("DISP-SIM the dispatching groups took %0d instructions; at most more with any number of loads=%0d stores=%0d divides=%0d | loads+stores=%0d loads+divides=%0d stores+divides=%0d all three=%0d",
                ds_n, ds_rx[1], ds_rx[2], ds_rx[4], ds_rx[3], ds_rx[5], ds_rx[6], ds_rx[7]);
       $display("DISP-SIM queue head held with pops allowed (a serialise, CSR or CBO gate, the ROB or a room credit), cycles=%0d", ds_hd);
       $display("DISP-SIM lane schedulers: ready-not-picked entry-cycles=%0d (another lane picking nothing %0d) picks-past-an-older-ready=%0d | M-started accesses=%0d back-to-back=%0d",

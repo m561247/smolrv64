@@ -47,7 +47,7 @@ module smolrv64_frontend
     // ---- redirect (from M: mispredict, trap, xret, fence.i) ----
     input  wire                    redirect,
     input  wire                    fs_off,            // mstatus.FS is Off: an FP op decodes illegal
-    input  wire [2*IW+8:0]         crd,               // the dispatch credits: CRW bits (smolrv64_credits.vh)
+    input  wire [3*IW+7:0]         crd,               // the dispatch credits: CRW bits (smolrv64_credits.vh)
     output wire                    hd_v,              // the queue head has an instruction...
     output wire                    hd_take,           // ...and pops it this cycle
     output wire [15:0]             hd_gc,             // its dispatch class (the stall accounting's)
@@ -397,11 +397,11 @@ module smolrv64_frontend
    // ------------------------------------------------------- the IR registers: one dispatch group
    // The queue head forms the group. Up to IW heads go together when the dispatch class allows
    // it (smolrv64_gclass, evaluated at decode): every member plain (a head op is not), at most
-   // one of the FP/MD/SYS pipe's, one load and one store (the queues' single allocation ports),
-   // and nothing behind a CTI that redirects fetch at decode. The IR takes the group when it is
+   // one divide, one load and one store (the queues' single allocation ports), any number of FP
+   // ops, and nothing behind a CTI that redirects fetch at decode. The IR takes the group when it is
    // empty or dispatching whole this cycle, and dispatch takes a group whole or not at all:
    // there are no survivors.
-   localparam integer G_M = 2, G_S = 3, G_L = 4, G_I = 5, G_FC = 6, G_PLAIN = 7, G_FPV = 10, G_DCR = 11,   // smolrv64_gclass's gc order
+   localparam integer G_M = 2, G_L = 4, G_I = 5, G_FC = 6, G_PLAIN = 7, G_DCR = 11,   // smolrv64_gclass's gc order
                       G_LD = 12, G_ST = 13, G_CSR = 14, G_SER = 15;
    // the credits: a member pops only with room for it in everything it allocates, counted
    // against what is already between here and there (smolrv64_core computes crd from flops)
@@ -410,15 +410,11 @@ module smolrv64_frontend
       room = (~gc[G_I] | lane) & (~gc[G_L] | l) & (~gc[G_LD] | ld) & (~gc[G_ST] | st) & (~gc[G_FC] | f)
            & (~gc[G_M] | dv);
    endfunction
-   // the units behind the FP/MD/SYS port (the F stage, the MD stage, the SYSQ) each take one op at
-   // a time: a group holds at most one op of theirs, wherever it issues -- an int-to-FP op (an FP
-   // op in a lane) is the F stage's too, and so each rename shard gets one register a group
-   function automatic unit_op(input [15:0] gc);
-      unit_op = gc[G_FC] | (gc[G_FPV] & gc[G_I]) | gc[G_M] | gc[G_S];
-   endfunction
-   // the rules: which heads may go together (cumulative classes of the slots before)
+   // the rules: which heads may go together (cumulative classes of the slots before). The MD
+   // stage's in-flight tracker takes one divide a group; FP ops take a full row (the F stage's FIFO
+   // takes a group's FP ops together, its credit counting each slot position).
    // slot k reads slot k-1: per-bit variables, so the chain is not a loop to the simulator
-   wire [IW-1:0] rule /*verilator split_var*/, take /*verilator split_var*/, c_fc /*verilator split_var*/,
+   wire [IW-1:0] rule /*verilator split_var*/, take /*verilator split_var*/, c_dv /*verilator split_var*/,
                  c_ld /*verilator split_var*/, c_st /*verilator split_var*/;
    // a CBO is the one head op that does not serialise (an AMO or LR/SC does)
    wire g0_cbo  = g[0][G_L] & ~g[0][G_PLAIN] & ~g[0][G_SER];
@@ -433,14 +429,14 @@ module smolrv64_frontend
    assign rule[0] = ~q_empty;
    assign take[0] = rule[0] & crd[CR_POP] & head_go & ~realign & crd[CR_ROB1]
                   & room(g[0], ia[0], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
-   assign c_fc[0] = unit_op(g[0]);  assign c_ld[0] = g[0][G_LD];  assign c_st[0] = g[0][G_ST];
+   assign c_dv[0] = g[0][G_M];  assign c_ld[0] = g[0][G_LD];  assign c_st[0] = g[0][G_ST];
    generate for (gk = 1; gk < IW; gk = gk + 1) begin: rl
       localparam [QAW:0] K = gk;
       assign rule[gk] = rule[gk-1] & (q_cnt > K) & g[0][G_PLAIN] & g[gk][G_PLAIN] & ~g[gk-1][G_DCR]
-                      & ~(unit_op(g[gk]) & c_fc[gk-1]) & ~(g[gk][G_LD] & c_ld[gk-1]) & ~(g[gk][G_ST] & c_st[gk-1]);
+                      & ~(g[gk][G_M] & c_dv[gk-1]) & ~(g[gk][G_LD] & c_ld[gk-1]) & ~(g[gk][G_ST] & c_st[gk-1]);
       assign take[gk] = rule[gk] & take[gk-1] & crd[CR_ROB1 + gk]
-                      & room(g[gk], ia[gk], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F], crd[CR_DIV]);
-      assign c_fc[gk] = c_fc[gk-1] | unit_op(g[gk]);
+                      & room(g[gk], ia[gk], crd[CR_L], crd[CR_LD], crd[CR_ST], crd[CR_F + gk], crd[CR_DIV]);
+      assign c_dv[gk] = c_dv[gk-1] | g[gk][G_M];
       assign c_ld[gk] = c_ld[gk-1] | g[gk][G_LD];
       assign c_st[gk] = c_st[gk-1] | g[gk][G_ST];
    end endgenerate

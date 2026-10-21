@@ -1003,17 +1003,20 @@ module smolrv64_core
    reg  [PLW-1:0]          stg_pl_f;
    wire [2:0]              wkq_f;                    // the head's sources in last cycle's wakes (below)
    initial stg_v_f = 1'b0;
-   // the FIFO behind the head: {destination, payload} in distributed RAM; the sources, their readiness
-   // and the ROB slot in flops (every entry's sources watch the wakes, the kill reads every ROB slot)
+   // the FIFO behind the head: {destination, payload} in distributed RAM, banked by the entry's low
+   // bits so that a group's FP ops, consecutive entries, write one bank each; the sources, their
+   // readiness and the ROB slot in flops (every entry's sources watch the wakes, the kill reads
+   // every ROB slot)
    localparam integer FSQW = RN_PBITS + PLW;
-   (* ram_style = "distributed" *) reg [FSQW-1:0] fsq_mem [0:(1<<FSQB)-1];
+   localparam integer FBL = $clog2(IW), FBN = 1 << FBL;   // the banks: next_pow2(IW)
+   wire [FSQW-1:0]         fsq_rd [0:FBN-1];
    reg  [ROB_IDXB-1:0]     fsq_rob [0:(1<<FSQB)-1];
    reg  [3*RN_PBITS-1:0]   fsq_ps  [0:(1<<FSQB)-1];
    reg  [2:0]              fsq_r   [0:(1<<FSQB)-1];
    reg  [FSQB-1:0]          fsq_hd, fsq_tl;
    reg  [FSQB:0]            fsq_n;
    initial begin fsq_hd = {FSQB{1'b0}}; fsq_tl = {FSQB{1'b0}}; fsq_n = {(FSQB+1){1'b0}}; end
-   wire [FSQW-1:0]          fsq_o = fsq_mem[fsq_hd];                // the FIFO's oldest, the next head
+   wire [FSQW-1:0]          fsq_o = fsq_rd[fsq_hd[FBL-1:0]];        // the FIFO's oldest, the next head
    wire [FQB-1:0]          fpq_n = {{(FQB-1){1'b0}}, stg_v_f} + {{(FQB-FSQB-1){1'b0}}, fsq_n};
    // The scheduler accepts the stage op when it has room; back-pressure to the frontend below.
    wire mv_f  = stg_v_f  & rf_ready;
@@ -1066,21 +1069,29 @@ module smolrv64_core
    // into the scheduler this cycle (~stg_v | sched_room). A stuck stage (scheduler full) thus
    // holds dispatch at the frontend rather than losing the op behind the stage register.
    wire f_room    = (fpq_n < FQ[FQB-1:0]) | rf_ready;
-   // the group's FP op (at most one) and what its slot hands the F stage
+   // the group's FP ops, any number, each ranked by its program position among them (the F stage
+   // holds them in program order: the kill drops a suffix); the first in program order is the one
+   // the head may take, and what its slot hands the F stage
    wire [IW-1:0]         s_tf = s_takev & s_cls_fc;
+   wire [3:0]            n_tf = ones_nl(s_tf);
+   reg  [3:0]            f_rk [0:IW-1];
    reg  [ROB_IDXB-1:0]   f_rob_in;
    reg  [3*RN_PBITS-1:0] f_ps_in;
    reg  [2:0]            f_r_in;
    reg  [RN_PBITS-1:0]   f_prd_in;
    reg  [PLW-1:0]        f_pl_in;
-   integer               fsk;
+   integer               fsk, fsj;
    always @* begin
       f_rob_in = s_rob[0];  f_ps_in = s_ps_in[0];  f_r_in = s_srdy_hit[0];  f_prd_in = s_prd_g[0];  f_pl_in = s_pl_in[0];
-      for (fsk = IW - 1; fsk >= 0; fsk = fsk - 1)
-         if (s_tf[fsk]) begin
+      for (fsk = 0; fsk < IW; fsk = fsk + 1) begin
+         f_rk[fsk] = 4'd0;
+         for (fsj = 0; fsj < IW; fsj = fsj + 1)
+            if (s_tf[fsj] & (s_pos[fsj] < s_pos[fsk])) f_rk[fsk] = f_rk[fsk] + 4'd1;
+         if (s_tf[fsk] & (f_rk[fsk] == 4'd0)) begin
             f_rob_in = s_rob[fsk];  f_ps_in = s_ps_in[fsk];  f_r_in = s_srdy_hit[fsk];
             f_prd_in = s_prd_g[fsk];  f_pl_in = s_pl_in[fsk];
          end
+      end
    end
 
    // ISSUE ARBITRATION, one per cycle into the single issue register. Long-latency classes
@@ -1239,8 +1250,9 @@ module smolrv64_core
    // match of its own sources (wkq_f, the cycle before) to what it hands the scheduler, ORs both
    // matches into its readiness every cycle it stays, and the op the scheduler takes is caught by its
    // fill's hit(d_ps) (this cycle): the same readiness, in every cycle, as reading the pending table.
-   // F: whichever slot holds the group's (single) FP op goes into the head when the head is free
-   // this cycle and nothing waits behind it, else behind the ops that wait.
+   // F: the group's first FP op goes into the head when the head is free this cycle and nothing
+   // waits behind it; the rest, and all of them otherwise, go behind the ops that wait, in program
+   // order: FP op k at the tail plus its rank (less the one the head took).
    wire [2:0] snp_f   = {wk(stg_ps_f[2*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[RN_PBITS +: RN_PBITS]), wk(stg_ps_f[0 +: RN_PBITS])};
    assign     wkq_f   = wkq3(stg_ps_f);
    wire [2:0] fsq_hr  = fsq_r[fsq_hd] | wkq3(fsq_ps[fsq_hd]);     // the next head's readiness
@@ -1248,8 +1260,18 @@ module smolrv64_core
    wire       fsq_any  = (fsq_n != {(FSQB+1){1'b0}});
    wire       hd_free = ~stg_v_f | mv_f;                  // the head is empty or leaves this cycle
    wire       hd_ft   = hd_free & fsq_any;                 // the FIFO's oldest becomes the head
-   wire       push_hd = (|s_tf) & hd_free & ~fsq_any;      // ...or the dispatched op does
-   wire       push_ft = (|s_tf) & ~push_hd;
+   wire       push_hd = (|s_tf) & hd_free & ~fsq_any;      // ...or the group's first FP op does
+   wire [3:0] n_ft    = n_tf - {3'd0, push_hd};             // the FP ops the FIFO takes
+   reg  [IW-1:0]   ft_v;                                    // slot k's FP op goes into the FIFO...
+   reg  [FSQB-1:0] ft_ix [0:IW-1];                          // ...at this entry
+   reg  [3:0]      ft_off;
+   integer         ftk;
+   always @* for (ftk = 0; ftk < IW; ftk = ftk + 1) begin
+      ft_v[ftk]  = s_tf[ftk] & ~(push_hd & (f_rk[ftk] == 4'd0));
+      ft_off     = f_rk[ftk] - {3'd0, push_hd};
+      ft_ix[ftk] = fsq_tl + ft_off[FSQB-1:0];
+   end
+   initial if (FSQB > 3) $fatal(1, "smolrv64_core: the F FIFO's pointers outgrow the 4-bit FP-op counts");
    // the kill: a dead op is the youngest of the stage's (everything younger than the restart dies),
    // so the dead ones are the head-or-FIFO's suffix and nothing is dispatched while it is in force
    reg  [FSQN-1:0] fsq_dead;
@@ -1282,9 +1304,10 @@ module smolrv64_core
             stg_pl_f  <= f_pl_in;
          end else if (mv_f) stg_v_f <= 1'b0;
          else if (stg_v_f) stg_r_f <= stg_r_f | snp_f | wkq_f;
-         if (push_ft) begin fsq_rob[fsq_tl] <= f_rob_in;  fsq_tl <= fsq_tl + 1'b1; end
+         for (ftk = 0; ftk < IW; ftk = ftk + 1) if (ft_v[ftk]) fsq_rob[ft_ix[ftk]] <= s_rob[ftk];
+         fsq_tl <= fsq_tl + n_ft[FSQB-1:0];
          if (hd_ft) fsq_hd <= fsq_hd + 1'b1;
-         fsq_n <= fsq_n + {{FSQB{1'b0}}, push_ft} - {{FSQB{1'b0}}, hd_ft};
+         fsq_n <= fsq_n + n_ft[FSQB:0] - {{FSQB{1'b0}}, hd_ft};
          // the kill, after the arms above: the head (if it stays) and the FIFO's dead suffix
          if (stg_v_f & ~mv_f & dead(stg_rob_f)) stg_v_f <= 1'b0;
          if (fsq_kill) begin
@@ -1300,16 +1323,37 @@ module smolrv64_core
          end
       end
    end
-   always @(posedge clk) if (push_ft) fsq_mem[fsq_tl] <= {f_prd_in, f_pl_in};
-   // every entry's sources against the registered wakes, then the pushed entry's dispatch state
+   // the banks: a group's FP ops take consecutive entries, so each bank takes at most one of them
+   genvar gfb;
+   generate for (gfb = 0; gfb < FBN; gfb = gfb + 1) begin: fsqb
+      (* ram_style = "distributed" *) reg [FSQW-1:0] mem [0:(1<<FSQB)/FBN-1];
+      reg             wen;
+      reg [FSQB-1:0]  wix;
+      reg [FSQW-1:0]  wd;
+      integer         k;
+      always @* begin
+         wen = 1'b0;  wix = ft_ix[0];  wd = {s_prd_g[0], s_pl_in[0]};
+         for (k = 0; k < IW; k = k + 1)
+            if (ft_v[k] & (ft_ix[k][FBL-1:0] == gfb[FBL-1:0])) begin wen = 1'b1;  wix = ft_ix[k];  wd = {s_prd_g[k], s_pl_in[k]}; end
+      end
+      always @(posedge clk) if (wen) mem[wix[FSQB-1:FBL]] <= wd;
+      assign fsq_rd[gfb] = mem[fsq_hd[FSQB-1:FBL]];
+   end endgenerate
+   initial if ((1 << FSQB) <= FBN) $fatal(1, "smolrv64_core: the F FIFO's %0d entries do not fill %0d banks", 1 << FSQB, FBN);
+   // every entry's sources against the registered wakes, then the pushed entries' dispatch state
    integer fse;
    always @(posedge clk) begin
       for (fse = 0; fse < (1 << FSQB); fse = fse + 1) fsq_r[fse] <= fsq_r[fse] | wkq3(fsq_ps[fse]);
-      if (push_ft) begin fsq_ps[fsq_tl] <= f_ps_in;  fsq_r[fsq_tl] <= f_r_in; end
+      for (fse = 0; fse < IW; fse = fse + 1)
+         if (ft_v[fse]) begin fsq_ps[ft_ix[fse]] <= s_ps_in[fse];  fsq_r[ft_ix[fse]] <= s_srdy_hit[fse]; end
    end
+   integer fsc;
    always @(posedge clk) if (!reset) begin
-      if (push_ft & (fsq_n == FSQN[FSQB:0]) & ~hd_ft)
-         $fatal(1, "smolrv64_core: an FC op dispatches into a full F stage (%0d behind the head): the credits are wrong", fsq_n);
+      if ({1'b0, fsq_n} + {1'b0, n_ft[FSQB:0]} > {1'b0, FSQN[FSQB:0]} + {{(FSQB+1){1'b0}}, hd_ft})
+         $fatal(1, "smolrv64_core: %0d FC ops dispatch into the F stage's FIFO holding %0d of %0d: the credits are wrong", n_ft, fsq_n, FSQN);
+      for (fsc = 0; fsc < IW; fsc = fsc + 1)
+         if (s_tf[fsc] & (f_rk[fsc] >= n_tf))
+            $fatal(1, "smolrv64_core: FP op %0d's rank %0d is not below the group's %0d", fsc, f_rk[fsc], n_tf);
       if ((|s_tf) & (fsq_kill | (stg_v_f & dead(stg_rob_f))))
          $fatal(1, "smolrv64_core: an FC op dispatches while the F stage holds a dead op (head %b, FIFO %b)",
                 stg_v_f & dead(stg_rob_f), fsq_dead);
@@ -3122,7 +3166,7 @@ module smolrv64_core
    // A dispatch stall is the queue head holding an instruction it has no credit for, outside a
    // freeze (the credits, smolrv64_frontend): nothing after the head waits.
    wire hd_wait   = fe_hd_v & ~fe_hd_take & ~redirect_q & ~fr_v & ~dec_red_q;
-   wire hd_sched  = (~fe_hd_gc[GC_I] | cr_i[fe_hd_lane]) & (~fe_hd_gc[GC_L] | cr_l) & (~fe_hd_gc[GC_FC] | cr_f)
+   wire hd_sched  = (~fe_hd_gc[GC_I] | cr_i[fe_hd_lane]) & (~fe_hd_gc[GC_L] | cr_l) & (~fe_hd_gc[GC_FC] | cr_f[0])
                   & (~fe_hd_gc[GC_M] | cr_div);                      // the MD stage's room is a divide's
    wire hd_sq     = fe_hd_gc[GC_ST] & ~cr_st;
    wire hd_lq     = fe_hd_gc[GC_LD] & ~cr_ld;
@@ -4531,7 +4575,7 @@ module smolrv64_core
    // LOWAT=4 covers two groups per shard, so `low` is the rename credit as it stands).
    wire [NL-1:0] ir_i = s_v & s_cls_i;              // the IR's group holds lane k's op
    wire       ir_l  = |(s_v & s_cls_l);
-   wire       ir_f  = |(s_v & s_cls_fc);
+   wire [3:0] ir_f  = ones_nl(s_v & s_cls_fc);             // the IR group's FP ops: any number
    wire       ir_ld = |(s_v & s_ld_nb);
    wire       ir_st = |(s_v & s_st_nb);
    wire [3:0] ir_n  = ones_nl(s_v);
@@ -4541,11 +4585,14 @@ module smolrv64_core
    always @* for (crk = 0; crk < NL; crk = crk + 1)
       cr_i[crk] = {1'b0, l_free[crk]} > ({{(IBI+1){1'b0}}, l_stg_v[crk]} + {{(IBI+1){1'b0}}, ir_i[crk]});
    wire cr_l  = ~ho_inf & ~ir_l;                       // one head op in flight
-   localparam integer FQ_M1I = FQ - 1;
-   localparam [7:0]   FQ_M1  = FQ_M1I[7:0];
-   wire [7:0] cr_f_room = {{(7-IBF){1'b0}}, rf_free} + FQ_M1;
-   wire [7:0] cr_f_need = {{(8-FQB){1'b0}}, fpq_n} + {7'd0, ir_f};
-   wire cr_f  = cr_f_room > cr_f_need;
+   // the F stage: room for an FP op at slot position k with every one before it an FP op too. The
+   // head register and the FIFO hold FQ; the IR's group lands in them this cycle; and when the
+   // scheduler has room for two, one op leaves them for it now (the head, or the IR's first a cycle
+   // later beside the head group's landing), so a full stage still takes one a cycle
+   wire [7:0]    cr_f_room = FQ[7:0] + {7'd0, rf_free >= 2};
+   reg  [IW-1:0] cr_f;
+   always @* for (crk = 0; crk < IW; crk = crk + 1)
+      cr_f[crk] = {{(8-FQB){1'b0}}, fpq_n} + {4'd0, ir_f} + crk[7:0] < cr_f_room;
    // A head op (an AMO, LR/SC or CBO) waits in M for the ROB head, so a CBO dispatches only once
    // every older load and store has its address (an AMO or LR/SC drains first), one head op is in
    // flight at a time (the head-op register holds one), and no load or store dispatches while one
@@ -4567,7 +4614,7 @@ module smolrv64_core
    wire cbo_any = ho_inf | ir_l;
    // TWO DIVIDES IN FLIGHT at most, each from its dispatch to the MD stage's writeback (or its
    // death): the stage and its queue register hold them, so a lane that issues one always finds a
-   // place; a group holds at most one (smolrv64_frontend's unit_op rule)
+   // place; a group holds at most one (smolrv64_frontend's divide rule)
    wire [IW-1:0]       s_md   = s_takev & s_cls_m;
    wire                ir_m   = |(s_v & s_cls_m);
    reg  [1:0]          dt_v;                       // the two in flight, by ROB entry
@@ -4714,11 +4761,11 @@ module smolrv64_core
    wire [GHL-1:0] fe_red_ghr = (m_red_fire | sy_red) ? {GHL{1'b0}} : fr_set ? fr_ghr : dec_ghr;
    always @(posedge clk) fe_red_ghr_q <= fe_red_ghr;
    always @(posedge clk) if (!reset) begin
-      // a group dispatches whole and holds at most one load, one store and one op of the F stage, the MD stage or the SYSQ
+      // a group dispatches whole and holds at most one load, one store and one divide
       if (|(s_takev & ~s_v))           $fatal(1, "smolrv64_core: a slot dispatched without an instruction");
       if ((ones_nl(g_st) > 4'd1) | (ones_nl(g_ld) > 4'd1))
          $fatal(1, "smolrv64_core: two allocations into one memory queue");
-      if (ones_nl(s_tf) > 4'd1)        $fatal(1, "smolrv64_core: two ops on the F pipe in one group");
+      if (ones_nl(s_md) > 4'd1)        $fatal(1, "smolrv64_core: two divides in one group");
    end
 
    // `accept` means X CAN TAKE A NEW BUNDLE -- it is free, or it is being dispatched this

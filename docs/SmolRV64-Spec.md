@@ -136,11 +136,11 @@ speculation, front-end or back-end, and a cause beneath each. The stall counters
 
 Nothing after the decoupling queue holds. The queue head forms a dispatch group of up to three
 instructions that may go together: every member plain (a serialising op, `fence.i`, a CBO, an
-AMO, a CSR op, a trap at dispatch or the interrupt pseudo-op goes alone), at most one for the
-F stage (an FP op, or an int-to-FP op through its lane), the MD stage or the SYSQ, one load and one store
-(the LQ's and SQ's single allocation ports), and nothing behind a CTI that redirects fetch at
-decode (`smolrv64_gclass`, read from the queue record). A load behind a store in its group
-takes the store-seqno after the store's.
+AMO, a CSR op, a trap at dispatch or the interrupt pseudo-op goes alone), at most one divide
+(the MD stage tracks two in flight), one load and one store (the LQ's and SQ's single allocation
+ports), any number of FP ops (the F stage takes a group's together, §2's credits), and nothing
+behind a CTI that redirects fetch at decode (`smolrv64_gclass`, read from the queue record). A
+load behind a store in its group takes the store-seqno after the store's.
 
 **The lanes rotate.** Instruction j of a group goes to lane `(lc + j) % IW`, `lc` the lane the
 next instruction takes, so consecutive instructions go to consecutive lanes whatever the groups'
@@ -161,19 +161,23 @@ retires each) take 11.89% fewer cycles in Navigation, 6.79% in HTML5, 6.18% in S
 PDF Rendering and 0.03% in Camera. A member pops only with a **credit** for everything it allocates, from
 flops, counted against what is already between the head and there: the ROB against the IR
 group, the LQ and SQ against the IR's load or store, each lane's scheduler against its
-dispatch-stage register and the IR's op, the FP scheduler against its FIFO (below) and the
-IR's op (`crd`, `CR_*`; this cycle's frees are not credited). The IR loads every cycle and
+dispatch-stage register and the IR's op, the F stage against its FIFO (below) and the IR's FP
+ops, per slot position: an FP op at position k has room with every slot before it an FP op too,
+and a full stage still takes one a cycle while the scheduler has room for two (`crd`, `CR_*`; this
+cycle's frees are not credited). The IR loads every cycle and
 dispatches the next, and a lane's dispatch-stage register never waits for its scheduler; both are
 always-on assertions. **The F stage is a FIFO of 8** (`FQ`) whose head is the register its
 scheduler fills from: a burst of FP ops waits there while dispatch goes on, and the head waits for
-the scheduler's room. The FIFO's entries watch a registered copy of the wake buses, a cycle late:
+the scheduler's room. A group's FP ops enter together, in program order: the first into the head
+when it and the FIFO are empty, the rest at the FIFO's tail, whose distributed RAM is banked four
+ways by entry so that each of a row's consecutive entries has a bank of its own. The FIFO's entries watch a registered copy of the wake buses, a cycle late:
 an entry ORs the copy's match of its sources into the readiness it had at dispatch, the head adds
 the copy's match to its own live snoop, and what the scheduler is handed is the readiness the
 pending table would give, in the same cycle, with no port on the table and no load on the live
 buses (a check compares them at every move into the head). The head also pops nothing while dispatch is frozen
 (`redirect_q`, `fr_v`, `dec_red_q`: what the IR holds then is the wrong path and is dropped),
-while a rename shard is below `LOWAT` (4 covers two groups, each allocating at most one
-register per shard) or rename's map is being swept after a total squash (§5), or while a
+while a rename shard is below its low-water mark (a lane's shard 4, two groups of one
+register each; an FP shard 2 x `IW`, two groups of a full row) or rename's map is being swept after a total squash (§5), or while a
 serialising op is in the IR or in flight. A CBO, which waits
 in M for the ROB head, pops only once every older load and store has its address (`CR_CBO`:
 no LQ or SQ entry unfilled, none in the IR), and no load or store pops while a CBO is in the
@@ -190,7 +194,7 @@ held a group until its room appeared and dispatched it in that cycle.
 | *(operands)* | **no longer a dispatch stall.** Waiting for operands happens in the scheduler now (§2.1); dispatch is blocked by structural resources only. |
 | `~cr_rob1..3` | no free ROB row (64 rows) beyond the IR group's (`st_rob`) |
 | `~cr_ia/ib/ic/l/f` | the member's scheduler (its lane's, rotated by `lc`) has no entry beyond its dispatch-stage register and the IR's op — integer 10 each; the head-op register holds one (`cr_l`: none in flight, none in the IR); for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
-| `rn_stall` | any rename shard below `LOWAT`=4 free registers, or the map's sweep after a squash (`st_rn`) |
+| `rn_stall` | any rename shard below its low-water mark (4 free registers for a lane's, 2 x `IW` for an FP shard), or the map's sweep after a squash (`st_rn`) |
 | `cr_ser`, `cr_csr` | a serializing op -- a fence, `fence.i`, an AMO, an xret, `ecall`/`ebreak`/`wfi`/`sfence.vma`, a trap from dispatch -- is **alone in flight**: it pops only when the ROB AND the store queue have drained (`drained`, rule C5) and the IR is empty, and nothing pops behind it until it commits. A CSR op does not drain: it waits only for the CSR op before it (`csr_infl`, or one in the IR) (`st_srz`) |
 
 ### 3.3 M stalls — `m_done` low
@@ -505,9 +509,11 @@ intra-group bypass (a source that is an earlier slot's destination) is applied a
 alone; the core's pending lookup indexes the MAP's candidate and masks its result with `r_byp*`.
 The group is a cyclic run of slots from `r_fc` (§3.2): slot k looks at the slots k-1, k-2, ...
 cyclically, nearest first, as far back as its program position, and a register two slots write
-takes the younger's copy (`newer`). A group allocates at most one register from each shard --
-lane k's integer destination is lane k's shard, and a group holds one FP load and one FP-unit op
-(asserted) -- so every slot takes its shard's head.
+takes the younger's copy (`newer`). A group allocates one register from a lane's shard -- lane
+k's integer destination is lane k's shard -- and up to `IW` from an FP shard: the k-th of a list's
+allocations in program order takes its head's k-th entry, which the list's four banks already read
+(from the head pointer alone, so no class decode reaches a read address). Program order, not slot
+order: the committed head advances as a row retires and the walk backs a row out youngest first.
 
 ### 5.1 Sharding
 
@@ -546,8 +552,8 @@ Camera -0.19%, Gaussian Blur -0.02%, Structure from Motion +0.05%, SQLite +0.05%
 | FF | 64 | f0–f31 only: **the F stage, alone** (FP results) | > 32 (FP arch regs) |
 
 **The FP file is sharded by writer.** An FP load's f-register destination allocates from SH_FL,
-any other's from SH_FF (a trapping FP op too: it writes nothing), and a group holds at most one
-load and one op for the F stage, so neither FP free list hands out more than one register a cycle. At reset
+any other's from SH_FF (a trapping FP op too: it writes nothing). A group holds at most one load,
+so SH_FL hands out one register a cycle, and any number of FP ops, so SH_FF hands out up to `IW`. At reset
 f0–f31 map to SH_FL. Each shard is written by its writer alone, the load landing (`we_ld`) or
 the F stage (`we_fe`), through the address, data and wakeup broadcast it already had, so the
 FP file adds no wakeup port, no write ever waits, and a read never chooses between banks. It is read by the store queue's
@@ -566,7 +572,7 @@ path: `m_addr -> lsu -> m_done -> m_wb_ie -> u_iq_i/e_r[9][1]`, 24 logic levels,
 A physical register's shard is encoded in its number and never changes, so a commit's
 `c_pold` is returned to **its own** shard's free list, not to `c_shard`.
 
-`LOWAT`=4: fetch stalls when any shard drops below 4 free.
+Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard below 2 x `IW`.
 
 ---
 
@@ -1070,8 +1076,7 @@ destination, to the one MD stage (`l_dgo`, `iss_md`). The divider (3 to 35 cycle
 cycle after, from those registered operands. A second divide waits in the stage's queue register
 (`mq_*`) with its operands, so a divide and a remainder of the same operands do not hold dispatch
 for each other: a dispatch credit (`cr_div`, `dt_*`) keeps at most two divides in flight, each
-released at its writeback or its death, and a group holds at most one op of the units behind
-the FP/SYS port and the MD stage (`unit_op`). The result is latched on the divider's done pulse
+released at its writeback or its death, and a group holds at most one divide. The result is latched on the divider's done pulse
 (`md_pend`, `md_res_q`) and leaves by the stage's own tag when the FPU is not writing (`md_wr`),
 into its lane's write slot like an FP op's integer result (§8). `abort(redirect)` and the flush
 arm last keep it sound while redirects fire at the ROB head. Invariants: no third divide in
@@ -2318,14 +2323,15 @@ closure above is real; the branch cannot ship until that defect is found (handof
   reads 2.4 bytes a cycle from DRAM, 26.7 cycles a line, with under two of the 8 MSHRs busy;
   counted over the whole run, its 64 MiB fill included, the queue holds 13.3 entries on average
   and its head waits for a credit in 60% of the cycles.
-- **A dispatch group holds one load, one store and one op of the FP/MD/SYS port, and a cut slot
-  cuts every slot behind it** (`smolrv64_frontend` `rule`; the load and store queues each allocate
-  one entry a cycle). A run of loads dispatches one a cycle with nothing beside it: `bw r 32`
+- **A dispatch group holds one load, one store and one divide, and a cut slot cuts every slot
+  behind it** (`smolrv64_frontend` `rule`; the load and store queues each allocate one entry a
+  cycle). FP ops fill a group (2026-10-20, `docs/PLAN-2026-10-20-dispatch-groups.md`, which takes
+  loads and stores next). A run of loads dispatches one a cycle with nothing beside it: `bw r 32`
   (`tools/board/membench`, da5d52b3) reads 5.79 bytes a cycle against the D$ port's 8, and its
   bare-metal twin (`workloads/rvbench/local/bwread.c`) in lockstep dispatches one instruction in
   59% of its cycles, slot B cut by the rule in 197,046 of 338,454, every load still starting in M's
   cycle. Tommy, 2026-10-20: a major pain point -- many microbenchmarks are explained by it -- and
-  the rules are under review for alternatives to cutting groups in the common case.
+  a group is to be cut only where it must be: beside a system op.
 - **One load lookup a cycle.** Stores have a lookup of their own (§9.1), so a ready load waits for
   the D$ in 0.9% (SQLite) to 1.7% (PDF Rendering) of the GB5 checkpoint slices' cycles, against 3.6%
   to 35.9% with one lookup for both. Two or more loads are ready to go to memory in 10% of

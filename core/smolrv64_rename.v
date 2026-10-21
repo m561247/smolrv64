@@ -419,11 +419,12 @@ module smolrv64_rename
    integer          fk;
    initial for (fk = 0; fk < IW; fk = fk + 1) begin fre_q[fk] = {NSH{1'b0}}; c_pold_q[fk] = {PBITS{1'b0}}; end
 
-   // THE FREE-LIST READ ADDRESSES DO NOT SEE THE STALL: a list's head is read from its pointer
-   // alone, and alloc advances it. alloc_r is the candidates', at most one a list (checked).
+   // THE FREE-LIST READ ADDRESSES DO NOT SEE THE STALL: a list's next FLNB entries are read from
+   // its pointer alone, and alloc advances it. alloc_r is the candidates': a group may hold up to IW
+   // of one list's (the FP shards'), and the k-th of them in program order takes the head's k-th entry.
    wire [IW-1:0] alloc_r = r_cand & r_rd_v;
 
-   wire [IDXB-1:0] rdx [0:NSH-1];      // each list's head register
+   wire [IDXB-1:0] rdx [0:NSH*IW-1];   // the register list s hands slot k: rdx[s*IW + k]
    wire [NSH-1:0]  low_n;              // each list's low-water flag for next cycle
    wire [NSH-1:0]  fre_n [0:IW-1];     // commit k frees into list s
 
@@ -439,7 +440,9 @@ module smolrv64_rename
          assign fre_n[gk][gL] = c_w[gk] & (c_pold[gk][PBITS-1:IDXB] == SHL);   // free push: the register's shard
       end
     if (!sh_used(gL)) begin: none   // a shard this width does not use: no list, never low
-      assign rdx[gL] = {IDXB{1'b0}};
+      for (gk = 0; gk < IW; gk = gk + 1) begin: z
+         assign rdx[gL*IW + gk] = {IDXB{1'b0}};
+      end
       assign low_n[gL] = 1'b0;
     end else begin: u
       localparam integer N  = n_of(gL);
@@ -462,7 +465,9 @@ module smolrv64_rename
       // The pointers' next values, so the low-water flag can be a register (see `stall`).
       wire [PW-1:0] t_n = reset ? t : t + cnt(fq);
       wire [PW-1:0] h_n = reset ? hc : flush ? hc_n : h + cnt(sel) - cnt(wsel);
-      assign low_n[gL] = (t_n - h_n) < LOWAT[PW-1:0];
+      // a lane's shard gets one register a group, an FP shard up to IW: two groups' worth
+      localparam integer LW = (gL >= SH_FL) ? ((LOWAT > 2*IW) ? LOWAT : 2*IW) : LOWAT;
+      assign low_n[gL] = (t_n - h_n) < LW[PW-1:0];
 
       wire [IDXB-1:0]  flrd [0:FLNB-1];
       wire [FLNB-1:0]  behind = ~({FLNB{1'b1}} << h[FLLB-1:0]);   // behind[g] = (g < h's bank): the banks that wrapped
@@ -488,8 +493,18 @@ module smolrv64_rename
          always @(posedge clk) if (wen) mem[wpos[PW-2:FLLB]] <= wd;
          assign flrd[gB] = mem[h[PW-2:FLLB] + {{(PW-2-FLLB){1'b0}}, behind[gB]}];
       end
-      // the slot allocating from this list takes its head (one a group)
-      assign rdx[gL] = flrd[h[FLLB-1:0]];
+      // slot k takes the head's entry offset by the list's candidates AHEAD OF IT IN PROGRAM ORDER:
+      // the committed head advances as a row retires and the walk backs a row out youngest first,
+      // both in program order, so a row's registers leave the list in that order
+      for (gk = 0; gk < IW; gk = gk + 1) begin: o
+         reg [PW-1:0] pre;
+         integer      j;
+         always @* begin
+            pre = {PW{1'b0}};
+            for (j = 0; j < IW; j = j + 1) if (sel_r[j] & (ps[j] < ps[gk])) pre = pre + {{(PW-1){1'b0}}, 1'b1};
+         end
+         assign rdx[gL*IW + gk] = flrd[h[FLLB-1:0] + pre[FLLB-1:0]];
+      end
 
       // The pointers come from configuration, like the arrays (see the reset note below).
       initial begin h = {PW{1'b0}}; hc = {PW{1'b0}}; t = T0; end
@@ -503,12 +518,8 @@ module smolrv64_rename
       always @(posedge clk) if (!reset) begin
          if (cnt(sel) > avail)
             $fatal(1, "smolrv64_rename: shard %0d allocated past its free list (%0d free)", gL, avail);
-         if (cnt(sel_r) > 1)
-            $fatal(1, "smolrv64_rename: the group holds %0d candidates for shard %0d", cnt(sel_r), gL);
          if (avail > N[PW-1:0])
             $fatal(1, "smolrv64_rename: shard %0d has %0d free of %0d", gL, avail, N);
-         if (cnt(wsel) > 1)
-            $fatal(1, "smolrv64_rename: the walk returns %0d registers of shard %0d in one row", cnt(wsel), gL);
          if (w_chk && (h != hc_n))
             $fatal(1, "smolrv64_rename: after the walk shard %0d's head is %0d, its committed head %0d", gL, h, hc_n);
       end
@@ -547,7 +558,7 @@ module smolrv64_rename
 
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: pr
       wire [2:0] sh = r_shard[gk*3 +: 3];
-      assign r_prd[gk*PBITS +: PBITS] = {sh, rdx[sh]};
+      assign r_prd[gk*PBITS +: PBITS] = {sh, rdx[sh*IW + gk]};
    end endgenerate
 
    // THE FREE LISTS AND THE MAPS ARE INITIALISED BY THE BITSTREAM AND NEVER RESET. No RAM can be
