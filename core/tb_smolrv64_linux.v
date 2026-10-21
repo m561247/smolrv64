@@ -1192,24 +1192,50 @@ module tb;
 
    // ---- DISP-SIM: the dispatch group rules and the lanes' schedulers, printed with TOPDOWN-SIM ----
    // Per slot k > 0, the cycles slot k holds an op while slot k-1 dispatches and slot k does not:
-   // cut by a group rule (smolrv64_frontend) -- beside a non-plain op (alone); a second op for the
-   // F stage, MD stage or SYSQ, a second load or a second store (rule: a load and a store go
-   // together); after a CTI that redirects fetch at decode (resteer) -- or by the credit it misses:
-   // its lane's scheduler, the LQ, the SQ, the FP queue, the divide credit. Then the cycles the
+   // cut by a group rule (smolrv64_frontend) -- beside a non-plain op (alone); a second load, a
+   // second store, a second op for the F stage, MD stage or SYSQ (unit), in that order when it is
+   // more than one; after a CTI that redirects fetch at decode (resteer) -- or by the credit it
+   // misses: its lane's scheduler, the LQ, the SQ, the FP queue, the divide credit. And what each
+   // of the three one-per-group rules costs at most: the instructions the dispatching groups would
+   // add with the rule relaxed (the bench's copy of the rules, the same credits, a credit's one bit
+   // counted as room for any number), against those they took (asserted equal with none relaxed). Then the cycles the
    // queue head holds an op it may pop (no freeze, no low rename shard, no serialising op in flight
    // or in the IR) and does not: a serialise, CSR or CBO gate, the ROB, or a room credit holds it.
    // Over the lanes' schedulers: the entries ready and not picked (entry-cycles: every integer-class
    // op, whatever its unit, and a scheduler whose unit is busy picks nothing), those in a lane while
    // another lane picks nothing, and the picks that pass over an older ready entry (the pick is by
    // slot, not age); and the accesses M starts itself, and those in back-to-back cycles.
-   reg [63:0] ds_cut [1:IW-1][0:7];   // [slot][alone, rule, resteer, lane, load, store, fp, divide]
-   reg [63:0] ds_hd, al_wait, al_wait_idle, al_young, ls_st, ls_b2b;
+   // [slot][alone, unit, resteer, lane, load, store, fp, divide credits, a second load, a second store]
+   reg [63:0] ds_cut [1:IW-1][0:9];
+   reg [63:0] ds_hd, al_wait, al_wait_idle, al_young, ls_st, ls_b2b, ds_n, ds_rx [1:7];
    reg        ls_st_q;
    integer    dsi, dsj;
    initial begin
-      for (dsi = 1; dsi < IW; dsi = dsi + 1) for (dsj = 0; dsj < 8; dsj = dsj + 1) ds_cut[dsi][dsj] = 64'd0;
-      ds_hd = 0; al_wait = 0; al_wait_idle = 0; al_young = 0; ls_st = 0; ls_b2b = 0; ls_st_q = 0;
+      for (dsi = 1; dsi < IW; dsi = dsi + 1) for (dsj = 0; dsj < 10; dsj = dsj + 1) ds_cut[dsi][dsj] = 64'd0;
+      ds_hd = 0; al_wait = 0; al_wait_idle = 0; al_young = 0; ls_st = 0; ls_b2b = 0; ls_st_q = 0; ds_n = 0;
+      for (dsi = 1; dsi < 8; dsi = dsi + 1) ds_rx[dsi] = 0;
    end
+   function automatic ds_unit(input [15:0] g);   // smolrv64_frontend's unit_op
+      ds_unit = g[dut.core.GC_FC] | (g[dut.core.GC_FPV] & g[dut.core.GC_I]) | g[dut.core.GC_M] | g[dut.core.GC_S];
+   endfunction
+   // the group the IR's head would dispatch with the rules in rx relaxed: [0] loads, [1] stores, [2] unit
+   function automatic integer ds_grp(input [2:0] rx);
+      reg [15:0] g0, gk;  reg [CRW-1:0] cr;  reg ok, fc, ld, st, rm;  integer k, n;
+      cr = dut.core.fe.crd;  g0 = dut.core.fe.g[0];
+      ok = dut.core.fe.take[0];  n = ok ? 1 : 0;
+      fc = ds_unit(g0);  ld = g0[dut.core.GC_LD];  st = g0[dut.core.GC_ST];
+      for (k = 1; k < IW; k = k + 1) begin
+         gk = dut.core.fe.g[k];
+         rm = (~gk[dut.core.GC_I] | dut.core.fe.ia[k]) & (~gk[dut.core.GC_L] | cr[CR_L]) & (~gk[dut.core.GC_LD] | cr[CR_LD])
+            & (~gk[dut.core.GC_ST] | cr[CR_ST]) & (~gk[dut.core.GC_FC] | cr[CR_F]) & (~gk[dut.core.GC_M] | cr[CR_DIV]);
+         ok = ok & (32'(dut.core.fe.q_cnt) > k) & g0[dut.core.GC_PLAIN] & gk[dut.core.GC_PLAIN]
+            & ~dut.core.fe.g[k-1][dut.core.GC_DCR] & ~(ds_unit(gk) & fc & ~rx[2])
+            & ~(gk[dut.core.GC_LD] & ld & ~rx[0]) & ~(gk[dut.core.GC_ST] & st & ~rx[1]) & cr[CR_ROB1 + k] & rm;
+         if (ok) n = n + 1;
+         fc = fc | ds_unit(gk);  ld = ld | gk[dut.core.GC_LD];  st = st | gk[dut.core.GC_ST];
+      end
+      ds_grp = n;
+   endfunction
    always @(negedge clk) if (!reset && meas) begin : dispsim
       reg [15:0] g;  reg [CRW-1:0] cr;  reg old;  integer k, j, e, nr, np, as, ae;
       cr = dut.core.fe.crd;
@@ -1218,16 +1244,25 @@ module tb;
             g = dut.core.fe.g[k];
             if (!dut.core.fe.rule[k])
                dsj = (!dut.core.fe.g[0][dut.core.GC_PLAIN] || !g[dut.core.GC_PLAIN]) ? 0
-                   : dut.core.fe.g[k-1][dut.core.GC_DCR] ? 2 : 1;
+                   : dut.core.fe.g[k-1][dut.core.GC_DCR] ? 2
+                   : (g[dut.core.GC_LD] && dut.core.fe.c_ld[k-1]) ? 8
+                   : (g[dut.core.GC_ST] && dut.core.fe.c_st[k-1]) ? 9 : 1;
             else if (g[dut.core.GC_I] && !dut.core.fe.ia[k]) dsj = 3;   // its lane's (the lanes rotate)
             else if (g[dut.core.GC_LD] && !cr[CR_LD])    dsj = 4;
             else if (g[dut.core.GC_ST] && !cr[CR_ST])    dsj = 5;
-            else if (g[dut.core.GC_FC] && !cr[CR_F])     dsj = 6;
+            else if (g[dut.core.GC_FC] && !cr[CR_F]) dsj = 6;
             else if (g[dut.core.GC_M] && !cr[CR_DIV])    dsj = 7;
             else $fatal(1, "tb: slot %0d is cut with its group rule and every credit it needs (crd %b, class %h)", k, cr, g);
             ds_cut[k][dsj] = ds_cut[k][dsj] + 1;
          end
       if (dut.core.fe.rule[0] && !dut.core.fe.take[0] && cr[CR_POP]) ds_hd = ds_hd + 1;
+      if (dut.core.fe.take[0]) begin
+         nr = ds_grp(3'd0);
+         if (nr != $countones(dut.core.fe.take))
+            $fatal(1, "tb: DISP-SIM's copy of the group rules takes %0d, the frontend %b", nr, dut.core.fe.take);
+         ds_n = ds_n + 64'(nr);
+         for (j = 1; j < 8; j = j + 1) ds_rx[j] = ds_rx[j] + 64'(ds_grp(3'(j)) - nr);
+      end
       np = 0;
       for (j = 0; j < IW; j = j + 1) np = np + (pl_iss_v[j] ? 1 : 0);
       for (j = 0; j < IW; j = j + 1) begin
@@ -1631,9 +1666,11 @@ module tb;
       $display("FWD-SIM forwards=%0d | held load-cycles, forwardable: busy=%0d drain=%0d lsu=%0d older-load=%0d start=%0d | not forwardable: next-cycle=%0d unknown-address=%0d several-stores=%0d partial=%0d page-alias=%0d no-data=%0d other=%0d",
                fw_go_n, fw_c[0], fw_c[1], fw_c[2], fw_c[3], fw_c[4], fw_c[5], fw_c[6], fw_c[7], fw_c[8], fw_c[11], fw_c[9], fw_c[10]);
       for (dsi = 1; dsi < IW; dsi = dsi + 1)
-         $display("DISP-SIM slot %c cut behind a dispatching slot %c, cycles: alone=%0d rule=%0d resteer=%0d | credit: lane=%0d load=%0d store=%0d fp=%0d divide=%0d",
-                  8'("A" + dsi), 8'("A" + dsi - 1), ds_cut[dsi][0], ds_cut[dsi][1], ds_cut[dsi][2],
-                  ds_cut[dsi][3], ds_cut[dsi][4], ds_cut[dsi][5], ds_cut[dsi][6], ds_cut[dsi][7]);
+         $display("DISP-SIM slot %c cut behind a dispatching slot %c, cycles: alone=%0d load=%0d store=%0d unit=%0d resteer=%0d | credit: lane=%0d load=%0d store=%0d fp=%0d divide=%0d",
+                  8'("A" + dsi), 8'("A" + dsi - 1), ds_cut[dsi][0], ds_cut[dsi][8], ds_cut[dsi][9], ds_cut[dsi][1],
+                  ds_cut[dsi][2], ds_cut[dsi][3], ds_cut[dsi][4], ds_cut[dsi][5], ds_cut[dsi][6], ds_cut[dsi][7]);
+      $display("DISP-SIM the dispatching groups took %0d instructions; at most more with any number of loads=%0d stores=%0d units=%0d | loads+stores=%0d loads+units=%0d stores+units=%0d all three=%0d",
+               ds_n, ds_rx[1], ds_rx[2], ds_rx[4], ds_rx[3], ds_rx[5], ds_rx[6], ds_rx[7]);
       $display("DISP-SIM queue head held with pops allowed (a serialise, CSR or CBO gate, the ROB or a room credit), cycles=%0d", ds_hd);
       $display("DISP-SIM lane schedulers: ready-not-picked entry-cycles=%0d (another lane picking nothing %0d) picks-past-an-older-ready=%0d | M-started accesses=%0d back-to-back=%0d",
                al_wait, al_wait_idle, al_young, ls_st, ls_b2b);
