@@ -6,16 +6,19 @@
 #   tools/exp.sh main               # the baseline: run it once per main commit, on main's tree
 #   BASE=<tag> tools/exp.sh ...     # compare against another tag (default: main-<main's hash>)
 #   tools/exp.sh -t <tag> [<base>]  # print a finished experiment's table again
-#   SET=sp tools/exp.sh <tag> ...   # GB5's single-core section as SimPoints instead (fastmac and mercury)
-#   SP_HOSTS=mercury|fastmac|coffee  # ...all of them on one host (the others busy)
+#   SET=sp tools/exp.sh <tag> ...   # GB5's single-core section as SimPoints instead (fastmac, M5, mercury)
+#   SP_HOSTS=mercury|fastmac|m5|coffee  # ...all of them on one host (the others busy)
 #   RUNS='pdf boot60m' tools/exp.sh <tag> ...   # only the named runs of the set
 #
 # The set: the 60 M Linux lockstep (retires; the lockstep is the correctness check), Dhrystone and
 # CoreMark in lockstep (workloads/rvbench, cycles), the four pi checkpoint slices and the five GB5
 # checkpoint slices (20 M retires warm, 50 M measured; cycles). M5 runs the locksteps and pi,
-# fastmac the GB5 slices. SET=sp runs workloads/gb5/simpoints.txt's 77, two of every three on
-# fastmac and the third on mercury -- or, when no Vivado build runs on coffee (Tommy, 2026-10-20:
-# sims on coffee only between builds), two of every five on fastmac, two on coffee, one on mercury (192.168.1.166: Linux, its checkpoints and trees on its local disk, /scratch/tommy),
+# fastmac the GB5 slices. SET=sp runs workloads/gb5/simpoints.txt's 77 by the hosts' measured
+# throughput (2026-10-21: a point takes 674 s on fastmac 12 at a time, 764 s on M5 9 at a time,
+# 1046 s on mercury 12 at a time): of every seven three on fastmac, two on M5, two on mercury --
+# or, when no Vivado build runs on coffee (Tommy, 2026-10-20: sims on coffee only between builds),
+# of every nine two more on coffee (mercury: 192.168.1.166, Linux, its checkpoints and trees on
+# its local disk, /scratch/tommy; M5 and coffee: ~/gb5ck/sp),
 # points instead (the same 20 + 50 M each), and the table totals them into each subtest's cycles.
 # All runs start together, at most J at a time per kind, the kinds side by side: the runners build
 # a stale model once under their build lock and then run from it together. The tree is copied
@@ -97,18 +100,19 @@ m5_runs="boot60m:boot:60000000 dhry:rvb:dhrystone,$(tohost dhrystone) coremark:r
 fm_runs="nav:gb5:140000000000 html5:gb5:154500000000 sqlite:gb5:161000000000 pdf:gb5:171000000000 camera:gb5:202000000000"
 mc_runs="";  cf_runs=""
 if [ "${SET:-}" = sp ]; then   # a point's checkpoint is sp/<instret>.ckpt; the points alternate between the two
-   m5_runs=""
-   # the points host $1 takes: mercury one in three (a run there takes ~2.5x fastmac's), or with
-   # coffee free of builds, of every five fastmac two, coffee two, mercury one
-   pts() { awk -F'\t' -v h="$1" -v cf=$cf_ok '$1 == "point" { k = n++ % (cf ? 5 : 3)
-              w = (k < 2) ? "fm" : (cf && k < 4) ? "cf" : "mc"
+   # the points host $1 takes: of every seven fastmac three, M5 two, mercury two, or with coffee
+   # free of builds, of every nine two more on coffee
+   pts() { awk -F'\t' -v h="$1" -v cf=$cf_ok '$1 == "point" { k = n++ % (cf ? 9 : 7)
+              w = (k < 3) ? "fm" : (k < 5) ? "m5" : (cf && k < 7) ? "cf" : "mc"
               if (h == "all" || h == w) printf " sp%s:gb5:sp/%s", $5, $5 }' "$here/workloads/gb5/simpoints.txt"; }
+   m5_runs="";  fm_runs=""
    case ${SP_HOSTS:-} in
-      mercury) fm_runs="";          mc_runs=$(pts all) ;;
-      fastmac) fm_runs=$(pts all);  mc_runs="" ;;
+      mercury) mc_runs=$(pts all) ;;
+      fastmac) fm_runs=$(pts all) ;;
+      m5)      m5_runs=$(pts all) ;;
       coffee)  [ $cf_ok = 1 ] || { echo "exp $tag: a build runs on coffee (or no checkpoints there): no sims"; exit 1; }
-               fm_runs="";          mc_runs="";  cf_runs=$(pts all) ;;
-      *)       fm_runs=$(pts fm);   mc_runs=$(pts mc);  cf_runs=$(pts cf) ;;
+               cf_runs=$(pts all) ;;
+      *)       fm_runs=$(pts fm);  m5_runs=$(pts m5);  mc_runs=$(pts mc);  cf_runs=$(pts cf) ;;
    esac
 fi
 if [ -n "${RUNS:-}" ]; then   # only the runs named

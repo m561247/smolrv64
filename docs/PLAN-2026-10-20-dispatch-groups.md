@@ -155,3 +155,24 @@ a group is cut only beside a non-plain op, behind a DCR CTI, or by a credit it m
   first one's checkpoint (`make physopt DCP=...`): no family failed alone, 981 endpoints across
   the fetch ring's Top-Down path, the SQ, the ROB's kill, rename and the LSU. Board gate PASS on
   the 2g board (login with no fault, 900 s of Geekbench, load-use 3.0, a D$ miss 45.2 cycles).
+
+## The lane credit: measured, kept (2026-10-21)
+
+With loads, stores and FP ops taking full rows, DISP-SIM on the 77 SimPoints finds no class cut
+left: what still cuts a group is room, and above all the LANE CREDIT. In the integer subtests the
+head waits for its own full lane while another lane has room in 5-9% of the cycles (Face Detection
+15.6%, AES 9.2%), and slots B and C are cut by their lane's credit in 2-7% more each.
+
+**Tried: the group starts at the first lane with room** (wip/skip: `fl`, a function of `lc` and the
+lane credits, so the lane records' read offsets still come from flops; the IR stays a cyclic run,
+so the ROB and rename are untouched). It removes what it aims at (AES's point: `be:iq-full` 12.2% ->
+0.08% of the cycles) and loses: GB5's SimPoints +0.37% of the single-core cycles (Horizon +2.69%,
+HTML5 +1.97%, Text Compression +1.89%; Face Detection -1.60%, Camera -0.90%), 37 of the first 49
+points slower. On AES's point the front end now runs ahead of the busy lane: `be:lq-full` 1.04% ->
+19.16%, the lanes' ready-not-picked entry-cycles 3.6 M -> 51.9 M (27 M of them with another lane
+picking nothing), picks past an older ready op 0.9 M -> 12.2 M. The lane credit is back-pressure:
+a lane fills because it holds the critical chain, and waiting for it keeps the LQ and the other
+lanes from filling with younger work that then competes for the shared ports. Skipping a full lane
+mid-group (holes in a ROB row) is the same idea, further. Not adopted. What the stalls point at is
+the lanes' issue (one pick a lane, oldest first within the lane only), which is the end state's
+to settle (four lanes, IPC tuning waits for it), not dispatch's.
