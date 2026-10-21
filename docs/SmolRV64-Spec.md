@@ -1643,16 +1643,16 @@ acceptance, and they are answered in request order as the MIG answers; `+ddr_reo
 in any order. `tb_ddr_port` proves the board path under random load with a concurrent DMA
 master, in order and reordering.
 
-**MEASURED ON THE BOARD** (2ed18026 at 166.67 MHz, the 2 GiB board; `tools/board/membench`, whose
-`chase2` counts its own user-mode cycles with the core's counters: a dependent chase over one
-random cycle of 64-byte lines, as one chain or as k independent ones):
+**MEASURED ON THE BOARD** (166.67 MHz; `tools/board/membench`, whose `chase2` counts its own
+user-mode cycles with the core's counters: a dependent chase over one random cycle of 64-byte
+lines, as one chain or as k independent ones; the gate runs the first three on every bitstream):
 
 | | cycles |
 |---|---|
-| a load to its dependent load, a D$ hit | 5.7 |
-| the same, a D$ miss whose page the dTLB's first level holds | 46.6 |
-| a first-level dTLB miss that the second level holds | 5 to 9 more |
-| a walk on every load (32 MiB: 0.99 first-level misses and 1.37 D$ misses a load) | 80.8, the walker busy 30 of them |
+| a load to its dependent load, a D$ hit | 4.0 (da5d52b3, the 4 GiB board; 5.7 on 2ed18026) |
+| the same, a D$ miss whose page the dTLB's first level holds (256 KiB) | 45.2 (da5d52b3) |
+| a first-level dTLB miss that the second level holds (4 MiB) | 6.9 more (da5d52b3) |
+| a walk on every load (32 MiB: 0.99 first-level misses and 1.37 D$ misses a load) | 80.8, the walker busy 30 of them (2ed18026, the 2 GiB board) |
 
 `ddr_port_cdc`'s FIFOs cross through `CDC_SYNC_STAGES` of synchronizers each way (their clocks
 treated as unrelated): 4.5 of the miss's 46.6 cycles, against 42.1 with them treated as related
