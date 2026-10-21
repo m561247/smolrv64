@@ -125,7 +125,7 @@ errlog() {
 latency() {
    [ "${LAT:-1}" != 0 ] || return 0
    [ -n "${ip:-}" ] || find_ip || { echo "latency: no ssh to the board"; return 0; }
-   tar -C "$REPO/tools/board/membench" -cf - Makefile chase2.c | timeout 300 ssh -o BatchMode=yes tommy@$ip \
+   tar -C "$REPO/tools/board/membench" -cf - Makefile chase2.c pmu.h | timeout 300 ssh -o BatchMode=yes tommy@$ip \
       'D=/var/tmp/gate-latency; rm -rf $D && mkdir -p $D && tar -C $D -xf - && make -s -C $D chase2 >/dev/null && sleep 30 && for k in 16 256 4096; do for r in 1 2 3; do $D/chase2 $k 1 1000000; done; done' \
       > "$RES/latency.txt" 2>&1
    # Three runs a size, the fastest kept with its own miss rates: a background process that runs

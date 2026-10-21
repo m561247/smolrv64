@@ -976,6 +976,17 @@ module tb;
                   rs, kl, dut.core.redirect, dut.core.u_lq.v[lt_ix], dut.core.u_lq.av[lt_ix], dut.core.u_lq.sent[lt_ix],
                   dut.core.u_lq.lnd[lt_ix], dut.core.lq_e_block[lt_ix], dut.core.u_lsu.o_v[lt_ix], dut.core.u_lsu.o_kill[lt_ix]);
    end
+   // ---- LAND-SIM: a landing load takes its destination lane's one write slot. Straight through when
+   // the lane writes nothing else that cycle (by0), else into the lane's landing buffer (en0), and
+   // while anything waits there the lane issues nothing (its scheduler's unit_busy): the lane-cycles
+   // a waiting landing holds the lane are what a write-port collision costs.
+   reg [63:0] ln_by, ln_buf, ln_hold;
+   initial begin ln_by = 0;  ln_buf = 0;  ln_hold = 0; end
+   always @(posedge clk) if (!reset && meas) begin
+      ln_by   <= ln_by   + 64'(pop64(64'(dut.core.by0)));
+      ln_buf  <= ln_buf  + 64'(pop64(64'(dut.core.en0)));
+      ln_hold <= ln_hold + 64'(pop64(64'(dut.core.lb_any)));
+   end
    // ---- RECOV-SIM: each restart's recovery against a forward rebuild ---------------------------
    // A restart (the ROB's k_v) walks the map back from the tail row to the branch's, a row a cycle,
    // racing the branch to the ROB head, where a squash and the sweep (dirty registers, IW a cycle)
@@ -1589,6 +1600,8 @@ module tb;
       $display("MFUN-SIM plain loads and stores M filled=%0d | waiting in the arrival RAMs: entry-cycles=%0d, cycles one or more=%0d, two or more=%0d", mf_fill, mf_wait, mf_c1, mf_c2);
       $display("LDPATH-SIM loads M filled, from the lane/from the arrival RAM: started in M's cycle and stood=%0d/%0d, cancelled=%0d/%0d | to the queue: not translated=%0d/%0d, the D$ took no load=%0d/%0d, other=%0d/%0d",
                lp_n[1], lp_n[0], lp_n[3], lp_n[2], lp_n[5], lp_n[4], lp_n[7], lp_n[6], lp_n[9], lp_n[8]);
+      $display("LAND-SIM integer loads landing straight through=%0d, into the lane's landing buffer=%0d | lane-cycles held by a waiting landing=%0d",
+               ln_by, ln_buf, ln_hold);
       $display("perf-stat-sim: begin");
       $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run
       $display("%0d instructions", mr);

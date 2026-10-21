@@ -2289,6 +2289,14 @@ closure above is real; the branch cannot ship until that defect is found (handof
   reads 2.4 bytes a cycle from DRAM, 26.7 cycles a line, with under two of the 8 MSHRs busy;
   counted over the whole run, its 64 MiB fill included, the queue holds 13.3 entries on average
   and its head waits for a credit in 60% of the cycles.
+- **A dispatch group holds one load, one store and one op of the FP/MD/SYS port, and a cut slot
+  cuts every slot behind it** (`smolrv64_frontend` `rule`; the load and store queues each allocate
+  one entry a cycle). A run of loads dispatches one a cycle with nothing beside it: `bw r 32`
+  (`tools/board/membench`, da5d52b3) reads 5.79 bytes a cycle against the D$ port's 8, and its
+  bare-metal twin (`workloads/rvbench/local/bwread.c`) in lockstep dispatches one instruction in
+  59% of its cycles, slot B cut by the rule in 197,046 of 338,454, every load still starting in M's
+  cycle. Tommy, 2026-10-20: a major pain point -- many microbenchmarks are explained by it -- and
+  the rules are under review for alternatives to cutting groups in the common case.
 - **One load lookup a cycle.** Stores have a lookup of their own (§9.1), so a ready load waits for
   the D$ in 0.9% (SQLite) to 1.7% (PDF Rendering) of the GB5 checkpoint slices' cycles, against 3.6%
   to 35.9% with one lookup for both. Two or more loads are ready to go to memory in 10% of

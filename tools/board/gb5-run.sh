@@ -1,13 +1,16 @@
 #!/bin/sh
 # Full GB5 on the board for a score, with the Top-Down counters; the raw output is kept whole
 # (a grep whitelist once discarded the result URL). Usage: gb5-run.sh <rtl>
-# The run starts only on an idle machine (idle-wait.sh).
+# The run starts only on an idle machine (idle-wait.sh), after the memory figures that go beside it
+# (membench/summary.sh, /var/tmp/membench: latency by footprint, read and write bandwidth).
 RTL=$1
 RAW=/var/tmp/gb5-$RTL-raw.log
 OUT=/var/tmp/gb5-$RTL-perf.txt
 TS=/var/tmp/gb5-$RTL-ts.log
-rm -f "$RAW" "$OUT" "$TS"
+MEM=/var/tmp/gb5-$RTL-mem.txt
+rm -f "$RAW" "$OUT" "$TS" "$MEM"
 . "$(dirname "$0")/idle-wait.sh"
+sh "$(dirname "$0")/membench/summary.sh" > "$MEM" 2>&1
 cd /var/tmp/gbroot/gb || exit 1
 echo "=== gb5 full start $(date) epoch=$(date +%s.%N) idle-wait=$(( $(date +%s) - t0 ))s load=$(cut -d' ' -f1 /proc/loadavg) rtl=$RTL ===" >> "$RAW"
 # EV picks the events, the Top-Down set by default. At most cycles, instructions and 13 more:

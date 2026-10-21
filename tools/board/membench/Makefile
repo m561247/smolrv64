@@ -2,16 +2,21 @@
 #   make             fetch clamchowder's Microbenchmarks and dsheffie's mem-lat at the commits
 #                    below, build them and chase2
 #   ./run.sh <tag>   measure on an idle board: /var/tmp/ubench/mb-<tag>.txt
+#   sh summary.sh    the figures beside every Geekbench run (chase2 and bw alone; gb5-run.sh runs it)
 # Neither suite's RISC-V code may use V: MemoryLatency's draft-0.7 vector routine (stlftest128)
 # becomes two 8-byte stores here, and MemoryBandwidth links mb_rv64.s instead of its own kernels.
 MARCH = rv64imafdc_zicbom_zicbop_zicboz_zicntr_zicond_zicsr_zifencei_zihpm_zca_zcd_zba_zbb_zbs_svpbmt
 CB    = 13159d44086d8b042e1c56218cfbfa24ae940899
 ML    = 28573fa55374f794279dacceaa3da4c56704b86d
 
-all: chase2 MemoryLatency MemoryBandwidth mem-lat/mem_micro
+all: chase2 bw MemoryLatency MemoryBandwidth mem-lat/mem_micro
 
-chase2: chase2.c
+chase2: chase2.c pmu.h
 	gcc -O2 -march=$(MARCH) -Wall $< -o $@
+
+# the write loop stays eight stores a step, never a call to memset
+bw: bw.c pmu.h
+	gcc -O2 -march=$(MARCH) -Wall -fno-tree-loop-distribute-patterns $< -o $@
 
 Microbenchmarks:
 	git clone -q https://github.com/clamchowder/Microbenchmarks $@ && git -C $@ checkout -q $(CB)
