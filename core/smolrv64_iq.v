@@ -44,7 +44,11 @@ module smolrv64_iq
     // moves). The live |freem sat at the root of the frontend's dispatch decision: a_ent
     // -> held -> freem -> d_ready -> iq_ready -> d_take -> rename -> u_pend, 16 levels.
     // The price is the last entry: the scheduler refuses dispatch at NENT-1 occupied.
-    parameter REGRDY = 0)
+    parameter REGRDY = 0,
+    // 1: an address generator (d_ag) may issue on a load's SPECULATIVE wake (s_v/s_preg, its address
+    // source only): it keeps its entry, issued and no candidate (e_sp), until the next cycle's verdict
+    // (sv_v) frees it (sv_ok) or makes it a candidate again, its source still waiting for the landing
+    parameter SPEC = 0)
    (input  wire                  clk,
     input  wire                  reset,
 
@@ -57,11 +61,16 @@ module smolrv64_iq
     input  wire [PBITS-1:0]      d_prd,      // destination, for wake-at-select
     input  wire                  d_long,     // its result comes later than the next cycle (a multiply): no wake at select
     input  wire                  d_hx,       // it hands itself on through a one-op register (hx_busy)
+    input  wire                  d_ag,       // it generates an address (a load or store): SPEC's wake is its
     output wire [IDXB-1:0]       d_ent,      // slot taken; index the payload with it
 
     // ---- wakeup ----
     input  wire [NWB-1:0]        wb_v,
     input  wire [NWB*PBITS-1:0]  wb_preg,
+    input  wire                  s_v,        // SPEC: a load's speculative wake (flops), its register
+    input  wire [PBITS-1:0]      s_preg,
+    input  wire                  sv_v,       // SPEC: last cycle's speculative issues are decided now (flops)
+    input  wire                  sv_ok,      // ...their load answered
 
     // ---- issue ----
     input  wire                  unit_busy,  // one unit per scheduler, so one bit
@@ -71,6 +80,7 @@ module smolrv64_iq
     output wire                  iss_v,
     output wire [IDXB-1:0]       iss_ent,
     output wire [ROBB-1:0]       iss_rob,
+    output wire                  iss_spec,   // SPEC: the issue is on the speculative wake alone
     input  wire                  iss_take,
 
     // The entry still held downstream. Its slot must not be reallocated: the payload array
@@ -100,7 +110,9 @@ module smolrv64_iq
    reg [PBITS-1:0]       e_prd [0:NENT-1];
    reg [NENT-1:0]        e_long;           // a later result: its dependents wake at its writeback
    reg [NENT-1:0]        e_hx;             // hands itself on (d_hx)
-   initial begin e_long = {NENT{1'b0}}; e_hx = {NENT{1'b0}}; end
+   reg [NENT-1:0]        e_ag;             // an address generator (d_ag)
+   reg [NENT-1:0]        e_sp;             // issued on the speculative wake, held for its verdict
+   initial begin e_long = {NENT{1'b0}}; e_hx = {NENT{1'b0}}; e_ag = {NENT{1'b0}}; e_sp = {NENT{1'b0}}; end
 
    integer k, q;
    initial begin
@@ -152,12 +164,17 @@ module smolrv64_iq
    // instance with a runtime variable, and the stall attribution below needs exactly that.
    wire [NENT*NSRC-1:0] srdy;
    wire [NENT-1:0]      rdy;
+   wire [NENT-1:0]      sp_only;        // ready through the speculative wake alone
    genvar g, gs;
    generate
       for (g = 0; g < NENT; g = g + 1) begin : g_rdy
+         // the speculative wake: an address generator's address source (source 0), a compare
+         // beside the writeback ports' from flops (s_v, s_preg)
+         wire sw = (SPEC != 0) & e_ag[g] & s_v & (e_ps[g][0 +: PBITS] == s_preg);
          for (gs = 0; gs < NSRC; gs = gs + 1) begin : g_src
-            assign srdy[g*NSRC + gs] = e_r[g][gs] | hit(e_ps[g][gs*PBITS +: PBITS]);
+            assign srdy[g*NSRC + gs] = e_r[g][gs] | hit(e_ps[g][gs*PBITS +: PBITS]) | ((gs == 0) & sw);
          end
+         assign sp_only[g] = sw & ~e_r[g][0] & ~hit(e_ps[g][0 +: PBITS]);
          // In order: only the head is a candidate. No age compare, just a pointer match.
          // unit_busy is NOT here. It is the unit's completion this cycle -- for the memory
          // class, M's advance, which is the dTLB compare and the LSU's done -- and putting
@@ -166,7 +183,7 @@ module smolrv64_iq
          // the late signal is one AND on the issue valid instead of NENT ANDs feeding a tree.
          // hx_busy is a flop, and e_hx and v are: the term folds into the entry's valid, off the
          // wakeup compares.
-         assign rdy[g] = v[g] & ~(e_hx[g] & hx_busy) & (&srdy[g*NSRC +: NSRC])
+         assign rdy[g] = v[g] & ~e_sp[g] & ~(e_hx[g] & hx_busy) & (&srdy[g*NSRC +: NSRC])
                        & ((INORDER == 0) | (g[IDXB-1:0] == qhead));
       end
    endgenerate
@@ -193,6 +210,7 @@ module smolrv64_iq
    assign iss_v   = sel_v;
    assign iss_ent = isel;
    assign iss_rob = e_rob[isel];
+   assign iss_spec = (SPEC != 0) & iss_v & sp_only[isel];
 
    reg [IDXB:0] occ;
    always @* begin
@@ -247,7 +265,7 @@ module smolrv64_iq
 
    always @(posedge clk) begin
       if (reset) begin
-         v <= {NENT{1'b0}};
+         v <= {NENT{1'b0}};  e_sp <= {NENT{1'b0}};
          qhead <= {IDXB{1'b0}}; qtail <= {IDXB{1'b0}};
       end else begin
          for (k = 0; k < NENT; k = k + 1) if (v[k])
@@ -255,8 +273,14 @@ module smolrv64_iq
                if (hit(e_ps[k][q*PBITS +: PBITS])
                    || (self_v && |(dep[k*NSRC+q] & isel_oh)))
                   e_r[k][q] <= 1'b1;
+         // the verdict on last cycle's speculative issues: freed, or a candidate again
+         if ((SPEC != 0) & sv_v) for (k = 0; k < NENT; k = k + 1) if (e_sp[k]) begin
+            e_sp[k] <= 1'b0;
+            if (sv_ok) v[k] <= 1'b0;
+         end
          if (do_iss) begin
-            v[isel] <= 1'b0;
+            v[isel] <= (SPEC != 0) & sp_only[isel];          // a speculative issue keeps its entry
+            e_sp[isel] <= (SPEC != 0) & sp_only[isel];
             if (INORDER != 0) qhead <= (qhead == (NENT-1)) ? {IDXB{1'b0}} : qhead + 1'b1;
          end
          if (do_disp) begin
@@ -267,6 +291,8 @@ module smolrv64_iq
             e_prd[fsel] <= d_prd;
             e_long[fsel] <= d_long;
             e_hx[fsel]   <= d_hx;
+            e_ag[fsel]   <= d_ag;
+            e_sp[fsel]   <= 1'b0;
             for (q = 0; q < NSRC; q = q + 1) begin
                dep[fsel*NSRC+q] <= drow[q];               // registers only; the column clear below wins over it
                e_r[fsel][q] <= d_r[q] | hit(d_ps[q*PBITS +: PBITS])
@@ -281,9 +307,9 @@ module smolrv64_iq
          if (do_iss) for (k = 0; k < NENT*NSRC; k = k + 1) dep[k][isel] <= 1'b0;
          // the kill: a dead entry's dependents are dead too (a source is an older op's), so
          // no live row keeps a bit for it
-         for (k = 0; k < NENT; k = k + 1) if (kdead(kd_v, kh, kb, e_rob[k])) v[k] <= 1'b0;
+         for (k = 0; k < NENT; k = k + 1) if (kdead(kd_v, kh, kb, e_rob[k])) begin v[k] <= 1'b0;  e_sp[k] <= 1'b0; end
          if (flush) begin                                  // last: wins over the dispatch above
-            v <= {NENT{1'b0}};
+            v <= {NENT{1'b0}};  e_sp <= {NENT{1'b0}};
             qhead <= {IDXB{1'b0}}; qtail <= {IDXB{1'b0}};
          end
       end
@@ -317,6 +343,11 @@ module smolrv64_iq
          $fatal(1, "smolrv64_iq: issued to a busy unit");
       if (do_iss & e_hx[isel] & hx_busy)
          $fatal(1, "smolrv64_iq: issued entry %0d into a taken handoff register", isel);
+      // a speculative issue is decided in the very next cycle, never later, never without one
+      if ((|(e_sp & v)) & ~sv_v)
+         $fatal(1, "smolrv64_iq: speculatively issued entries %b with no verdict this cycle", e_sp & v);
+      if (do_iss & e_sp[isel])
+         $fatal(1, "smolrv64_iq: entry %0d issued again while its speculative issue awaits its verdict", isel);
       // isel is qhead by construction when INORDER; this is the check that the priority
       // loop agrees, i.e. that nothing but the head can ever be ready.
       if ((INORDER != 0) & do_iss & (sel != qhead))

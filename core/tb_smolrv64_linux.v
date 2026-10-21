@@ -987,6 +987,83 @@ module tb;
       ln_buf  <= ln_buf  + 64'(pop64(64'(dut.core.en0)));
       ln_hold <= ln_hold + 64'(pop64(64'(dut.core.lb_any)));
    end
+   // ---- HITSPEC-SIM: what waking a load's dependents in the D$'s compare cycle would gain and cost.
+   // A load lookup in its compare (T+1, the D$'s s1) would wake as if it hit: right when it answers
+   // in the next cycle, wrong when it is cancelled, misses or waits. The schedulers' entries waiting
+   // on its register at that moment are the ops a right wake issues a cycle sooner -- those waiting on
+   // it alone, indeed sooner -- and a wrong wake would have to replay. Integer lanes and the FP queue.
+   localparam integer HS_NL = `SMOLRV64_IW, HS_NI = 10, HS_NF = 8, HS_PB = 10;
+   initial if (dut.core.NL != HS_NL || dut.core.NI != HS_NI || dut.core.NF != HS_NF || dut.core.RN_PBITS != HS_PB)
+      $fatal(1, "HITSPEC-SIM: the core's lanes/queues/register width moved (NL %0d NI %0d NF %0d PB %0d)",
+             dut.core.NL, dut.core.NI, dut.core.NF, dut.core.RN_PBITS);
+   wire [3:0]       hs_ix  = dut.u_dcache.s1_tag[3:0];
+   wire [HS_PB-1:0] hs_prd = dut.core.u_lq.prd[hs_ix];
+   wire             hs_ld  = dut.u_dcache.s1_v & ~dut.u_dcache.s1_st & ~dut.u_dcache.s1_nc
+                           & (dut.u_dcache.s1_tag[5:4] == 2'b00) & dut.core.u_lq.rdv[hs_ix];
+   wire [7:0]       hs_wl [0:HS_NL], hs_ol [0:HS_NL];   // per lane, and the FP queue last: waiting, alone
+   wire [7:0]       hs_al [0:HS_NL-1], hs_aol [0:HS_NL-1];   // ...of them address generators (a load or store)
+   // an entry's instruction sits under its PC at the top of the lane's payload
+   integer hs_ish;
+   initial hs_ish = $bits(dut.core.ln[0].plmem[0]) - dut.core.PCW - 32;
+   genvar hg;
+   generate for (hg = 0; hg < HS_NL; hg = hg + 1) begin : hsl
+      reg [7:0] w, o, a, ao;  integer e;  reg m0, m1, ag;  reg [31:0] ins;
+      always @* begin
+         w = 0;  o = 0;  a = 0;  ao = 0;
+         for (e = 0; e < HS_NI; e = e + 1) begin
+            m0 = dut.core.ln[hg].u_iq.v[e] & ~dut.core.ln[hg].u_iq.e_r[e][0] & (dut.core.ln[hg].u_iq.e_ps[e][0 +: HS_PB] == hs_prd);
+            m1 = dut.core.ln[hg].u_iq.v[e] & ~dut.core.ln[hg].u_iq.e_r[e][1] & (dut.core.ln[hg].u_iq.e_ps[e][HS_PB +: HS_PB] == hs_prd);
+            ins = 32'(dut.core.ln[hg].plmem[e] >> hs_ish);
+            ag  = (ins[6:3] == 4'b0000) | (ins[6:3] == 4'b0100);   // smolrv64_core is_lmem
+            if (m0 | m1) begin
+               w = w + 1;  if (ag) a = a + 1;
+               if ((m0 | dut.core.ln[hg].u_iq.e_r[e][0]) & (m1 | dut.core.ln[hg].u_iq.e_r[e][1])) begin
+                  o = o + 1;  if (ag) ao = ao + 1;
+               end
+            end
+         end
+      end
+      assign hs_wl[hg] = w;  assign hs_ol[hg] = o;  assign hs_al[hg] = a;  assign hs_aol[hg] = ao;
+   end endgenerate
+   reg [7:0] hs_fw, hs_fo;  integer hs_e;  reg [2:0] hs_m;
+   always @* begin
+      hs_fw = 0;  hs_fo = 0;
+      for (hs_e = 0; hs_e < HS_NF; hs_e = hs_e + 1) begin
+         hs_m[0] = dut.core.u_iq_f.v[hs_e] & ~dut.core.u_iq_f.e_r[hs_e][0] & (dut.core.u_iq_f.e_ps[hs_e][0 +: HS_PB] == hs_prd);
+         hs_m[1] = dut.core.u_iq_f.v[hs_e] & ~dut.core.u_iq_f.e_r[hs_e][1] & (dut.core.u_iq_f.e_ps[hs_e][HS_PB +: HS_PB] == hs_prd);
+         hs_m[2] = dut.core.u_iq_f.v[hs_e] & ~dut.core.u_iq_f.e_r[hs_e][2] & (dut.core.u_iq_f.e_ps[hs_e][2*HS_PB +: HS_PB] == hs_prd);
+         if (|hs_m) begin
+            hs_fw = hs_fw + 1;
+            if (&(hs_m | dut.core.u_iq_f.e_r[hs_e])) hs_fo = hs_fo + 1;
+         end
+      end
+   end
+   assign hs_wl[HS_NL] = hs_fw;  assign hs_ol[HS_NL] = hs_fo;
+   reg [63:0] hs_n [0:2], hs_w [0:2], hs_o [0:2], hs_a [0:2], hs_ao [0:2];   // [right, cancelled, missed or waiting]
+   integer    hsi;
+   initial for (hsi = 0; hsi < 3; hsi = hsi + 1) begin hs_n[hsi] = 0;  hs_w[hsi] = 0;  hs_o[hsi] = 0;  hs_a[hsi] = 0;  hs_ao[hsi] = 0; end
+   always @(posedge clk) if (!reset && meas && hs_ld) begin : hspec
+      integer k, c;  reg [15:0] w, o, a, ao;
+      c = dut.u_dcache.ans ? 0 : (dut.u_dcache.s1_f & dut.u_dcache.f_cancel) ? 1 : 2;
+      w = 0;  o = 0;  a = 0;  ao = 0;
+      for (k = 0; k <= HS_NL; k = k + 1) begin w = w + {8'd0, hs_wl[k]};  o = o + {8'd0, hs_ol[k]}; end
+      for (k = 0; k < HS_NL; k = k + 1) begin a = a + {8'd0, hs_al[k]};  ao = ao + {8'd0, hs_aol[k]}; end
+      hs_n[c] <= hs_n[c] + 1;  hs_w[c] <= hs_w[c] + 64'(w);  hs_o[c] <= hs_o[c] + 64'(o);
+      hs_a[c] <= hs_a[c] + 64'(a);  hs_ao[c] <= hs_ao[c] + 64'(ao);
+   end
+   // ---- SPEC-SIM: the speculative wake (D$ plan step 3a): wakes, and the address generators that
+   // executed on one -- their address delivered on the load's answer, or suppressed ------------
+   reg [63:0] sp_wake, sp_ok, sp_bad;
+   wire [IW-1:0] sp_l;
+   genvar spg;
+   generate for (spg = 0; spg < IW; spg = spg + 1) begin : spl
+      assign sp_l[spg] = dut.core.ln[spg].sp1;
+   end endgenerate
+   initial begin sp_wake = 0;  sp_ok = 0;  sp_bad = 0; end
+   always @(posedge clk) if (!reset && meas) begin
+      if (dut.core.sw_v) sp_wake <= sp_wake + 1;
+      if (dut.core.sv_ok) sp_ok <= sp_ok + 64'(pop64(64'(sp_l))); else sp_bad <= sp_bad + 64'(pop64(64'(sp_l)));
+   end
    // ---- RECOV-SIM: each restart's recovery against a forward rebuild ---------------------------
    // A restart (the ROB's k_v) walks the map back from the tail row to the branch's, a row a cycle,
    // racing the branch to the ROB head, where a squash and the sweep (dirty registers, IW a cycle)
@@ -1602,6 +1679,11 @@ module tb;
                lp_n[1], lp_n[0], lp_n[3], lp_n[2], lp_n[5], lp_n[4], lp_n[7], lp_n[6], lp_n[9], lp_n[8]);
       $display("LAND-SIM integer loads landing straight through=%0d, into the lane's landing buffer=%0d | lane-cycles held by a waiting landing=%0d",
                ln_by, ln_buf, ln_hold);
+      $display("HITSPEC-SIM load lookups in their compare, right/cancelled/missed-or-waiting: lookups=%0d/%0d/%0d | consumers waiting on them=%0d/%0d/%0d, waiting on them alone=%0d/%0d/%0d",
+               hs_n[0], hs_n[1], hs_n[2], hs_w[0], hs_w[1], hs_w[2], hs_o[0], hs_o[1], hs_o[2]);
+      $display("HITSPEC-SIM of the consumers, address generators (a load or store), right/cancelled/missed-or-waiting: waiting=%0d/%0d/%0d, waiting on them alone=%0d/%0d/%0d",
+               hs_a[0], hs_a[1], hs_a[2], hs_ao[0], hs_ao[1], hs_ao[2]);
+      $display("SPEC-SIM speculative wakes=%0d | address generators issued on one: delivered=%0d suppressed=%0d", sp_wake, sp_ok, sp_bad);
       $display("perf-stat-sim: begin");
       $display("%0d cycles", mc);          // the cycles counted: the window, or the whole run
       $display("%0d instructions", mr);

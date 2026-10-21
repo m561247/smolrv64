@@ -27,12 +27,15 @@ module tb;
    wire [IDXB:0] occupancy, free_n;
    integer errs=0;
 
+   // the speculative wake is off here (SPEC=0): nothing ever issues on it
+   wire iss_spec, io_iss_spec;
+   always @(posedge clk) if (iss_spec | io_iss_spec) $fatal(1, "tb: a speculative issue with SPEC=0");
    smolrv64_iq #(.NENT(NENT),.IDXB(IDXB),.NSRC(NSRC),.ROBB(ROBB),.PBITS(PBITS),.NWB(NWB),
              .FIXEDL(1)) dut
      (.clk(clk),.reset(reset),
       .d_valid(d_valid),.d_ready(d_ready),.d_rob(d_rob),.d_ps(d_ps),.d_r(d_r),
-      .d_prd(d_prd),.d_long(1'b0),.d_hx(d_hx),.d_ent(d_ent),
-      .wb_v(wb_v),.wb_preg(wb_preg),
+      .d_prd(d_prd),.d_long(1'b0),.d_hx(d_hx),.d_ag(1'b0),.d_ent(d_ent),
+      .wb_v(wb_v),.wb_preg(wb_preg),.s_v(1'b0),.s_preg({PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(iss_spec),
       .unit_busy(unit_busy),.hx_busy(hx_busy),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
       .iss_take(iss_take),
       .hold_v(hold_v),.hold_ent(hold_ent),
@@ -50,8 +53,8 @@ module tb;
              .FIXEDL(0),.INORDER(1)) dut_io
      (.clk(clk),.reset(reset),
       .d_valid(io_d_valid),.d_ready(io_d_ready),.d_rob(io_rob),.d_ps(io_ps),.d_r(io_r),
-      .d_prd({PBITS{1'b0}}),.d_long(1'b0),.d_hx(1'b0),.d_ent(io_d_ent),
-      .wb_v(io_wb_v),.wb_preg(io_wb_preg),
+      .d_prd({PBITS{1'b0}}),.d_long(1'b0),.d_hx(1'b0),.d_ag(1'b0),.d_ent(io_d_ent),
+      .wb_v(io_wb_v),.wb_preg(io_wb_preg),.s_v(1'b0),.s_preg({PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(io_iss_spec),
       .unit_busy(1'b0),.hx_busy(1'b0),.iss_v(io_iss_v),.iss_ent(io_iss_ent),.iss_rob(io_iss_rob),
       .iss_take(io_take),
       .hold_v(io_hold),.hold_ent({IDXB{1'b0}}),

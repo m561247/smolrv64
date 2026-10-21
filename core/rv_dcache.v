@@ -127,6 +127,7 @@ module rv_dcache #(
    input  wire [RTW-1:0]    f_tag,
    output wire              f_ok,        // a load presented now is taken (registers only)
    input  wire              f_cancel,    // the lookup's fast load is void (its T+1)
+   output reg               rd_f,        // rd_valid answers the fast load: the core's speculative wake's verdict
    // ---- committed stores: the data sits at its byte lanes of the aligned 8-byte chunk
    input  wire              wr_req,
    input  wire [63:0]       wr_pa,
@@ -650,7 +651,7 @@ module rv_dcache #(
    // ---------------------------------------------------------------- the machine
    always @(posedge clk) begin
       if (reset) begin
-         door <= 1'b0;  sdoor <= 1'b0;  s1_v <= 1'b0;  s1_f <= 1'b0;  sb_v <= 1'b0;  rd_valid <= 1'b0;  wr_acc <= 1'b0;  wr_cpl <= 1'b0;
+         door <= 1'b0;  sdoor <= 1'b0;  s1_v <= 1'b0;  s1_f <= 1'b0;  sb_v <= 1'b0;  rd_valid <= 1'b0;  rd_f <= 1'b0;  wr_acc <= 1'b0;  wr_cpl <= 1'b0;
          sc <= 2'd0;  sq_hp <= 2'd0;  wr_room <= 1'b0;  icq <= 1'b0;  ic_ack <= 1'b0;  ic_dty <= 1'b0;  ic_slow <= 1'b0;
          nc_v <= 1'b0;  nc_rdy <= 1'b0;  cl_pend <= 1'b0;  cl_on <= 1'b0;  cl_wait <= 1'b0;
          scan_on <= 1'b1;  scan <= 6'd0;  fl_v <= 1'b0;  ra_ptr <= {TB{1'b0}};  w1_v <= 1'b0;
@@ -699,6 +700,7 @@ module rv_dcache #(
          wr_room <= (sc + {1'b0, sq_take} - {1'b0, st_done}) != SD;
          // a load's answer: from the lookup, else the NC slot's
          rd_valid <= ans | nc_rdy;
+         rd_f     <= ans & s1_f;
          if (ans) begin
             rd_data      <= ans_chunk >> (8 * s1_pa[2:0]);
             rd_resp_tag  <= s1_tag[RTW-1:0];  rd_resp_addr <= s1_pa;

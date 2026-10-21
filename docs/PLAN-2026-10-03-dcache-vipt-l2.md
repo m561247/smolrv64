@@ -347,6 +347,62 @@ wait in the arrival RAM for M today (the last column), 0.5 to 1.9 cycles a memor
 in the same cycle (`fill_row`), a case M's one op a cycle never exercises today. The load queue's searched fields keep one writer, the load
 stage (two with the second load port), never the lanes.
 
+## Step 3a: address generators speculate on a load's hit (design, 2026-10-20)
+
+Tommy, 2026-10-19: load-use 3 by load-hit speculation, after 4 (which landed as da5d52b3).
+
+**What a speculative wake would buy, and which consumers it is** (`HITSPEC-SIM`, da5d52b3, GB5's 77
+SimPoints, per load lookup in its compare cycle): a wake as if every lookup hit is right for 67%
+(N-Body) to 98% (Horizon Detection) of the lookups; it would issue 0.26 (Inpainting) to 0.75
+(Navigation) waiting consumers a cycle sooner and wake 0.01 to 0.27 wrongly. Every lane op does its
+effects at select (its own dependents' wake, the pending clear, the store queue's snoop, the ROB's
+completion), so replaying an ALU consumer means holding its entry past issue, deferring its
+completion and masking a cycle's shadow of its dependents: a change across the lanes, the ROB and
+every scheduler. A load or store issuing in a lane only generates its address -- it writes no
+register, wakes nothing and completes nothing -- so its one effect, the address it delivers, is the
+one to cancel. Address generators are 21-35% of the consumers a right wake releases in Navigation,
+HTML5, SQLite and Rigid Body (CoreMark 24%, the boot 10%, the FP kernels 1-5%), and they sit on
+the serial chains where a cycle is runtime: the pointer chase, `chase2`'s 4 cycles.
+
+**The design: an 8-byte integer load M starts in its own cycle wakes the address generators waiting
+on it at its compare (T+1); the D$'s registered verdict at T+2 lets their addresses stand or
+cancels them.**
+- **The wake, from flops** (rule I12). M knows at T which load it starts (`f_go`), its queue entry's
+  destination and size; for an 8-byte integer load with a destination it registers {valid, prd} as
+  the speculative wake, broadcast at T+1 to the lanes' schedulers as one more wake port that only
+  an address-generating entry (a bit written at dispatch, `e_ag`) may match, and only on its
+  address source. Doors, replays and the walker's reads never wake early: they are not M's.
+- **The issue.** An address generator picked on that wake keeps its scheduler entry, marked issued
+  and no candidate, for one more cycle (`e_sp`); its select register records that its base comes
+  from the D$'s answer.
+- **The data.** At T+2 the base is the D$'s answer register (`rd_data`), an aligned doubleword
+  needing no shift or extension, through one more input of the lane's operand mux into the address
+  adder. On 039314ad's routed checkpoint the answer reaches a lane's write register through the
+  formatting in 5.12 ns (0.767 ns of slack) and a forwarded operand reaches M's address register
+  through the adder in 4.33 ns (1.200 ns); the new path is the first's route without its formatting
+  and the second's adder: an estimated 4.8-5.3 ns.
+- **The verdict, a flop at T+2**: the D$ answered the started load (its answer at T+1, registered).
+  Right: the address goes to M and the arrival RAM as any lane's does, and the entry frees. Wrong (a
+  miss, a wait, the cancel): the lane's delivery that cycle is suppressed (one AND of a flop on its
+  `l_lm`, which feeds the arrival RAM's write enable and M's bypass select -- an enable, never an
+  address, rule I6) and the entry is a candidate again, its address source still waiting for the
+  real landing's wake. An address generator wakes nothing, so there is no shadow to mask.
+- **Load-use 3 for a load feeding an address**: the load's address at E, the D$ at E+1, the
+  consumer picked at E+2, its address at E+3. Every other consumer keeps 4.
+
+**Checks**: every speculatively issued entry is resolved at T+2 (asserted); a suppressed delivery
+never reaches M or the arrival RAM; `HITSPEC-SIM` and `LDPATH-SIM` count the speculation's right
+and wrong wakes; the lockstep, the userspace locksteps and the storm as for step 2; `chase2` 3.0
+cycles on the board.
+
+**Built 2026-10-20 (wip/hitspec), as designed**, the verdict being the D$'s registered word that its
+answer is the started load's (`rd_f`). A bare-metal chase 3.00 cycles a load in the lockstep;
+CoreMark -3.48% cycles, Dhrystone -2.59%, the 60 M lockstep +0.19% retires, GB5's 77 SimPoints
+-0.13% (Text Compression -0.38%, SQLite -0.31%; the FP kernels flat). 83-89% of the speculative
+issues stand (`SPEC-SIM`). Small on GB5 because address generators are at most 35% of the consumers
+a right wake would release (1-5% in the FP kernels); the rest are ALU ops, which wait for load-hit
+speculation with replay.
+
 ## Open
 
 - **Where a store translates** once M is gone: a second dTLB read port (LUTRAM read ports are

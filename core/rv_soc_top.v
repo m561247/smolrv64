@@ -148,7 +148,7 @@ module rv_soc_top #(
    wire                dmem_rfast, dmem_rvalid_c, dmem_rbusy;      // the tagged fast load path (C4a)
    wire [LQ_IB-1:0]    dmem_rtag, dmem_rtag_resp;
    wire [63:0]         dmem_rdata_c;
-   wire                dmem_fv, dmem_fhint, dmem_fcancel, dmem_fok;   // M's load in M's cycle, straight to the D$
+   wire                dmem_fv, dmem_fhint, dmem_fcancel, dmem_fok, dmem_fans;   // M's load in M's cycle, straight to the D$
    wire [63:0]         dmem_fpa;
    wire [LQ_IB-1:0]    dmem_ftag;
    wire [55:0]         ptw_addr, dptw_addr;
@@ -171,7 +171,7 @@ module rv_soc_top #(
       .dmem_rfast(dmem_rfast), .dmem_rtag(dmem_rtag), .dmem_rvalid_c(dmem_rvalid_c),
       .dmem_rtag_resp(dmem_rtag_resp), .dmem_rdata_c(dmem_rdata_c), .dmem_rbusy(dmem_rbusy),
       .dmem_fv(dmem_fv), .dmem_fpa(dmem_fpa), .dmem_ftag(dmem_ftag), .dmem_fhint(dmem_fhint),
-      .dmem_fcancel(dmem_fcancel), .dmem_fok(dmem_fok),
+      .dmem_fcancel(dmem_fcancel), .dmem_fok(dmem_fok), .dmem_fans(dmem_fans),
       .dmem_wen(dmem_wen), .dmem_wfsm(dmem_wfsm), .dmem_waddr(dmem_waddr), .dmem_wabase(dmem_wabase),
       .dmem_wdata(dmem_wdata), .dmem_wmask(dmem_wmask),
       .dmem_wuncached(dmem_wuncached),
@@ -711,7 +711,7 @@ module rv_soc_top #(
      (.clk(clk), .reset(reset),
       .rd_req(dcr_req), .rd_pa(dcr_addr), .rd_tag(dcr_tag), .rd_ack(dc_rd_ack),
       .rd_quiet(dc_rd_quiet), .f_hint(dmem_fhint), .f_req(dmem_fv), .f_pa(dmem_fpa),
-      .f_tag({2'b00, dmem_ftag}), .f_ok(dmem_fok), .f_cancel(dmem_fcancel),
+      .f_tag({2'b00, dmem_ftag}), .f_ok(dmem_fok), .f_cancel(dmem_fcancel), .rd_f(dmem_fans),
       // Svpbmt: only a LSU load read can be NC (PTW reads share dcr but are always cacheable -> 0
       // when c_rd_req is low). The store's NC bit qualifies the write port.
       .rd_nc(c_rd_req & c_rd_unc),

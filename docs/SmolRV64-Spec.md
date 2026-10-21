@@ -25,7 +25,7 @@ the 2026-09 release; their history is in git, and the dated records in `docs/his
 | Issue | **dynamic**: ALU ops, multiplies, divides, branches and jumps issue in their slot's lane (three schedulers, three ALUs, three multipliers; a divide's operands go to the one MD stage) and reorder freely; a system op issues in lane A and fires from the SYSQ at the ROB head; FP ops reorder on the FP port (§7); loads, stores, AMOs, LR/SC and CBOs generate their address in their slot's lane and reach M through their LQ/SQ entry or the head-op register (§8) |
 | Completion | **out of order** (non-blocking loads, tagged FP results, ALU at issue) |
 | Commit | in order, from the ROB head, up to `IW`/cycle |
-| Speculation | branch/jump prediction only; no memory speculation, no value speculation |
+| Speculation | branch/jump prediction; loads ahead of older stores of unknown address (§8); an address generator issues on a load's D$ lookup before it answers (§8); no value speculation |
 | Target | AMD XCKU5P, `probe_clk` **166.67 MHz** (6.000 ns) at `PROBE_CLK_DIV8=48` |
 
 Sections that describe the core as it was when they were written say so.
@@ -907,6 +907,10 @@ only `fmadd` has: 20 bits/entry against 29.
   registers and the SYSQ's fire, so no completion cone selects a lane's broadcast address.
   A source not yet ready is also compared against the live ports **in its dispatch cycle**,
   because a producer broadcasts exactly once and would otherwise be missed forever.
+- **The speculative wake** (`SPEC`, the lanes' schedulers): one more port, from flops, that only
+  an address generator's address source matches (`e_ag`, a load or store, written at dispatch). An
+  entry picked on it alone keeps its slot, issued and no candidate (`e_sp`), until the next
+  cycle's verdict frees it or makes it a candidate again (§8).
 - **Select**: **fixed priority**, lowest entry index first. Age is not stored, not
   compared, and not needed — an age matrix is `O(N²)` and buys nothing a free list does not
   already give. Starvation is impossible because an entry is only freed by issuing.
@@ -1115,8 +1119,8 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   never a retired op's and a redirect empties the buffers. The SYSQ never
   waits: a system op goes alone (lane A), lane A holds its select while one is the ROB head, and
   the SYSQ fires only into a free lane A, so a redirecting op writes and completes in its fire
-  cycle. FP loads land on the LD port in SH_FL. Waking a load's consumers
-  from its D$ lookup (load-hit speculation, with replay on a miss) is a later step.
+  cycle. FP loads land on the LD port in SH_FL. An address generator waiting
+  on a load may issue on its D$ lookup instead (below); every other consumer wakes at the landing.
 - **So does an FP op's or divide's integer result (5.2e).** The FE stream (the F stage's
   landing or the MD stage's divide, `md_wr`) writes an f-register into SH_FF; an integer
   destination (`few_int`, by its shard) takes its lane's landing buffer the same way, behind
@@ -1367,6 +1371,28 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   Camera unmoved -- because releasing M lets the following non-memory instructions execute
   while the data is in flight, and that is worth more than the latency it costs. The queue's
   two cycles are not overhead; one of them is.
+- **An address generator issues on a load's D$ lookup, before it answers (D$ plan step 3a,
+  2026-10-20).** An 8-byte integer load with a destination that M starts in its own cycle
+  registers that destination as the speculative wake (`smolrv64_core` `sw_v`/`sw_p`, flops: rule
+  I12), broadcast at T+1, the lookup's compare, to the lanes' schedulers (§6.1). An entry picked on
+  it at T+1 executes at T+2 with the D$'s answer as its base (`sp1`: `rd_data`, an aligned
+  doubleword, into the address adder), and the verdict is a flop from the D$: its answer this cycle
+  is that load's (`rv_dcache` `rd_f`). Right, the address goes to M and the arrival RAMs as any
+  lane's does and the entry frees; wrong -- a miss, a wait or the store queue's cancel -- the
+  lane's delivery is suppressed (`l_lm`, an enable) and the entry is a candidate again, its address
+  source waiting for the landing's wake. An address generator writes no register, wakes nothing
+  and completes nothing in its lane, so a wrong issue has nothing to undo and costs its lane one
+  execute slot. A load whose result is a load's or a store's address has load-use 3: its address
+  at E, the D$ at E+1, the consumer picked at E+2, its address at E+3; every other consumer keeps
+  4. Narrower loads (their answer is shifted and extended), FP loads, and loads the queue's port
+  starts do not wake speculatively. Checks: every speculative issue is decided in the next cycle
+  and not issued again before; a base that stands is that cycle's D$ response, by its register;
+  only an address generator executes on one. Measured against da5d52b3: a bare-metal pointer
+  chase (`workloads/rvbench/local/chase.c`, 16 KiB, the lockstep) 3.00 cycles a load; CoreMark
+  -3.48% cycles, Dhrystone -2.59%, the 60 M Linux lockstep +0.19% retires; GB5's 77 SimPoints
+  -0.13% of the single-core cycles (Text Compression -0.38%, AES-XTS -0.33%, SQLite -0.31%, Clang
+  -0.30%; the FP kernels within 0.03% either way). 83% (the boot) to 89% (Dhrystone) of the
+  speculative issues stand (`SPEC-SIM`).
 - **Loads go ahead of older stores whose addresses are unknown, and replay when one overlaps
   (memory-dependence speculation).** A load whose wait bit is clear is not blocked by older stores
   with no address; only a known overlap blocks it. The store queue keeps its per-load overlap
