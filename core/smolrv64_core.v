@@ -1775,10 +1775,11 @@ module smolrv64_core
    wire [ROB_IDXB-1:0] rob_irr_idx;  wire rob_irr_v;
    wire sq_k_take = sq_kc_v & rob_irr_v & (sq_kc_rob == rob_irr_idx);
    // The queue HANDS a store OFF to the store register or the port, and FREES it when memory has
-   // it: at the store register's write, so until then younger loads are ordered against a live
-   // entry; at the port's handoff, since the state machine holds the store and nothing passes it.
+   // it: at the store register's write, and at the state machine's last write, so until then
+   // younger loads are ordered against a live entry. A load M starts in its own cycle reaches the
+   // D$ beside the port, so it passes a store the state machine holds (rule D20).
    wire sq_c_take = sq_sp_go | (lsu_pt_ack & pt_store);
-   wire sq_c_done = lsu_sp_done | (lsu_pt_ack & pt_store);
+   wire sq_c_done = lsu_sp_done | (lsu_pt_done & lsu_pt_is_store);
 
    // ---- THE WALKER: a queue entry M handed over untranslated ----
    // The store queue's first uncommitted entry, else the load queue's candidate, whichever has no

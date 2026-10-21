@@ -357,7 +357,12 @@ module smolrv64_sq
    // release costs no cycle on a store the LSU is waiting for (stbench FWD: 12.75 -> 11.75
    // cycles per store-load pair without it). k_take is a compare of registered values in
    // smolrv64_core, the same shape as the old head-index compare this replaced.
-   assign c_v    = v[ho] & av[ho] & dv[ho] & (cmt[ho] | (k_take & (kcc == hoc)));
+   // ONE STORE BETWEEN HANDOFF AND MEMORY: the next is handed off when none is outstanding or the
+   // outstanding one is done this cycle (c_done), whichever path it took -- the store register
+   // chains one a cycle as before, and a store behind one the LSU's state machine writes waits for
+   // its last write, so stores reach memory in program order and stay ordered against loads.
+   assign c_v    = v[ho] & av[ho] & dv[ho] & (cmt[ho] | (k_take & (kcc == hoc)))
+                 & ((ho_n == {(IDXB+1){1'b0}}) | c_done);
    assign kc_v   = (kcc != tailc) & v[kc] & av[kc] & dv[kc] & tv[kc] & ~flt[kc];
    assign kc_rob = rob[kc];
    wire [PAW-1:0] kc_am = addr_m[kc], kc_aw = addr_w[kc];

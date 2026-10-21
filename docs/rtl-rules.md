@@ -660,6 +660,19 @@ The fix tests the entry being filled by its incoming value (`kd_new = kdead(d_ro
 kills a dead op the F stage moves in during a kill at once. When a structure starts filling in a
 new circumstance (here: during a kill), every per-entry arm is checked for the write it races.
 
+**D20. A store leaves the store queue when memory has it, whatever unit holds it meanwhile.** The
+queue freed a store taken by the LSU's state machine (uncached, a device's, one straddling two
+doublewords) at its handoff, on the argument that "the state machine holds the store and nothing
+passes it". Step 2 (da5d52b3) added a load start beside the port -- M presents a translated load
+to the D$ in its own cycle -- and that load does pass it: between the handoff and the state
+machine's second beat, a younger load to the straddled doubleword read the D$ a cycle before the
+store's bytes landed. The alias test could not see the store, its entry being gone. The IW=3
+storm lockstep found it 160 M cycles in, once dispatch rows of loads and stores (2026-10-20)
+made the timing common; the commit-time store-data check passed, because the store's own bytes
+were right. The fix keeps the entry until the state machine's last write, so every load path,
+present and future, orders against it in one place. An exemption argued from another unit's
+state ("nothing passes it") is re-derived when a new path reaches the same memory.
+
 ## E. Widths and lint
 
 **E1. The lint gate is `-Werror` on the load-bearing rules.**

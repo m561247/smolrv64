@@ -1226,8 +1226,10 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   still in the queue, and the queue keeps the entry until memory has it. It HANDS a store OFF
   (`c_take`, at its handoff pointer) and FREES it (`c_done`, at its head): at the store register's
   write, so a younger load is ordered against a live entry until the D$ holds the store (the D$
-  then holds a load to the line of any store it has queued); at the port's handoff, since nothing
-  passes a store the state machine holds. At most one store waits between the two (asserted).
+  then holds a load to the line of any store it has queued); at the state machine's last write
+  for a store through the port (uncached, a device's, or one straddling two doublewords), since a
+  load M starts in its own cycle reaches the D$ beside the port and would pass it otherwise. At
+  most one store waits between the two (asserted).
   Measured on the GB5 checkpoint slices (§11.2; Navigation, HTML5, SQLite, PDF Rendering, Camera,
   50 M retires after 20 M of warm-up) against the port shared by both: **-5.48%** of their cycles
   (PDF -16.77%, HTML5 -4.53%, SQLite -2.63%, Navigation -1.42%, Camera -1.43%), pi -0.69%, the
