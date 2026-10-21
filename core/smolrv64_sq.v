@@ -216,8 +216,6 @@ module smolrv64_sq
    (* ram_style = "distributed" *) reg [PAW-1:0] addr_w [0:NENT-1];
    reg [NENT-1:0]        addr_lv;            // entry k's PA is the walker's
    reg [VAW-1:0]         va   [0:NENT-1];
-   reg [VAW-1:0]         pc   [0:NENT-1];
-   reg [SEQW-1:0]        sqn  [0:NENT-1];
    reg [NENT-1:0]        tv, flt;            // translated / ...and the translation faulted
    reg [3:0]             fc   [0:NENT-1];
    (* ram_style = "distributed" *) reg [63:0] data [0:NENT-1];   // one write a cycle: the landing below
@@ -351,7 +349,7 @@ module smolrv64_sq
    wire [NENT-1:0]   pk_m = v & ~av & ar;
    assign pk_v      = |pk_m;
    assign pk_idx    = ring_oldest(pk_m, head);
-   assign pk_seq    = sqn[pk_idx];
+
    assign occupancy = cnt;
    // THE WALKER AND THE TRAP READ THE FIRST UNCOMMITTED ENTRY. Stores commit in order, so an
    // untranslated store anywhere else waits behind this one anyway, and a store that faulted
@@ -363,8 +361,20 @@ module smolrv64_sq
    assign f_v   = kc_live & tv[kc] & flt[kc];
    assign f_rob = rob[kc];
    assign f_fc  = fc[kc];
-   assign f_pc  = pc[kc];
-   assign f_seq = sqn[kc];
+   // the store's PC and seq, read at one or two entries and written by a row: banks of the
+   // allocation's (a row's stores take consecutive entries, one bank each), a copy per read
+   localparam integer SNB = (NW > 1) ? (1 << $clog2(NW)) : 2;
+   wire [NW*IDXB-1:0] al_wp;
+   genvar gaw;
+   generate for (gaw = 0; gaw < NW; gaw = gaw + 1) begin: g_alwp
+      assign al_wp[gaw*IDXB +: IDXB] = al_e[gaw];
+   end endgenerate
+   smolrv64_bankq #(.W(VAW), .DEPTH(NENT), .NW(NW), .NR(1), .NB(SNB), .PICK(1), .AB(IDXB)) u_pc
+     (.clk(clk), .reset(reset), .wv(d_alloc), .wp(al_wp), .wd(d_pc), .rp(kc), .ro({$clog2(SNB){1'b0}}), .rd(f_pc));
+   smolrv64_bankq #(.W(SEQW), .DEPTH(NENT), .NW(NW), .NR(1), .NB(SNB), .PICK(1), .AB(IDXB)) u_sqn_kc
+     (.clk(clk), .reset(reset), .wv(d_alloc), .wp(al_wp), .wd(d_seq), .rp(kc), .ro({$clog2(SNB){1'b0}}), .rd(f_seq));
+   smolrv64_bankq #(.W(SEQW), .DEPTH(NENT), .NW(NW), .NR(1), .NB(SNB), .PICK(1), .AB(IDXB)) u_sqn_pk
+     (.clk(clk), .reset(reset), .wv(d_alloc), .wp(al_wp), .wd(d_seq), .rp(pk_idx), .ro({$clog2(SNB){1'b0}}), .rd(pk_seq));
 
    // c_v says the next entry to hand off is READY (address and data present). Committing in program order
    // is the core's job: it takes the entry only when c_rob is the ROB head, so a store
@@ -674,7 +684,6 @@ module smolrv64_sq
          for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw]) begin
             v[al_e[aw]] <= 1'b1; av[al_e[aw]] <= 1'b0; dv[al_e[aw]] <= 1'b0; cmt[al_e[aw]] <= 1'b0;
             rob[al_e[aw]] <= d_rob[aw*ROBB +: ROBB];  dpr[al_e[aw]] <= d_dpreg[aw*PBITS +: PBITS];
-            pc[al_e[aw]] <= d_pc[aw*VAW +: VAW];  sqn[al_e[aw]] <= d_seq[aw*SEQW +: SEQW];
             rd[al_e[aw]] <= d_rdy[aw];
          end
          tailc <= tailc + n_alloc;
