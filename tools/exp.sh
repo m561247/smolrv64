@@ -24,7 +24,7 @@
 # a stale model once under their build lock and then run from it together. The tree is copied
 # with rsync (tracked and untracked-not-ignored files, no platforms/), so an uncommitted edit is
 # measured as it stands. Results land in ~/exp-results/<tag>/ on coffee: a
-# log per run, and the table in table.txt.
+# log per run, and the table in table.txt; the hosts' copies go once the logs are in.
 set -u
 here=${EXP_HERE:-$(cd "$(dirname "$0")/.." && pwd)}
 # It runs from a private copy: bash reads a script as it executes, and an edit to this file would
@@ -153,9 +153,18 @@ if [ -n "$cf_runs" ]; then   # coffee's own, by its done file
       sleep 60
    done
 fi
-rsync -a -e "ssh $M5_OPT" "$M5_IP:$M5_ROOT/$tag.out/" "$R/$tag/"
-rsync -a -e "ssh $FM_OPT" "$FM_IP:$FM_ROOT/$tag.out/" "$R/$tag/"
-rsync -a -e "ssh $MC_OPT" "$MC_IP:$MC_ROOT/$tag.out/" "$R/$tag/"
-[ -n "$cf_runs" ] && rsync -a "$CF_ROOT/$tag.out/" "$R/$tag/"
+got=1
+rsync -a -e "ssh $M5_OPT" "$M5_IP:$M5_ROOT/$tag.out/" "$R/$tag/" || got=0
+rsync -a -e "ssh $FM_OPT" "$FM_IP:$FM_ROOT/$tag.out/" "$R/$tag/" || got=0
+rsync -a -e "ssh $MC_OPT" "$MC_IP:$MC_ROOT/$tag.out/" "$R/$tag/" || got=0
+if [ -n "$cf_runs" ]; then rsync -a "$CF_ROOT/$tag.out/" "$R/$tag/" || got=0; fi
 [ -d "$R/$base" ] && [ "$base" != "$tag" ] || base=""
 table "$tag" "$base" | tee "$R/$tag/table.txt"
+# The hosts keep nothing of an experiment whose logs are all here: its tree (with the model built
+# in it), its logs and its runner go. One that failed or did not finish keeps them, to look at.
+if [ $got = 1 ]; then
+   ssh $M5_OPT $M5_IP "rm -rf $M5_ROOT/$tag $M5_ROOT/$tag.out $M5_ROOT/$tag.sh"
+   ssh $FM_OPT $FM_IP "rm -rf $FM_ROOT/$tag $FM_ROOT/$tag.out $FM_ROOT/$tag.sh"
+   ssh $MC_OPT $MC_IP "rm -rf $MC_ROOT/$tag $MC_ROOT/$tag.out $MC_ROOT/$tag.sh"
+   rm -rf "$CF_ROOT/$tag" "$CF_ROOT/$tag.out" "$CF_ROOT/$tag.sh"
+fi
