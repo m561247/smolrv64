@@ -77,12 +77,20 @@ run() {   # <name> <kind> <arg>
       gb5)  CKPT=$CK/$3.ckpt MEM_LG2=31 CYC=0 ./run-linux.sh +measure_from=20000000 +max_retires=70000000 ;;
    esac > $O/$1.log 2>&1; echo "rc=$?" >> $O/$1.log
 }
-kind() {  # <kind> <name:arg ...>: the runs in parallel, J at a time
+avail() {   # the host's available memory, GiB (Linux: MemAvailable; macOS: free + inactive + speculative)
+   if [ -r /proc/meminfo ]; then awk '/^MemAvailable:/ {print int($2 / 1048576)}' /proc/meminfo
+   else vm_stat | awk '/page size of/ {ps = $8} /^Pages (free|inactive|speculative):/ {gsub(/\./, "", $NF); p += $NF}
+                       END {print int(p * ps / 1073741824)}'; fi
+}
+kind() {  # <kind> <name:arg ...>: the runs in parallel, J at a time, each started only with 4 GiB to
+          # spare, 15 s after the one before (so its memory shows): several experiments share a host,
+          # and a SimPoint short of memory is killed (rc=137)
    local k=$1 n a r; shift
    for r in "$@"; do
       IFS=: read n a <<< "$r"
-      while [ $(jobs -pr | wc -l) -ge $J ]; do sleep 10; done
+      while [ $(jobs -pr | wc -l) -ge $J ] || [ $(avail) -lt 4 ]; do sleep 10; done
       run $n $k $a &
+      sleep 15
    done
    wait
 }

@@ -137,27 +137,38 @@ module tb;
    // fill where the board admits dozens, the store queue never filled the way it does on the
    // board, and two six-day-old ordering defects lived through every gate.
    //
-   // MEASURED on the board at 166.67 MHz on 2026-09-04 (src/ddr_hpm.v read with
-   // workloads/ddrhpm; 1.2 G reads and 139 M writes over an Ubuntu boot, then 443 M reads
-   // over a 512 MB kernel memcpy stream and a sort -- the two agree to 1%):
-   //     read  (fill):       mean 28.75 cycles -- 96.5% in 16-31, 1.2% in 32-63, 2.3% in 64+
-   //     write (write-back): mean 15.62 cycles -- 95.1% in  8-15, 1.2% in 16-31, 2.3% in 32-63, 1.3% in 64+
-   // Reads and writes differ because writes post at the bridge, so they draw separately; the
-   // tails are occasional excursions (refresh, bank conflicts), not a wide uniform spread.
-   // The base bands are placed at the top of the measured bin so the means match: reads
-   // 24-31, writes 12-15.
+   // MEASURED on the board at 166.67 MHz on 2026-10-21 (414eda07, the 2 GiB board; rv_soc_top's
+   // ddr_hpm read with workloads/ddrhpm around each of five kernels -- a dependent chase over
+   // 256 KiB, and over 4 MiB arrays a read stream, a copy, a daxpy and a fill):
+   //     read  (fill):       mean 33.9-36.0 cycles -- 26-46% in 16-31, 50-71% in 32-63, 3-4% in 64+
+   //     write (write-back): mean 21.1-21.8 cycles -- 95-96% in 16-31, 0.2-0.7% in 32-63, 3-4% in 64+
+   // The traffic barely moves them (a copy's reads 1.2 cycles over the chase's): the port's latency
+   // is the controller's and the clock crossing's, not queueing; the crossing (RELATED_CLOCKS=0)
+   // is about 4.5 cycles of it each way. Reads and writes differ because writes post at the bridge,
+   // so they draw separately; the tails are occasional excursions (refresh, bank conflicts), not a
+   // wide uniform spread.
+   // The bands are placed so the means match: reads 28-31 and 31-38, writes 17-20.
    //
    //   +ddr_lat=N     flat N-cycle latency, reads and writes alike (the old model; sweeps)
    //   -DDDR_LAT=N    the same, at compile time (kept for the existing sweep scripts)
    //   -DDDR_JIT=J    uniform 0..J added on top of whichever base is in force
+   //   +ddr_cut=N     every draw N cycles shorter, at least the 4 beats (what a faster memory path
+   //                  is worth); -DDDR_CUT=N the same, at compile time
 `ifndef DDR_LAT
  `define DDR_LAT 0
 `endif
 `ifndef DDR_JIT
  `define DDR_JIT 0
 `endif
-   reg [63:0] ddr_lat_arg;
+`ifndef DDR_CUT
+ `define DDR_CUT 0
+`endif
+   reg [63:0] ddr_lat_arg, ddr_cut_arg;
    initial if (!$value$plusargs("ddr_lat=%d", ddr_lat_arg)) ddr_lat_arg = 64'd`DDR_LAT;
+   initial if (!$value$plusargs("ddr_cut=%d", ddr_cut_arg)) ddr_cut_arg = 64'd`DDR_CUT;
+   function [7:0] ddr_cut(input [7:0] d);
+      ddr_cut = ({56'd0, d} >= ddr_cut_arg + 64'd4) ? d - ddr_cut_arg[7:0] : 8'd4;
+   endfunction
    reg [15:0] dlfsr; initial dlfsr = 16'hBEEF;
    function [7:0] ddr_draw;      // the measured shape; 0 = flat override in force
       input is_wr;
@@ -166,14 +177,13 @@ module tb;
          r = dlfsr[9:0];
          if (ddr_lat_arg != 0)              ddr_draw = ddr_lat_arg[7:0];
          else if (is_wr) begin
-            if      (r < 10'd13)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 1.3%: 64-127
-            else if (r < 10'd36)            ddr_draw = 8'd32 + {3'd0, r[4:0]};   // 2.3%: 32-63
-            else if (r < 10'd48)            ddr_draw = 8'd16 + {4'd0, r[3:0]};   // 1.2%: 16-31
-            else                            ddr_draw = 8'd12 + {6'd0, r[1:0]};   // 95%:  12-15, mean 13.5
+            if      (r < 10'd36)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 3.5%: 64-127
+            else if (r < 10'd41)            ddr_draw = 8'd32 + {3'd0, r[4:0]};   // 0.5%: 32-63
+            else                            ddr_draw = 8'd17 + {6'd0, r[1:0]};   // 96%:  17-20; mean 21.3
          end else begin
-            if      (r < 10'd24)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 2.3%: 64-127
-            else if (r < 10'd36)            ddr_draw = 8'd32 + {3'd0, r[4:0]};   // 1.2%: 32-63
-            else                            ddr_draw = 8'd24 + {5'd0, r[2:0]};   // 96.5%: 24-31, mean 27.5
+            if      (r < 10'd36)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 3.5%: 64-127
+            else if (r < 10'd323)           ddr_draw = 8'd28 + {6'd0, r[1:0]};   // 28%:  28-31
+            else                            ddr_draw = 8'd31 + {5'd0, r[2:0]};   // 68.5%: 31-38; mean 35.2
          end
       end
    endfunction
@@ -230,7 +240,7 @@ module tb;
          if (ddr_q_valid && ddr_q_ready) begin
             dq_v[d_free]  <= 1'b1;  dq_we[d_free] <= ddr_q_we;  dq_id[d_free] <= ddr_q_id;
             dq_ad[d_free] <= ddr_q_addr;  dq_seq[d_free] <= d_seq;  d_seq <= d_seq + 1;
-            dq_due[d_free] <= d_now + {48'd0, 8'd0, ddr_draw(ddr_q_we)} + (ddr_rnd(0) % (`DDR_JIT + 1));
+            dq_due[d_free] <= d_now + {48'd0, 8'd0, ddr_cut(ddr_draw(ddr_q_we))} + (ddr_rnd(0) % (`DDR_JIT + 1));
             dlfsr <= {dlfsr[14:0], dlfsr[15]^dlfsr[13]^dlfsr[12]^dlfsr[10]};
             if (ddr_q_we) begin
                line = ({6'd0, ddr_q_addr} - LBASE) & (NLINES-1);

@@ -2232,7 +2232,17 @@ prints the model's source hash on the verdict line; a verdict whose log lacks
 MEM_LG2/VDEFS builds `obj_dir_smolrv64_clinux.<hash>` and runs in parallel with the others, rule G10). tiny128 is a
 small guest: it never lined up the store-queue age defect of 2026-09-04 in 60 M cycles,
 the Geekbench boot did at 447 M, so the long-guest run is a standing per-batch gate. The
-DDR model is the measured shape by default (`+ddr_lat=N` for a flat sweep).
+DDR model is the board's measured shape by default (`+ddr_lat=N` for a flat sweep, `+ddr_cut=N` for a
+faster memory path): `rv_soc_top`'s `ddr_hpm` read with `workloads/ddrhpm` on 414eda07, 2026-10-21,
+reads 35.2 and writes 21.3 cycles mean from acceptance at the line port. Bare-metal kernels in the
+lockstep against the same code on the board (user mode, 512 KiB arrays): a dependent chase 45.89 vs
+45.87 cycles a load, a read stream 3.27 vs ~3.2 cycles an element, a daxpy 7.32 vs 7.4, a fill 2.04
+vs 2.03; a copy 3.81 vs 4.15, 8% fast and not yet explained: the board's line port never refuses
+(its 16-deep request FIFO holds the 11 requests the caches can have out, where the model takes 8),
+and both answer each direction in order. Integer subtests' Top-Down matches
+the board's within a few points; the FP subtests' back end is about twice the sim's on the board
+(Machine Learning 56.7% vs 21.5%), which the latencies do not explain. On GB5's 77 SimPoints a port
+10 cycles faster is worth 4.31% of the single-core cycles, 20 cycles 7.74% (no L2).
 
 Invariant assertions are **always on** (`$fatal`, never `` `ifdef ``). Only flood-volume
 tracers and stats are gated.
