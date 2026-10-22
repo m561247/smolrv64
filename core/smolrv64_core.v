@@ -1056,7 +1056,7 @@ module smolrv64_core
       .d_ps(stg_ps_f),.d_r(stg_r_f | wkq_f),
       .d_prd(stg_prd_f),.d_long(1'b0),.d_hx(1'b0),.d_ag(1'b0),.d_ent(rf_d_ent),
       .wb_v(wkv),.wb_preg(wkp),.s_v(1'b0),.s_preg({RN_PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(),
-      .unit_busy(j_v & ~j_adv),.hx_busy(1'b0),   // j_* can't take: occupied and its op not draining
+      .unit_busy(j_v & ~j_adv),.hx_busy(1'b0),.ag_only(1'b0),   // j_* can't take: occupied and its op not draining
       .iss_v(rf_iss_v),.iss_ent(rf_iss_ent),.iss_rob(rf_iss_rob),
      .iss_take(rf_take),
       .hold_v(j_v),.hold_ent(j_ent),
@@ -1446,7 +1446,7 @@ module smolrv64_core
          .d_ag(is_lmem(sg_insn)),.d_ent(d_ent),
          .wb_v(wkv_i),.wb_preg(wkp),.s_v(sw_v),.s_preg(sw_p),.sv_v(sv_v),.sv_ok(sv_ok),.iss_spec(iss_spec),
          // busy: the multiply's reserved slot, a waiting landing, and in lane 0 a system op at the ROB head
-         .unit_busy(m1 | lb_any[gl] | ((gl == 0) & sy_at_head)),.hx_busy(hx_busy),
+         .unit_busy(m1 | ((gl == 0) & sy_at_head)),.hx_busy(hx_busy),.ag_only(lb_any[gl]),
          .iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
          .iss_take(iss_v),
          .hold_v(v),.hold_ent(ent),
@@ -4013,7 +4013,8 @@ module smolrv64_core
    // snoop and the lane's ROB completion port -- in a cycle the lane leaves both free (nothing
    // executing that completes at issue, no multiply in its slot). A load's or AMO's goes straight
    // through when the lane is free and nothing waits; otherwise it waits here, and a waiting entry
-   // holds the lane's select (unit_busy), so a free cycle comes within two. It completes when it
+   // holds the lane's select to its address generators (ag_only), which execute without the port,
+   // so a free cycle comes within two. It completes when it
    // drains, never before, so a waiting entry belongs to an op that has not retired and a redirect
    // empties the buffers. The SYSQ never waits: a system op goes alone, so it is lane A's, and it
    // fires only when lane A is free and nothing waits there (lane A holds its select while a

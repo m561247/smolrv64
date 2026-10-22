@@ -36,7 +36,7 @@ module tb;
       .d_valid(d_valid),.d_ready(d_ready),.d_rob(d_rob),.d_ps(d_ps),.d_r(d_r),
       .d_prd(d_prd),.d_long(1'b0),.d_hx(d_hx),.d_ag(1'b0),.d_ent(d_ent),
       .wb_v(wb_v),.wb_preg(wb_preg),.s_v(1'b0),.s_preg({PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(iss_spec),
-      .unit_busy(unit_busy),.hx_busy(hx_busy),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
+      .unit_busy(unit_busy),.hx_busy(hx_busy),.ag_only(1'b0),.iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
       .iss_take(iss_take),
       .hold_v(hold_v),.hold_ent(hold_ent),
       .blk_v(blk_v),.blk_pr(blk_pr),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.occupancy(occupancy),.free_n(free_n));
@@ -55,7 +55,7 @@ module tb;
       .d_valid(io_d_valid),.d_ready(io_d_ready),.d_rob(io_rob),.d_ps(io_ps),.d_r(io_r),
       .d_prd({PBITS{1'b0}}),.d_long(1'b0),.d_hx(1'b0),.d_ag(1'b0),.d_ent(io_d_ent),
       .wb_v(io_wb_v),.wb_preg(io_wb_preg),.s_v(1'b0),.s_preg({PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(io_iss_spec),
-      .unit_busy(1'b0),.hx_busy(1'b0),.iss_v(io_iss_v),.iss_ent(io_iss_ent),.iss_rob(io_iss_rob),
+      .unit_busy(1'b0),.hx_busy(1'b0),.ag_only(1'b0),.iss_v(io_iss_v),.iss_ent(io_iss_ent),.iss_rob(io_iss_rob),
       .iss_take(io_take),
       .hold_v(io_hold),.hold_ent({IDXB{1'b0}}),
       .blk_v(io_blk_v),.blk_pr(io_blk_pr),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.occupancy(io_occ),.free_n(io_free_n));

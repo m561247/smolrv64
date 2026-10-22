@@ -176,3 +176,21 @@ lanes from filling with younger work that then competes for the shared ports. Sk
 mid-group (holes in a ROB row) is the same idea, further. Not adopted. What the stalls point at is
 the lanes' issue (one pick a lane, oldest first within the lane only), which is the end state's
 to settle (four lanes, IPC tuning waits for it), not dispatch's.
+
+## What the loads row cost CoreMark, and the lane hold (2026-10-21)
+
+The loads-and-stores row took CoreMark from 213,234 to 217,529 cycles an iteration (+2.0%; Dhrystone
+-6.0%), bisected to 60d7cefb (the row, +0.94%) and 0b9f0468 (passing over a full bank, +1.06%). Not the
+LQ: at 32 entries it runs the same. Pipe traces of `core_bench_list`'s list walk (5,556 iterations in
+both windows) put it on the next-pointer chain: 3.76 -> 4.41 cycles an iteration, its load ready but
+unpicked 2,350 -> 5,044 cycles, 4,048 of them with its lane executing nothing. A load landing behind a
+write-port collision waits in its lane's landing buffer, and a waiting entry held the lane's whole
+select; loads dispatched a row a group land in bursts, so the critical address generator sat behind
+another load's landing. LAND-SIM on GB5's SimPoints: lanes held 9-35% of the integer subtests' cycles
+(summed over the lanes), 34-54% of integer loads through the buffer.
+
+**Built: a waiting landing holds its lane to its address generators** (`ag_only`, a flop term in each
+entry's valid like `hx_busy`; an address generator executes without the port, so the drain still comes
+within two cycles). CoreMark 211,361 cycles an iteration (4.73 CoreMark/MHz, ahead of the row's 4.69),
+Dhrystone 213.2 cycles a run (+0.70%), GB5's 77 SimPoints -1.03% of the single-core cycles (AES -3.61%,
+Image Compression -2.37%, HDR -2.27%, HTML5 -2.16%, PDF -1.94%, SQLite -1.58%).

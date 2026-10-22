@@ -989,8 +989,8 @@ module tb;
    end
    // ---- LAND-SIM: a landing load takes its destination lane's one write slot. Straight through when
    // the lane writes nothing else that cycle (by0), else into the lane's landing buffer (en0), and
-   // while anything waits there the lane issues nothing (its scheduler's unit_busy): the lane-cycles
-   // a waiting landing holds the lane are what a write-port collision costs.
+   // while anything waits there the lane issues only address generators (its scheduler's ag_only):
+   // the lane-cycles a waiting landing holds the lane are what a write-port collision costs.
    reg [63:0] ln_by, ln_buf, ln_hold;
    initial begin ln_by = 0;  ln_buf = 0;  ln_hold = 0; end
    always @(posedge clk) if (!reset && meas) begin

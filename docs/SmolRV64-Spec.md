@@ -841,7 +841,8 @@ moves the wall.
 | holds | slot A's, B's, C's ALU ops, multiplies, divides, branches, jumps, loads, stores and head ops; slot A's system ops | FP arithmetic |
 | ordering | **reorders freely** | **reorders freely** |
 | unit | completes at issue (a mispredict at its squash), writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8), a divide its operands to the MD stage, a system op its record and rs1 to the SYSQ | stage F |
-| `unit_busy` | the lane's multiply slot | `j_v & ~j_adv`: the FP select register is full and not draining |
+| `unit_busy` | the lane's multiply slot; lane A's, a system op at the ROB head | `j_v & ~j_adv`: the FP select register is full and not draining |
+| `ag_only` | the lane's landing buffer holds an entry: only address generators issue (§8) | 0 |
 
 **One scheduler per unit is what makes four safe.** Three schedulers feeding ONE execute
 stage deadlock (`Area-Efficient-Scalar-OoO.md` 12.2): an op reaches the shared stage, finds
@@ -1124,8 +1125,14 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   stays out of the streams' wake), so its latency is unchanged: it broadcasts (wake, pending clear, the store queue's snoop) and
   completes on its stream's own port, and only its value enters the lane's write register.
   Otherwise -- and always for M's own result (an AMO, LR or SC: the LSU's live completion) -- it
-  waits in the lane's 4-entry landing buffer, which holds the lane's select (`unit_busy`) until
-  it drains through the lane's port, where it broadcasts and completes. A waiting entry is
+  waits in the lane's 4-entry landing buffer, which holds the lane's select to its address
+  generators (`ag_only`, a flop term in each entry's valid, like `hx_busy`) until it drains through
+  the lane's port, where it broadcasts and completes: an address generator executes without the
+  port, so the drain still comes within two cycles and the buffer's bound stands. Holding every op
+  instead cost CoreMark 2.84% and GB5's 77 SimPoints 1.03% of the single-core cycles (integer
+  0.8-3.6%): a critical load's address generator sat ready in an idle lane behind another load's
+  landing, which loads dispatched a row a group make common (CoreMark's list walk: 0.5 cycles an
+  iteration of its next-pointer chain). A waiting entry is
   never a retired op's and a redirect empties the buffers. The SYSQ never
   waits: a system op goes alone (lane A), lane A holds its select while one is the ROB head, and
   the SYSQ fires only into a free lane A, so a redirecting op writes and completes in its fire

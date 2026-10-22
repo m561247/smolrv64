@@ -77,6 +77,9 @@ module smolrv64_iq
     // A FLOP (or flops): the handoff register is taken, or will be by the op this scheduler issued
     // last. An entry with d_hx is no candidate while it is set; the rest issue as before.
     input  wire                  hx_busy,
+    // A FLOP (or flops): only address generators (d_ag) are candidates -- the lane's write port is
+    // owed to a waiting landing, and an address generator executes without it.
+    input  wire                  ag_only,
     output wire                  iss_v,
     output wire [IDXB-1:0]       iss_ent,
     output wire [ROBB-1:0]       iss_rob,
@@ -181,9 +184,9 @@ module smolrv64_iq
          // it inside every entry's ready bit made it the ROOT of the priority select. It
          // qualifies only the RESULT below: the pick is a function of readiness alone, and
          // the late signal is one AND on the issue valid instead of NENT ANDs feeding a tree.
-         // hx_busy is a flop, and e_hx and v are: the term folds into the entry's valid, off the
-         // wakeup compares.
-         assign rdy[g] = v[g] & ~e_sp[g] & ~(e_hx[g] & hx_busy) & (&srdy[g*NSRC +: NSRC])
+         // hx_busy and ag_only are flops, and e_hx, e_ag and v are: the terms fold into the entry's
+         // valid, off the wakeup compares.
+         assign rdy[g] = v[g] & ~e_sp[g] & ~(e_hx[g] & hx_busy) & ~(ag_only & ~e_ag[g]) & (&srdy[g*NSRC +: NSRC])
                        & ((INORDER == 0) | (g[IDXB-1:0] == qhead));
       end
    endgenerate
@@ -349,6 +352,8 @@ module smolrv64_iq
          $fatal(1, "smolrv64_iq: issued to a busy unit");
       if (do_iss & e_hx[isel] & hx_busy)
          $fatal(1, "smolrv64_iq: issued entry %0d into a taken handoff register", isel);
+      if (do_iss & ag_only & ~e_ag[isel])
+         $fatal(1, "smolrv64_iq: issued entry %0d, not an address generator, while only they may issue", isel);
       // a speculative issue is decided in the very next cycle, never later, never without one
       if ((|(e_sp & v)) & ~sv_v)
          $fatal(1, "smolrv64_iq: speculatively issued entries %b with no verdict this cycle", e_sp & v);
