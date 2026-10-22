@@ -76,10 +76,13 @@ and larger-footprint workloads (Tommy is adding them) keep more of it.
   owes refresh, ZQCS, ODT on writes and the PHY's VT tracking: in every microsecond a read, three
   cycles with no read CAS and then a `gt_data_ready` pulse. The free budget: the IP's AXI shim,
   controller and UI, 5,656 LUTs and 6,475 flops.
-- **Clocking.** The controller runs on ui_clk (333 MHz), as the PHY requires. The first landing keeps
-  `ddr_port_cdc`'s asynchronous FIFOs to the core; the synchronous 2:1 crossing (probe_clk is a
-  BUFGCE_DIV of ui_clk, about 2.7 ns behind it: registers held two ui_clks, a multicycle path) is its
-  own step after.
+- **Clocking.** The controller runs on ui_clk (333 MHz), as the PHY requires. The core's port crosses
+  synchronously (`src/ddr_port_sync.v`, in place of `ddr_port_cdc`'s asynchronous FIFOs): probe_clk
+  is a BUFGCE_DIV of ui_clk, its edges about 2.7 ns behind; ui_clk finds the phase from probe_clk's
+  own toggle sampled on its falling edge, captures a request at the edge 3.3 ns after the port's (a
+  multicycle path of 2), and changes everything back to the port at the other edges, the request's
+  ready being a promise of room made an edge ahead. `tb_ddr_port` runs it with probe_clk 0, 1.0, 2.7
+  and 2.9 ns late.
 - **Requesters own the data.** A request is {line, read or write, the requester's buffer}; the PHY's
   tag is {buffer, half}, so a read's bursts land straight in that buffer and a write's data is read
   from it the cycle after `wrDataEn`. The caches' line port (`ddr4_port_line`) has eight read and four

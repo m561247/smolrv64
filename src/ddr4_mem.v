@@ -1,5 +1,5 @@
 `default_nettype none
-// ddr4_mem -- the memory below ddr_port_cdc, on ui_clk: ddr4_ctl and its two requesters, the
+// ddr4_mem -- the memory below ddr_port_sync, on ui_clk: ddr4_ctl and its two requesters, the
 // caches' line port (ddr4_port_line, buffers 0..11) and the DMA masters' AXI port (ddr4_port_axi,
 // buffers 12..15), on the DDR4 IP's PHY-only port. The DMA port's requests go first (its
 // transactions are short and the scanout's are due); each requester hands over its own write data
@@ -10,7 +10,7 @@ module ddr4_mem #(
    input  wire            clk,                  // ui_clk
    input  wire            reset,
    input  wire            cal_done,
-   // ---- the caches' line port (ddr_port_cdc's memory side) ----
+   // ---- the caches' line port (ddr_port_sync's memory side) ----
    input  wire            q_valid,
    output wire            q_ready,
    input  wire [IDW-1:0]  q_id,

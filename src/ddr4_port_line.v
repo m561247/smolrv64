@@ -1,5 +1,5 @@
 `default_nettype none
-// ddr4_port_line -- rv_soc_top's DDR memory port (on ui_clk, after ddr_port_cdc) as a requester of
+// ddr4_port_line -- rv_soc_top's DDR memory port (on ui_clk, after ddr_port_sync) as a requester of
 // ddr4_ctl: the caches' tagged line port (src/../core/rv_mem_arbiter.v) on the controller's
 // buffer-tagged requests.
 //
@@ -15,7 +15,7 @@ module ddr4_port_line #(
 ) (
    input  wire            clk,
    input  wire            reset,
-   // ---- the port (ddr_port_cdc's memory side) ----
+   // ---- the port (ddr_port_sync's memory side) ----
    input  wire            q_valid,
    output wire            q_ready,
    input  wire [IDW-1:0]  q_id,
@@ -75,8 +75,7 @@ module ddr4_port_line #(
    end
 
    // ---- requests: a buffer of the request's kind as it leaves the crossing, then a register, then
-   // the controller (the crossing's block RAM is slow out; the register keeps it off the
-   // controller's entry) ----
+   // the controller (the register keeps the crossing's capture off the controller's entry) ----
    wire        rq_go   = rq_valid && rq_ready;
    assign q_ready = (q_we ? w_any : r_any) && (!rq_valid || rq_go);
    // A line outside the DRAM window (a wrong-path I$ fetch asks for PA 0) is served from the window's

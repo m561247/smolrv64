@@ -208,7 +208,7 @@ module tb;
    reg [511:0] lram [0:NLINES-1];
 `ifdef TB_DDR4
    // TB_DDR4 (VDEFS=-DTB_DDR4): the board's path below the port instead of the drawn latencies --
-   // ddr_port_cdc into a ui_clk of twice the core's, our controller (ddr4_mem) and the PHY-only
+   // ddr_port_sync into a ui_clk of twice the core's, our controller (ddr4_mem) and the PHY-only
    // model, whose DRAM is lram at the controller's map (src/ddr4_phy_model.vh). The DMA masters'
    // port is idle: the testbench's DMA writes lram itself.
    reg ui_clk = 1'b1;  always #2.5 ui_clk = ~ui_clk;          // its rising edges on clk's
@@ -219,7 +219,7 @@ module tb;
    wire         mcRdCAS, mcWrCAS, mcCasSlot2, winInjTxn, winRmw, gt_data_ready, cal_done;
    wire [1:0]   mcCasSlot, winRank;  wire [4:0] winBuf, rdDataAddr, wrDataAddr;
    wire [255:0] wrData, rdData;  wire [31:0] wrDataMask;  wire rdDataEn, wrDataEn, per_rd_done;
-   ddr_port_cdc u_ddr_cdc (
+   ddr_port_sync u_ddr_sync (
       .clk_p(clk), .reset_p(reset),
       .p_q_valid(ddr_q_valid), .p_q_ready(ddr_q_ready), .p_q_id(ddr_q_id), .p_q_we(ddr_q_we), .p_q_addr(ddr_q_addr),
       .p_q_wmask(ddr_q_wmask), .p_q_wdata(ddr_q_wdata),

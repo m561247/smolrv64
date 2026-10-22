@@ -1,10 +1,11 @@
 `timescale 1ns/1ps
 `default_nettype none
-// The FPGA-only memory path under load: rv_soc_top's DDR memory port -> ddr_port_cdc -> ddr4_mem
+// The FPGA-only memory path under load: rv_soc_top's DDR memory port -> ddr_port_sync -> ddr4_mem
 // (the controller, its line port and its DMA AXI port, a DMA master on the latter) -> the DDR4 IP's
 // PHY-only port, modelled by ddr4_phy_model, which checks every DRAM rule. No system simulation
 // reaches this path (the Linux testbenches model the DDR at rv_soc_top's port), so this is where it
-// is proven, across the two clocks.
+// is proven, across the two clocks -- clk_p is clk_m / 2 and late by 2.7 ns, as the board's
+// BUFGCE_DIV makes it.
 //
 // The core side keeps up to NFLY transactions in flight across its ids -- random reads, full and
 // partial-mask writes, never two in flight on one line (the data cache's promise) -- and checks
@@ -12,26 +13,23 @@
 // runs its own line writes and line reads in a range of its own at the same time, reading back
 // only lines whose writes have been answered, and checks those against its own shadow.
 //
-//   +n=N (transactions, default 20000)  +ratio=N (clk_m:clk_p, default 2)  +seed=N
+//   +n=N (transactions, default 20000)  +seed=N
 `include "tb_rand.vh"
 module tb;
-   integer ntrans, ratio, seedv;
+   integer ntrans, seedv;
    `TB_RAND(mrnd, mrs)   // the memory side (clk_m)
    `TB_RAND(prnd, prs)   // the port side (clk_p)
    initial begin
       if (!$value$plusargs("n=%d", ntrans)) ntrans = 20000;
-      if (!$value$plusargs("ratio=%d", ratio)) ratio = 2;
       if (!$value$plusargs("seed=%d", seedv)) seedv = 1;
       mrs = `TB_SEED(seedv);  prs = `TB_SEED(seedv + 1);
    end
-   // clk_m free-running; clk_p = clk_m / ratio, synchronous (BUFGCE_DIV-like)
-   reg clk_m = 0, clk_p = 0;
-   integer div = 0;
-   always #1.5 begin
-      clk_m = ~clk_m;
-      if (clk_m) begin div = div + 1; if (div >= ratio) div = 0; end
-      if (clk_m && (div == 0 || div == ratio/2)) clk_p = ~clk_p;
-   end
+   // clk_m free-running at 3 ns; clk_p = clk_m / 2, its edges 2.7 ns after clk_m's (the board's
+   // BUFGCE_DIV insertion delay)
+   reg clk_m = 0, clk_div = 0;
+   always #1.5 begin clk_m = ~clk_m; if (clk_m) clk_div = ~clk_div; end
+   wire clk_p;
+   assign #2.7 clk_p = clk_div;
    reg reset_p = 1, reset_m = 1;
 
    // ---------------- the path ----------------
@@ -41,7 +39,7 @@ module tb;
    wire        mq_valid, mq_ready, mq_we, mr_valid, mr_ready, mr_last, mw_valid, mw_ready;
    wire [4:0]  mq_id, mr_id, mw_id;  wire [57:0] mq_addr;  wire [63:0] mq_wmask;  wire [511:0] mq_wdata;
    wire [1:0]  mr_beat;  wire [127:0] mr_data;
-   ddr_port_cdc cdc
+   ddr_port_sync cdc
      (.clk_p(clk_p), .reset_p(reset_p),
       .p_q_valid(pq_valid), .p_q_ready(pq_ready), .p_q_id(pq_id), .p_q_we(pq_we), .p_q_addr(pq_addr),
       .p_q_wmask(pq_wmask), .p_q_wdata(pq_wdata),
@@ -197,8 +195,8 @@ module tb;
          end
       end
       if (done == ntrans) begin
-         if (errors == 0) $display("tb_ddr_port: PASS (%0d transactions, ratio %0d, DMA %0d reads %0d writes)",
-                                   ntrans, ratio, dma_r, dma_w);
+         if (errors == 0) $display("tb_ddr_port: PASS (%0d transactions, DMA %0d reads %0d writes, %0d clk_p cycles)",
+                                   ntrans, dma_r, dma_w, cyc);
          else             $display("tb_ddr_port: FAIL (%0d errors)", errors);
          $finish;
       end

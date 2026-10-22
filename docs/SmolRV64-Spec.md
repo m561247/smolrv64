@@ -1683,7 +1683,13 @@ through the D$ (§8), so their misses are D$ fills.
 
 The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes out on the
 `ddr_*` port: the testbench's model, or on the board:
-- `ddr_port_cdc`: three block-RAM async FIFOs into ui_clk;
+- `ddr_port_sync`: into ui_clk as registers, probe_clk being ui_clk / 2 from a BUFGCE_DIV (its edges
+  ~2.7 ns late): ui_clk finds the phase from probe_clk's own toggle sampled on its falling edge (CAP
+  a register, as it alternates), and captures a request at the ui_clk edge 3.3 ns after the port's
+  (a multicycle path of 2 in the XDC), a second ui_clk register on to the controller; everything back
+  to the port is launched at the other ui_clk edges, the request's ready being a promise of room made
+  an edge ahead, and a read beat or a write done lands in a probe_clk register by the core -- the long
+  route is register to register;
 - `ddr4_mem`: our DDR4 controller (`ddr4_ctl`) on the DDR4 IP's PHY-only port (AMD PG150), whose
   PHY and calibration train the DRAM before `calDone`. A requester owns its line buffers (this
   port eight for reads and four for writes, `ddr4_port_line`); the PHY's tag is {buffer, half}, so
@@ -1700,13 +1706,13 @@ The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes ou
 
 The testbench model keeps 8 transactions in flight. Each draws the measured latency at
 acceptance, and they are answered in request order; `+ddr_reorder` answers in any order.
-`tb_ddr_port` proves the board path (`ddr_port_cdc` and `ddr4_mem` across the two clocks, a DMA
-master beside the core's traffic) on `ddr4_phy_model`, which checks every DRAM rule in DRAM clocks;
+`tb_ddr_port` proves the board path (`ddr_port_sync` and `ddr4_mem` across the two clocks, probe_clk
+2.7 ns late as on the board, a DMA master beside the core's traffic) on `ddr4_phy_model`, which checks every DRAM rule in DRAM clocks;
 `tb_ddr4_mem` drives `ddr4_mem` alone through streams, write-only and idle stretches and row
 conflicts. Built with `VDEFS=-DTB_DDR4`, the Linux lockstep puts the board's path below the port
-instead of the drawn latencies: `ddr_port_cdc` into a ui_clk of twice the core's, `ddr4_mem` and
+instead of the drawn latencies: `ddr_port_sync` into a ui_clk of twice the core's, `ddr4_mem` and
 `ddr4_phy_model`, whose DRAM is `lram` at the controller's map. The 60 M boot runs clean on it,
-retiring 58,047,166 (+4.04% over the drawn model's 55,791,913), port reads at 27.0 cycles mean.
+retiring 60,019,681 (+7.58% over the drawn model's 55,791,913), port reads at 22.3 cycles mean.
 
 **MEASURED ON THE BOARD** (166.67 MHz; `tools/board/membench`, whose `chase2` counts its own
 user-mode cycles with the core's counters: a dependent chase over one random cycle of 64-byte
@@ -1715,14 +1721,14 @@ lines, as one chain or as k independent ones; the gate runs the first three on e
 | | cycles |
 |---|---|
 | a load to its dependent load, a D$ hit | 3.0 (f644696c, the 4 GiB board; 4.0 on da5d52b3, 5.7 on 2ed18026) |
-| the same, a D$ miss whose page the dTLB's first level holds (256 KiB) | 45.1 (f644696c) |
-| a first-level dTLB miss that the second level holds (4 MiB) | 7.0 more (f644696c) |
-| a walk on every load (32 MiB: 0.99 first-level misses and 1.37 D$ misses a load) | 80.8, the walker busy 30 of them (2ed18026, the 2 GiB board) |
+| the same, a D$ miss whose page the dTLB's first level holds (256 KiB) | 34.0 (the synchronous crossing on our controller, 2026-10-22, the 2 GiB board; 43.0 through asynchronous FIFOs on the same controller, 45.2 on the IP's controller) |
+| a first-level dTLB miss that the second level holds (4 MiB) | 6.5 more (the same) |
+| a walk on every load (64 MiB) | 73.5 (the same; 87.2 through the FIFOs) |
 
-`ddr_port_cdc`'s FIFOs cross through `CDC_SYNC_STAGES` of synchronizers each way (their clocks
-treated as unrelated): 4.5 of the miss's 46.6 cycles, against 42.1 with them treated as related
-(258ef1fd, the same set). The lockstep model's crossing always had those stages, so no simulation
-shows the difference. Independent chains keep 7 to 8 misses in flight -- the 8 MSHRs -- while
+The asynchronous FIFOs crossed through `CDC_SYNC_STAGES` of synchronizers each way (their clocks
+treated as unrelated), 9 of the 43.0 cycles on our controller; the lockstep's two-flop model of
+them never showed it. Sequential 8-byte streams (`bw`, 64 MiB) read 3.05 bytes a cycle and write
+5.08 on the same build (the IP's controller: 2.48 and 4.82). Independent chains keep 7 to 8 misses in flight -- the 8 MSHRs -- while
 the dTLB translates them (256 KiB and 4 MiB, 8 to 12 chains: 5.1 to 7.0 cycles a load); a
 footprint that walks on every load keeps 2.4 (32 MiB, 4 to 16 chains: 33.8 cycles a load), the
 dTLB's one walker. A sequential stream of 8-byte loads is held by the load queue (§14): scalar

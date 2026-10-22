@@ -256,6 +256,18 @@ create_pblock pb_ddr4_mem
 add_cells_to_pblock [get_pblocks pb_ddr4_mem] [get_cells u_mem]
 resize_pblock [get_pblocks pb_ddr4_mem] -add {CLOCKREGION_X0Y0:CLOCKREGION_X0Y1}
 
+# ddr_port_sync (rk_xcku5p.v probe_sync): the core's memory port into ui_clk as registers.
+# probe_clk is BUFGCE_DIV(ui_clk) / 2, its edges ~2.7 ns after ui_clk's, so Vivado's default check
+# of a probe_clk -> ui_clk path lands on the ui_clk edge 0.3 ns after the launch. The crossing
+# captures at the edge after that (its CAP edge, found from probe_clk's own toggle sampled by
+# ui_clk's falling edge), so its capture registers -- the request's capture register (c_*) and that
+# falling-edge sample -- are multicycle 2. The paths back to probe_clk launch at the other ui_clk
+# edges and need no exception.
+set_multicycle_path -setup 2 -end -from [get_clocks probe_clk] \
+    -to [get_cells -hier -filter {NAME =~ *probe_sync/c_*_reg* || NAME =~ *probe_sync/m_tf_reg}]
+set_multicycle_path -hold 1 -end -from [get_clocks probe_clk] \
+    -to [get_cells -hier -filter {NAME =~ *probe_sync/c_*_reg* || NAME =~ *probe_sync/m_tf_reg}]
+
 # ---- TinyVGA adapter on the 40-pin header (vga_scanout) ------------------------------------
 # Header names from the board's pin table (doc/RK-XCKU5P-F V1.2管脚定义.xls, sheet "40 PIN"),
 # all bank 87. The outputs are vga_scanout's own registers, so they pack into the IOBs.
