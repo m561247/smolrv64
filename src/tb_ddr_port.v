@@ -1,22 +1,21 @@
 `timescale 1ns/1ps
 `default_nettype none
-// The FPGA-only memory path under load: rv_soc_top's DDR memory port -> ddr_port_cdc ->
-// ddr_port_axi -> axi_two_master_arbiter (s0; a DMA master on s1) -> an AXI slave shaped like the
-// DDR4 controller. No system simulation reaches this path (the Linux testbenches model the DDR at
-// rv_soc_top's port), so this is where it is proven.
+// The FPGA-only memory path under load: rv_soc_top's DDR memory port -> ddr_port_cdc -> ddr4_mem
+// (the controller, its line port and its DMA AXI port, a DMA master on the latter) -> the DDR4 IP's
+// PHY-only port, modelled by ddr4_phy_model, which checks every DRAM rule. No system simulation
+// reaches this path (the Linux testbenches model the DDR at rv_soc_top's port), so this is where it
+// is proven, across the two clocks.
 //
 // The core side keeps up to NFLY transactions in flight across its ids -- random reads, full and
 // partial-mask writes, never two in flight on one line (the data cache's promise) -- and checks
 // every read's bytes against a shadow, and that every id is answered exactly once. The DMA master
-// on s1 runs its own reads and writes in a disjoint range at the same time. The slave accepts
-// AR/AW with random ready, answers each after a random latency with random R bubbles and B delay;
-// by default in request order (the MIG's behaviour), with +ooo across different IDs as AXI allows,
-// to show nothing above depends on the order.
+// runs its own line writes and line reads in a range of its own at the same time, reading back
+// only lines whose writes have been answered, and checks those against its own shadow.
 //
-//   +n=N (transactions, default 20000)  +ratio=N (clk_m:clk_p, default 2)  +ooo  +seed=N
+//   +n=N (transactions, default 20000)  +ratio=N (clk_m:clk_p, default 2)  +seed=N
 `include "tb_rand.vh"
 module tb;
-   integer ntrans, ratio, seedv, ooo;
+   integer ntrans, ratio, seedv;
    `TB_RAND(mrnd, mrs)   // the memory side (clk_m)
    `TB_RAND(prnd, prs)   // the port side (clk_p)
    initial begin
@@ -24,7 +23,6 @@ module tb;
       if (!$value$plusargs("ratio=%d", ratio)) ratio = 2;
       if (!$value$plusargs("seed=%d", seedv)) seedv = 1;
       mrs = `TB_SEED(seedv);  prs = `TB_SEED(seedv + 1);
-      ooo = $test$plusargs("ooo");
    end
    // clk_m free-running; clk_p = clk_m / ratio, synchronous (BUFGCE_DIV-like)
    reg clk_m = 0, clk_p = 0;
@@ -55,216 +53,90 @@ module tb;
       .m_r_valid(mr_valid), .m_r_ready(mr_ready), .m_r_id(mr_id), .m_r_beat(mr_beat), .m_r_last(mr_last),
       .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id));
 
-   // AXI: c_* the port's master, d_* the DMA master, s_* the arbiter's output to the slave
-   wire [2:0] c_awid, c_arid, c_bid, c_rid, d_bid, d_rid, s_awid, s_arid;
-   wire [31:0] c_awaddr, c_araddr, s_awaddr, s_araddr;
-   wire [7:0] c_awlen, c_arlen, s_awlen, s_arlen, c_wstrb, s_wstrb;
-   wire [2:0] c_awsize, c_arsize, s_awsize, s_arsize, c_awprot, c_arprot, s_awprot, s_arprot;
-   wire [1:0] c_awburst, c_arburst, s_awburst, s_arburst, c_bresp, c_rresp, d_bresp, d_rresp;
-   wire c_awlock, c_arlock, s_awlock, s_arlock;
-   wire [3:0] c_awcache, c_arcache, s_awcache, s_arcache, c_awqos, c_arqos, s_awqos, s_arqos;
-   wire c_awvalid, c_awready, c_wlast, c_wvalid, c_wready, c_bvalid, c_bready;
-   wire c_arvalid, c_arready, c_rlast, c_rvalid, c_rready;
-   wire [63:0] c_wdata, c_rdata, d_rdata, s_wdata;
-   wire s_awvalid, s_wlast, s_wvalid, s_bready, s_arvalid, s_rready;
-   wire d_awready, d_wready, d_bvalid, d_arready, d_rlast, d_rvalid;
-   reg  s_awready, s_wready, s_bvalid, s_arready, s_rlast, s_rvalid;
-   reg  [2:0] s_bid, s_rid;  reg [63:0] s_rdata;
-   reg  d_awvalid, d_wvalid, d_wlast, d_arvalid;  reg [31:0] d_awaddr, d_araddr;  reg [63:0] d_wdata;
-   ddr_port_axi bridge
-     (.clk(clk_m), .reset(reset_m),
+   // ---------------- the controller on the PHY model ----------------
+   wire [2:0]  d_bid, d_rid;  wire [1:0] d_bresp, d_rresp;  wire [63:0] d_rdata;
+   wire        d_awready, d_wready, d_bvalid, d_arready, d_rlast, d_rvalid;
+   reg         d_awvalid, d_wvalid, d_wlast, d_arvalid;  reg [31:0] d_awaddr, d_araddr;  reg [63:0] d_wdata;
+   wire [7:0]   mc_ACT_n, mc_BG, mc_CS_n, mc_ODT, mc_CKE;  wire [135:0] mc_ADR;  wire [15:0] mc_BA;
+   wire         mcRdCAS, mcWrCAS, mcCasSlot2, winInjTxn, winRmw, gt_data_ready, calDone;
+   wire [1:0]   mcCasSlot, winRank;  wire [4:0] winBuf, rdDataAddr, wrDataAddr;
+   wire [255:0] wrData, rdData;  wire [31:0] wrDataMask;  wire rdDataEn, wrDataEn, per_rd_done;
+   ddr4_mem mem
+     (.clk(clk_m), .reset(reset_m), .cal_done(calDone),
       .q_valid(mq_valid), .q_ready(mq_ready), .q_id(mq_id), .q_we(mq_we), .q_addr(mq_addr),
       .q_wmask(mq_wmask), .q_wdata(mq_wdata),
       .r_valid(mr_valid), .r_ready(mr_ready), .r_id(mr_id), .r_beat(mr_beat), .r_last(mr_last),
       .r_data(mr_data), .w_valid(mw_valid), .w_ready(mw_ready), .w_id(mw_id),
-      .m_axi_awid(c_awid), .m_axi_awaddr(c_awaddr), .m_axi_awlen(c_awlen), .m_axi_awsize(c_awsize),
-      .m_axi_awburst(c_awburst), .m_axi_awlock(c_awlock), .m_axi_awcache(c_awcache), .m_axi_awprot(c_awprot),
-      .m_axi_awqos(c_awqos), .m_axi_awvalid(c_awvalid), .m_axi_awready(c_awready),
-      .m_axi_wdata(c_wdata), .m_axi_wstrb(c_wstrb), .m_axi_wlast(c_wlast), .m_axi_wvalid(c_wvalid),
-      .m_axi_wready(c_wready), .m_axi_bid(c_bid), .m_axi_bresp(c_bresp), .m_axi_bvalid(c_bvalid),
-      .m_axi_bready(c_bready),
-      .m_axi_arid(c_arid), .m_axi_araddr(c_araddr), .m_axi_arlen(c_arlen), .m_axi_arsize(c_arsize),
-      .m_axi_arburst(c_arburst), .m_axi_arlock(c_arlock), .m_axi_arcache(c_arcache), .m_axi_arprot(c_arprot),
-      .m_axi_arqos(c_arqos), .m_axi_arvalid(c_arvalid), .m_axi_arready(c_arready),
-      .m_axi_rid(c_rid), .m_axi_rdata(c_rdata), .m_axi_rresp(c_rresp), .m_axi_rlast(c_rlast),
-      .m_axi_rvalid(c_rvalid), .m_axi_rready(c_rready));
-   wire [3:0] s_arqos_unused;
-   axi_two_master_arbiter arb
-     (.clock(clk_m), .reset(reset_m),
-      .s0_axi_awid(c_awid), .s0_axi_awaddr(c_awaddr), .s0_axi_awlen(c_awlen), .s0_axi_awsize(c_awsize),
-      .s0_axi_awburst(c_awburst), .s0_axi_awlock(c_awlock), .s0_axi_awcache(c_awcache), .s0_axi_awprot(c_awprot),
-      .s0_axi_awqos(c_awqos), .s0_axi_awvalid(c_awvalid), .s0_axi_awready(c_awready),
-      .s0_axi_wdata(c_wdata), .s0_axi_wstrb(c_wstrb), .s0_axi_wlast(c_wlast), .s0_axi_wvalid(c_wvalid),
-      .s0_axi_wready(c_wready), .s0_axi_bid(c_bid), .s0_axi_bresp(c_bresp), .s0_axi_bvalid(c_bvalid),
-      .s0_axi_bready(c_bready),
-      .s0_axi_arid(c_arid), .s0_axi_araddr(c_araddr), .s0_axi_arlen(c_arlen), .s0_axi_arsize(c_arsize),
-      .s0_axi_arburst(c_arburst), .s0_axi_arlock(c_arlock), .s0_axi_arcache(c_arcache), .s0_axi_arprot(c_arprot),
-      .s0_axi_arqos(c_arqos), .s0_axi_arvalid(c_arvalid), .s0_axi_arready(c_arready),
-      .s0_axi_rid(c_rid), .s0_axi_rdata(c_rdata), .s0_axi_rresp(c_rresp), .s0_axi_rlast(c_rlast),
-      .s0_axi_rvalid(c_rvalid), .s0_axi_rready(c_rready),
-      .s1_axi_awid(3'd1), .s1_axi_awaddr(d_awaddr), .s1_axi_awlen(8'd7), .s1_axi_awsize(3'd3),
-      .s1_axi_awburst(2'b01), .s1_axi_awlock(1'b0), .s1_axi_awcache(4'd0), .s1_axi_awprot(3'd0),
-      .s1_axi_awqos(4'd0), .s1_axi_awvalid(d_awvalid), .s1_axi_awready(d_awready),
-      .s1_axi_wdata(d_wdata), .s1_axi_wstrb(8'hff), .s1_axi_wlast(d_wlast), .s1_axi_wvalid(d_wvalid),
-      .s1_axi_wready(d_wready), .s1_axi_bid(d_bid), .s1_axi_bresp(d_bresp), .s1_axi_bvalid(d_bvalid),
-      .s1_axi_bready(1'b1),
-      .s1_axi_arid(3'd1), .s1_axi_araddr(d_araddr), .s1_axi_arlen(8'd7), .s1_axi_arsize(3'd3),
-      .s1_axi_arburst(2'b01), .s1_axi_arlock(1'b0), .s1_axi_arcache(4'd0), .s1_axi_arprot(3'd0),
-      .s1_axi_arqos(4'd0), .s1_axi_arvalid(d_arvalid), .s1_axi_arready(d_arready),
-      .s1_axi_rid(d_rid), .s1_axi_rdata(d_rdata), .s1_axi_rresp(d_rresp), .s1_axi_rlast(d_rlast),
-      .s1_axi_rvalid(d_rvalid), .s1_axi_rready(1'b1),
-      .m_axi_awid(s_awid), .m_axi_awaddr(s_awaddr), .m_axi_awlen(s_awlen), .m_axi_awsize(s_awsize),
-      .m_axi_awburst(s_awburst), .m_axi_awlock(s_awlock), .m_axi_awcache(s_awcache), .m_axi_awprot(s_awprot),
-      .m_axi_awqos(s_awqos), .m_axi_awvalid(s_awvalid), .m_axi_awready(s_awready),
-      .m_axi_wdata(s_wdata), .m_axi_wstrb(s_wstrb), .m_axi_wlast(s_wlast), .m_axi_wvalid(s_wvalid),
-      .m_axi_wready(s_wready), .m_axi_bid(s_bid), .m_axi_bresp(2'b00), .m_axi_bvalid(s_bvalid),
-      .m_axi_bready(s_bready),
-      .m_axi_arid(s_arid), .m_axi_araddr(s_araddr), .m_axi_arlen(s_arlen), .m_axi_arsize(s_arsize),
-      .m_axi_arburst(s_arburst), .m_axi_arlock(s_arlock), .m_axi_arcache(s_arcache), .m_axi_arprot(s_arprot),
-      .m_axi_arqos(s_arqos), .m_axi_arvalid(s_arvalid), .m_axi_arready(s_arready),
-      .m_axi_rid(s_rid), .m_axi_rdata(s_rdata), .m_axi_rresp(2'b00), .m_axi_rlast(s_rlast),
-      .m_axi_rvalid(s_rvalid), .m_axi_rready(s_rready));
-
-   // ---------------- the AXI slave: 2 MiB of 64-bit words ----------------
-   localparam integer MW = 1 << 18;
-   reg [63:0] mem [0:MW-1];
-   integer si;
-   initial for (si = 0; si < MW; si = si + 1) mem[si] = {$random, $random};
-   // reads: a queue of accepted ARs, each with a ready time; in order, or with +ooo any whose
-   // ID differs from every older one's
-   localparam integer SQ = 16;
-   reg        rq_v [0:SQ-1];  reg [2:0] rq_id [0:SQ-1];  reg [31:0] rq_a [0:SQ-1];
-   reg [31:0] rq_t [0:SQ-1];  reg [31:0] rq_seq [0:SQ-1];
-   reg        wq_v [0:SQ-1];  reg [2:0] wq_id [0:SQ-1];  reg [31:0] wq_a [0:SQ-1];
-   reg [31:0] wq_t [0:SQ-1];  reg [31:0] wq_seq [0:SQ-1];  reg wq_dat [0:SQ-1];
-   reg [31:0] now = 0, sseq = 0;
-   integer    rk = -1, rbeat = 0, wk_data = -1, wbeat = 0;
+      .s_axi_awid(3'd1), .s_axi_awaddr(d_awaddr), .s_axi_awlen(8'd7), .s_axi_awsize(3'd3), .s_axi_awburst(2'b01),
+      .s_axi_awvalid(d_awvalid), .s_axi_awready(d_awready), .s_axi_wdata(d_wdata), .s_axi_wstrb(8'hff),
+      .s_axi_wlast(d_wlast), .s_axi_wvalid(d_wvalid), .s_axi_wready(d_wready),
+      .s_axi_bid(d_bid), .s_axi_bresp(d_bresp), .s_axi_bvalid(d_bvalid), .s_axi_bready(1'b1),
+      .s_axi_arid(3'd1), .s_axi_araddr(d_araddr), .s_axi_arlen(8'd7), .s_axi_arsize(3'd3), .s_axi_arburst(2'b01),
+      .s_axi_arvalid(d_arvalid), .s_axi_arready(d_arready), .s_axi_rid(d_rid), .s_axi_rdata(d_rdata),
+      .s_axi_rresp(d_rresp), .s_axi_rlast(d_rlast), .s_axi_rvalid(d_rvalid), .s_axi_rready(1'b1),
+      .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
+      .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
+      .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
+      .wrData(wrData), .wrDataMask(wrDataMask), .wrDataEn(wrDataEn), .wrDataAddr(wrDataAddr),
+      .rdDataEn(rdDataEn), .rdDataAddr(rdDataAddr), .rdData(rdData), .per_rd_done(per_rd_done));
+   ddr4_phy_model phy
+     (.clk(clk_m), .reset(reset_m), .calDone(calDone),
+      .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
+      .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
+      .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
+      .wrData(wrData), .wrDataMask(wrDataMask), .wrDataEn(wrDataEn), .wrDataAddr(wrDataAddr),
+      .rdDataEn(rdDataEn), .rdDataAddr(rdDataAddr), .rdData(rdData), .per_rd_done(per_rd_done));
    reg [31:0] rnd;
-   function integer pick_r(input integer dummy);
-      integer a, b, ok;
-      begin
-         pick_r = -1;
-         for (a = 0; a < SQ; a = a + 1) if (rq_v[a] && rq_t[a] <= now && pick_r < 0) begin
-            ok = 1;
-            for (b = 0; b < SQ; b = b + 1)
-               if (rq_v[b] && rq_seq[b] < rq_seq[a] && (!ooo || rq_id[b] == rq_id[a])) ok = 0;
-            if (ok) pick_r = a;
-         end
-      end
-   endfunction
-   function integer pick_b(input integer dummy);
-      integer a, b, ok;
-      begin
-         pick_b = -1;
-         for (a = 0; a < SQ; a = a + 1) if (wq_v[a] && wq_dat[a] && wq_t[a] <= now && pick_b < 0) begin
-            ok = 1;
-            for (b = 0; b < SQ; b = b + 1)
-               if (wq_v[b] && wq_seq[b] < wq_seq[a] && (!ooo || wq_id[b] == wq_id[a])) ok = 0;
-            if (ok) pick_b = a;
-         end
-      end
-   endfunction
-   function integer free_r(input integer dummy);
-      integer a; begin free_r = -1; for (a = SQ - 1; a >= 0; a = a - 1) if (!rq_v[a]) free_r = a; end
-   endfunction
-   function integer free_w(input integer dummy);
-      integer a; begin free_w = -1; for (a = SQ - 1; a >= 0; a = a - 1) if (!wq_v[a]) free_w = a; end
-   endfunction
-   // the oldest write whose data has not come yet: W beats follow AW order
-   function integer next_wdata(input integer dummy);
-      integer a; reg [31:0] best;
-      begin
-         next_wdata = -1; best = 32'hffffffff;
-         for (a = 0; a < SQ; a = a + 1) if (wq_v[a] && !wq_dat[a] && wq_seq[a] < best) begin best = wq_seq[a]; next_wdata = a; end
-      end
-   endfunction
-   integer fr, fw, pr, pb, nw;
-   initial begin
-      for (si = 0; si < SQ; si = si + 1) begin rq_v[si] = 0; wq_v[si] = 0; end
-      s_arready = 0; s_awready = 0; s_wready = 0; s_rvalid = 0; s_bvalid = 0; s_rlast = 0;
-   end
-   always @(posedge clk_m) if (!reset_m) begin
-      now <= now + 1;
-      rnd = mrnd(0);
-      // AR / AW accept, random ready
-      if (s_arvalid && s_arready) begin
-         fr = free_r(0);
-         rq_v[fr] <= 1; rq_id[fr] <= s_arid; rq_a[fr] <= s_araddr; rq_seq[fr] <= sseq;
-         rq_t[fr] <= now + 8 + (rnd[5:0] & 6'h1f);  sseq = sseq + 1;
-      end
-      if (s_awvalid && s_awready) begin
-         fw = free_w(0);
-         wq_v[fw] <= 1; wq_id[fw] <= s_awid; wq_a[fw] <= s_awaddr; wq_seq[fw] <= sseq; wq_dat[fw] <= 0;
-         wq_t[fw] <= now + 4 + (rnd[9:6] & 4'hf);  sseq = sseq + 1;
-      end
-      s_arready <= rnd[10] && (free_r(0) >= 0);
-      s_awready <= rnd[11] && (free_w(0) >= 0);
-      // W beats into the oldest write still owed its data
-      s_wready <= rnd[12];
-      if (s_wvalid && s_wready) begin
-         nw = next_wdata(0);
-         if (nw < 0) begin $display("FAIL: W beat with no AW accepted"); $finish; end
-         for (si = 0; si < 8; si = si + 1)
-            if (s_wstrb[si]) mem[(wq_a[nw] >> 3) + wbeat][si*8 +: 8] <= s_wdata[si*8 +: 8];
-         if (s_wlast != (wbeat == 7)) begin $display("FAIL: wlast on W beat %0d", wbeat); $finish; end
-         wbeat = s_wlast ? 0 : wbeat + 1;
-         if (s_wlast) wq_dat[nw] <= 1;
-      end
-      // R: stream the picked read's 8 beats with random bubbles
-      if (s_rvalid && s_rready) begin
-         if (s_rlast) begin rq_v[rk] <= 0; rk = -1; s_rvalid <= 0; end
-         else rbeat = rbeat + 1;
-      end
-      if (rk < 0 && !(s_rvalid && s_rready && s_rlast)) begin
-         pr = pick_r(0);
-         if (pr >= 0) begin rk = pr; rbeat = 0; end
-      end
-      if (rk >= 0 && !(s_rvalid && !s_rready)) begin
-         if (rnd[13] || rbeat == 0) begin
-            s_rvalid <= 1; s_rid <= rq_id[rk]; s_rdata <= mem[(rq_a[rk] >> 3) + rbeat]; s_rlast <= (rbeat == 7);
-         end else s_rvalid <= 0;
-      end
-      // B: the picked write whose data is in and whose time has come
-      if (s_bvalid && s_bready) s_bvalid <= 0;
-      else if (!s_bvalid) begin
-         pb = pick_b(0);
-         if (pb >= 0 && rnd[14]) begin s_bvalid <= 1; s_bid <= wq_id[pb]; wq_v[pb] <= 0; end
-      end
-   end
+   always @(posedge clk_m) rnd = mrnd(0);
 
-   // ---------------- the DMA master on s1: one read and one write at a time ----------------
-   // reads at 0x100000.., writes at 0x108000..: disjoint from each other and from the core's lines
-   integer dma_r = 0, dma_w = 0, d_wb = 0;
+   // ---------------- the DMA master: one line read and one line write at a time ----------------
+   // 64 lines at 0x100000..: a write's line joins the shadow when its B comes; a read takes a line
+   // already written and not being written now
+   localparam integer DLN = 64;
+   reg [511:0] d_shadow [0:DLN-1];  reg d_written [0:DLN-1];
+   integer dma_r = 0, dma_w = 0, d_wb = 0, d_wl = -1, d_rl = -1, dk;
    reg d_rbusy = 0, d_wbusy = 0;
-   reg [31:0] d_ra;
-   initial begin d_arvalid = 0; d_awvalid = 0; d_wvalid = 0; d_wlast = 0; end
-   reg [5:0] d_rbeat = 0;
+   reg [511:0] d_wline;
+   reg [2:0] d_rbeat = 0;
+   initial begin
+      d_arvalid = 0; d_awvalid = 0; d_wvalid = 0; d_wlast = 0;
+      for (dk = 0; dk < DLN; dk = dk + 1) d_written[dk] = 0;
+   end
    always @(posedge clk_m) if (!reset_m) begin
       if (d_arvalid && d_arready) d_arvalid <= 0;
       if (!d_rbusy && !d_arvalid && rnd[20:18] == 3'd0) begin
-         d_ra = 32'h100000 + {rnd[28:23], 6'd0};  d_araddr <= d_ra;  d_arvalid <= 1;  d_rbusy <= 1;  d_rbeat <= 0;
+         dk = rnd[29:24];
+         if (d_written[dk] && dk != d_wl) begin
+            d_rl = dk;  d_araddr <= 32'h100000 + dk * 64;  d_arvalid <= 1;  d_rbusy <= 1;  d_rbeat <= 0;
+         end
       end
       if (d_rvalid) begin
          if (d_rid != 3'd1) begin $display("FAIL: DMA read data with ID %0d", d_rid); $finish; end
-         if (d_rdata !== mem[(d_araddr >> 3) + d_rbeat]) begin   // its reads never meet its writes
-            $display("FAIL: DMA read %h beat %0d", d_araddr, d_rbeat); $finish;
+         if (d_rdata !== d_shadow[d_rl][d_rbeat*64 +: 64]) begin
+            $display("FAIL: DMA read line %0d beat %0d: %h, expected %h", d_rl, d_rbeat, d_rdata, d_shadow[d_rl][d_rbeat*64 +: 64]);
+            $finish;
          end
          d_rbeat <= d_rbeat + 1;
-         if (d_rlast) begin d_rbusy <= 0; dma_r = dma_r + 1; end
+         if (d_rlast) begin d_rbusy <= 0; dma_r = dma_r + 1; d_rl = -1; end
       end
       if (d_awvalid && d_awready) d_awvalid <= 0;
       if (d_wvalid && d_wready) begin
          d_wb = d_wb + 1;
          if (d_wlast) begin d_wvalid <= 0; d_wlast <= 0; end
-         else begin d_wdata <= d_wdata + 1; d_wlast <= (d_wb == 7); end
+         else begin d_wdata <= d_wline[d_wb*64 +: 64]; d_wlast <= (d_wb == 7); end
       end
       if (d_bvalid) begin
          if (d_bid != 3'd1) begin $display("FAIL: DMA write response with ID %0d", d_bid); $finish; end
+         d_shadow[d_wl] = d_wline;  d_written[d_wl] = 1;  d_wl = -1;
          d_wbusy <= 0; dma_w = dma_w + 1;
       end
       if (!d_wbusy && rnd[23:21] == 3'd0) begin
-         d_awaddr <= 32'h100000 + 32'h8000 + {rnd[30:25], 6'd0};  d_awvalid <= 1;  d_wvalid <= 1;
-         d_wdata <= {rnd, rnd};  d_wlast <= 0;  d_wb = 0;  d_wbusy <= 1;
+         dk = rnd[31:26];
+         if (dk != d_rl) begin
+            d_wl = dk;  for (d_wb = 0; d_wb < 16; d_wb = d_wb + 1) d_wline[d_wb*32 +: 32] = mrnd(0);
+            d_awaddr <= 32'h100000 + dk * 64;  d_awvalid <= 1;  d_wvalid <= 1;
+            d_wdata <= d_wline[63:0];  d_wlast <= 0;  d_wb = 0;  d_wbusy <= 1;
+         end
       end
    end
 
@@ -313,7 +185,7 @@ module tb;
             t_we = rnd[3];
             for (k = 0; k < 16; k = k + 1) t_data[k*32 +: 32] = prnd(0);
             t_mask = rnd[4] ? {64{1'b1}} : {prnd(0), prnd(0)};
-            q_v <= 1'b1;  q_id <= idf[4:0];  q_addr <= 58'h200_0000 + ln;   // AXI offset ln*64
+            q_v <= 1'b1;  q_id <= idf[4:0];  q_addr <= 58'h200_0000 + ln;   // DRAM line ln
             q_we <= t_we;  q_data <= t_data;  q_mask <= t_mask;
             id_live[idf] = 1;  id_we[idf] = t_we;  id_ln[idf] = ln[5:0];  busy_ln[ln] = 1;
             nfly = nfly + 1;  issued = issued + 1;
@@ -325,19 +197,15 @@ module tb;
          end
       end
       if (done == ntrans) begin
-         if (errors == 0) $display("tb_ddr_port: PASS (%0d transactions, ratio %0d%s, DMA %0d reads %0d writes)",
-                                   ntrans, ratio, ooo ? ", reordering slave" : "", dma_r, dma_w);
+         if (errors == 0) $display("tb_ddr_port: PASS (%0d transactions, ratio %0d, DMA %0d reads %0d writes)",
+                                   ntrans, ratio, dma_r, dma_w);
          else             $display("tb_ddr_port: FAIL (%0d errors)", errors);
          $finish;
       end
    end
-   // the shadow starts as the slave's memory
+   // the shadow starts as the model's never-written bytes: zero
    integer si2;
-   initial begin
-      #1;
-      for (si2 = 0; si2 < NLN; si2 = si2 + 1)
-         for (k = 0; k < 8; k = k + 1) shadow[si2][k*64 +: 64] = mem[si2*8 + k];
-   end
+   initial for (si2 = 0; si2 < NLN; si2 = si2 + 1) shadow[si2] = 512'd0;
    initial begin
       repeat (8) @(posedge clk_m);
       reset_m = 0;
@@ -345,5 +213,7 @@ module tb;
       reset_p = 0;
    end
 endmodule
+
+`include "ddr4_phy_model.vh"
 
 `default_nettype wire

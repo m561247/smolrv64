@@ -91,6 +91,10 @@ proc configure_cvfpu_sources {repo_root src_dir} {
         add_source_if_missing $fileset $file $file_type
     }
     add_source_if_missing $fileset [file join $src_dir axi_two_master_arbiter.v] Verilog
+    add_source_if_missing $fileset [file join $src_dir ddr4_mem.v] Verilog
+    add_source_if_missing $fileset [file join $src_dir ddr4_ctl.v] Verilog
+    add_source_if_missing $fileset [file join $src_dir ddr4_port_line.v] Verilog
+    add_source_if_missing $fileset [file join $src_dir ddr4_port_axi.v] Verilog
     add_source_if_missing $fileset [file join $src_dir axi_single_beat_master.v] Verilog
     add_source_if_missing $fileset [file join $src_dir virtio_mmio.v] Verilog
     add_source_if_missing $fileset [file join $src_dir vga_scanout.v] Verilog
@@ -145,15 +149,14 @@ proc ensure_ip_products {} {
         set dcp [file join [get_property IP_OUTPUT_DIR $ip] $ip.dcp]
         if {[file exists $dcp]} continue
         puts "  IP $ip: output products missing ($dcp) -- regenerating."
-        # THE MEMORY CONTROLLER'S AXI DATA PORT IS THE PLATFORM'S 64 BITS (rk_xcku5p.v wires
-        # mig_wdata/m_axi_rdata [63:0]). Loading the custom part from ddr4_part.csv resets
-        # C0.DDR4_AxiDataWidth to the part's native 256, whatever the .xci says, so a
-        # regeneration in a fresh tree built a 256-bit port on 64-bit wires (three Synth 8-689
-        # warnings and a bitstream that cannot write DDR). It is set before every generate.
+        # THE DDR4 IP IS ITS PHY ONLY (PG150's Physical Layer Only): src/ddr4_mem.v is the
+        # controller, on the IP's mc_*/rdData/wrData port (rk_xcku5p.v). Loading the custom part
+        # from ddr4_part.csv once reset the AXI data width the .xci named, so the mode is set,
+        # and checked, before every generate.
         if {$ip eq "ddr4_0"} {
-            set_property CONFIG.C0.DDR4_AxiDataWidth 64 $ip
-            set w [get_property CONFIG.C0.DDR4_AxiDataWidth $ip]
-            if {$w != 64} { error "IP $ip: C0.DDR4_AxiDataWidth is $w after setting it to 64" }
+            set_property CONFIG.Phy_Only Phy_Only_Single $ip
+            set m [get_property CONFIG.Phy_Only $ip]
+            if {$m ne "Phy_Only_Single"} { error "IP $ip: Phy_Only is $m after setting it to Phy_Only_Single" }
         }
         generate_target {instantiation_template synthesis} $ip
         synth_ip $ip

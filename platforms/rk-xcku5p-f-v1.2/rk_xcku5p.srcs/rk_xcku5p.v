@@ -208,90 +208,13 @@ module rk_xcku5p(
    wire         c0_ddr4_reset_n_int;
    assign c0_ddr4_reset_n = c0_ddr4_reset_n_int;
 
-   // AXI4 wires between smolrv64 and the DDR4 IP (64-bit data, 31-bit byte addr,
-   // 3-bit ID, 8-byte beats, single-beat bursts).
-   // arbiter->MIG AW/W skid nets (slice instance sits by the R slice below)
-   wire [2:0]  mig_awid;   wire [31:0] mig_awaddr; wire [7:0] mig_awlen; wire [2:0] mig_awsize;
-   wire [1:0]  mig_awburst; wire mig_awlock; wire [3:0] mig_awcache; wire [2:0] mig_awprot;
-   wire [3:0]  mig_awqos;  wire mig_awvalid; wire mig_awready;
-   wire [63:0] mig_wdata;  wire [7:0] mig_wstrb; wire mig_wlast; wire mig_wvalid; wire mig_wready;
-   wire [ 2:0] m_axi_awid;
-   wire [31:0] m_axi_awaddr;
-   wire [ 7:0] m_axi_awlen;
-   wire [ 2:0] m_axi_awsize;
-   wire [ 1:0] m_axi_awburst;
-   wire        m_axi_awlock;
-   wire [ 3:0] m_axi_awcache;
-   wire [ 2:0] m_axi_awprot;
-   wire [ 3:0] m_axi_awqos;
-   wire        m_axi_awvalid;
-   wire        m_axi_awready;
-   wire [63:0] m_axi_wdata;
-   wire [ 7:0] m_axi_wstrb;
-   wire        m_axi_wlast;
-   wire        m_axi_wvalid;
-   wire        m_axi_wready;
-   wire [ 2:0] m_axi_bid;
-   wire [ 1:0] m_axi_bresp;
-   wire        m_axi_bvalid;
-   wire        m_axi_bready;
-   wire [ 2:0] m_axi_arid;
-   wire [31:0] m_axi_araddr;
-   wire [ 7:0] m_axi_arlen;
-   wire [ 2:0] m_axi_arsize;
-   wire [ 1:0] m_axi_arburst;
-   wire        m_axi_arlock;
-   wire [ 3:0] m_axi_arcache;
-   wire [ 2:0] m_axi_arprot;
-   wire [ 3:0] m_axi_arqos;
-   wire        m_axi_arvalid;
-   wire        m_axi_arready;
-   wire [ 2:0] m_axi_rid;
-   wire [63:0] m_axi_rdata;
-   wire [ 1:0] m_axi_rresp;
-   wire        m_axi_rlast;
-   wire        m_axi_rvalid;
-   wire        m_axi_rready;
-
-   wire [ 2:0] core_axi_awid;
-   wire [31:0] core_axi_awaddr;
-   wire [ 7:0] core_axi_awlen;
-   wire [ 2:0] core_axi_awsize;
-   wire [ 1:0] core_axi_awburst;
-   wire        core_axi_awlock;
-   wire [ 3:0] core_axi_awcache;
-   wire [ 2:0] core_axi_awprot;
-   wire [ 3:0] core_axi_awqos;
-   wire        core_axi_awvalid;
-   wire        core_axi_awready;
-   wire [63:0] core_axi_wdata;
-   wire [ 7:0] core_axi_wstrb;
-   wire        core_axi_wlast;
-   wire        core_axi_wvalid;
-   wire        core_axi_wready;
-   wire [ 2:0] core_axi_bid;
-   wire [ 1:0] core_axi_bresp;
-   wire        core_axi_bvalid;
-   wire        core_axi_bready;
-   wire [ 2:0] core_axi_arid;
-   wire [31:0] core_axi_araddr;
-   wire [ 7:0] core_axi_arlen;
-   wire [ 2:0] core_axi_arsize;
-   wire [ 1:0] core_axi_arburst;
-   wire        core_axi_arlock;
-   wire [ 3:0] core_axi_arcache;
-   wire [ 2:0] core_axi_arprot;
-   wire [ 3:0] core_axi_arqos;
-   wire        core_axi_arvalid;
-   wire        core_axi_arready;
-   wire [ 2:0] core_axi_rid;
-   wire [63:0] core_axi_rdata;
-   wire [ 1:0] core_axi_rresp;
-   wire        core_axi_rlast;
-   wire        core_axi_rvalid;
-   wire        core_axi_rready;
-
-   localparam USE_DDR_ARB = 1'b1;
+   // The DDR4 IP's PHY-only port (AMD PG150): our controller, ddr4_mem, drives its commands and
+   // takes and gives its data.
+   wire [7:0]   mc_ACT_n, mc_BG, mc_CS_n, mc_ODT, mc_CKE;  wire [135:0] mc_ADR;  wire [15:0] mc_BA;
+   wire         mcRdCAS, mcWrCAS, mcCasSlot2, winInjTxn, winRmw, gt_data_ready;
+   wire [1:0]   mcCasSlot, winRank;  wire [4:0] winBuf, rdDataAddr, wrDataAddr;
+   wire [255:0] wrData, rdData;  wire [31:0] wrDataMask;
+   wire         rdDataEn, wrDataEn, per_rd_done;
 
    // virtio-blk is backed by the SD card in SPI mode (sd_spi_host inside
    // virtio_blk_backend). Capacity is read from the card's CSD at init and
@@ -300,7 +223,8 @@ module rk_xcku5p(
    wire [31:0] virtio_blk_debug_word;   // SD/blk debug overlay at 0x10002f00
    wire [21:0] virtio_blk_dbg;          // always-on backend FSM/SD/DMA state for ILA_DEV
 
-   // DDR4 MIG IP instantiation (AXI4 slave)
+   // The DDR4 IP in its PHY-only mode: Xilinx's PHY and calibration (they reset, program and train
+   // the DRAM until c0_init_calib_complete); every command after that is ddr4_mem's.
    ddr4_0 u_ddr4_0 (
       .sys_rst                        (1'b0),             // calibrates once, after configuration
 
@@ -325,46 +249,16 @@ module rk_xcku5p(
       .c0_ddr4_ui_clk                 (ui_clk),
       .c0_ddr4_ui_clk_sync_rst        (ui_rst),
       .dbg_clk                        (dbg_clk),
+      .dbg_bus                        (dbg_bus),
 
-      .c0_ddr4_aresetn                (~ui_rst),
-      .c0_ddr4_s_axi_awid(mig_awid),
-      .c0_ddr4_s_axi_awaddr(mig_awaddr),
-      .c0_ddr4_s_axi_awlen(mig_awlen),
-      .c0_ddr4_s_axi_awsize(mig_awsize),
-      .c0_ddr4_s_axi_awburst(mig_awburst),
-      .c0_ddr4_s_axi_awlock(mig_awlock),
-      .c0_ddr4_s_axi_awcache(mig_awcache),
-      .c0_ddr4_s_axi_awprot(mig_awprot),
-      .c0_ddr4_s_axi_awqos(mig_awqos),
-      .c0_ddr4_s_axi_awvalid(mig_awvalid),
-      .c0_ddr4_s_axi_awready(mig_awready),
-      .c0_ddr4_s_axi_wdata(mig_wdata),
-      .c0_ddr4_s_axi_wstrb(mig_wstrb),
-      .c0_ddr4_s_axi_wlast(mig_wlast),
-      .c0_ddr4_s_axi_wvalid(mig_wvalid),
-      .c0_ddr4_s_axi_wready(mig_wready),
-      .c0_ddr4_s_axi_bid              (m_axi_bid),
-      .c0_ddr4_s_axi_bresp            (m_axi_bresp),
-      .c0_ddr4_s_axi_bvalid           (m_axi_bvalid),
-      .c0_ddr4_s_axi_bready           (m_axi_bready),
-      .c0_ddr4_s_axi_arid             (m_axi_arid),
-      .c0_ddr4_s_axi_araddr           (m_axi_araddr),
-      .c0_ddr4_s_axi_arlen            (m_axi_arlen),
-      .c0_ddr4_s_axi_arsize           (m_axi_arsize),
-      .c0_ddr4_s_axi_arburst          (m_axi_arburst),
-      .c0_ddr4_s_axi_arlock           (m_axi_arlock),
-      .c0_ddr4_s_axi_arcache          (m_axi_arcache),
-      .c0_ddr4_s_axi_arprot           (m_axi_arprot),
-      .c0_ddr4_s_axi_arqos            (m_axi_arqos),
-      .c0_ddr4_s_axi_arvalid          (m_axi_arvalid),
-      .c0_ddr4_s_axi_arready          (m_axi_arready),
-      .c0_ddr4_s_axi_rid              (m_axi_rid),
-      .c0_ddr4_s_axi_rdata            (m_axi_rdata),
-      .c0_ddr4_s_axi_rresp            (m_axi_rresp),
-      .c0_ddr4_s_axi_rlast            (m_axi_rlast),
-      .c0_ddr4_s_axi_rvalid           (m_axi_rvalid),
-      .c0_ddr4_s_axi_rready           (m_axi_rready),
-      .dbg_bus                        (dbg_bus)
+      .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CKE(mc_CKE),
+      .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
+      .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
+      .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank),
+      .gt_data_ready(gt_data_ready), .dBufAdr(5'd0),
+      .wrData(wrData), .wrDataMask(wrDataMask), .wrDataEn(wrDataEn), .wrDataAddr(wrDataAddr),
+      .rdData(rdData), .rdDataEn(rdDataEn), .rdDataAddr(rdDataAddr), .rdDataEnd(),
+      .per_rd_done(per_rd_done), .rmw_rd_done(), .tCWL()
    );
 
    wire [19:0] core_mmio_address;
@@ -1512,16 +1406,12 @@ module rk_xcku5p(
       .m_axi_rid(kbd_axi_rid), .m_axi_rdata(kbd_axi_rdata), .m_axi_rresp(kbd_axi_rresp),
       .m_axi_rlast(kbd_axi_rlast), .m_axi_rvalid(kbd_axi_rvalid), .m_axi_rready(kbd_axi_rready));
 
-   generate
-   if (USE_DDR_ARB) begin : gen_ddr_arbiter
-   // Device-side arbiters, a balanced tree under the core-vs-device arbiter below:
+   // The DMA masters' arbiters, a balanced tree into ddr4_mem's AXI port:
    //    device_arbiter_inst  virtio-net (s0) + virtio-blk (s1)      stamps ID bit 0
    //    periph_arbiter_inst  VGA scanout (s0) + virtio keyboard (s1)  stamps ID bit 0
    //    device_top_inst      the two above                          stamps ID bit 1
-   //    ddr4_arbiter_inst    core + devices                          stamps ID bit 2
-   // Every device master therefore uses ID 0 (the IDs are 3 bits; three stamping levels over a
-   // master with its own ID bit would need a fourth). Reusing the proven 2-master arbiter keeps
-   // each one 2-input (timing-friendly) instead of growing a wider mux on the DDR path.
+   // Every device master therefore uses ID 0. Reusing the proven 2-master arbiter keeps each one
+   // 2-input (timing-friendly).
    axi_two_master_arbiter #(.STAMP(0)) device_arbiter_inst(
       .clock          (ui_clk),
       .reset          (ui_cpu_reset),
@@ -1881,208 +1771,10 @@ module rk_xcku5p(
       .m_axi_rready   (device_axi_rready)
    );
 
-   // ddr4 arbiter s0 (core) R channel goes through a register slice below, so
-   // core_axi_r* to probe_bridge is registered (breaks the virtio-FSM -> grant
-   // -> 512-bit capture-enable cross-die path). Intermediate = arbiter output.
-   wire [2:0]  core_axi_rid_arb;
-   wire [63:0] core_axi_rdata_arb;
-   wire [1:0]  core_axi_rresp_arb;
-   wire        core_axi_rlast_arb;
-   wire        core_axi_rvalid_arb;
-   wire        core_axi_rready_arb;
-
-   axi_two_master_arbiter ddr4_arbiter_inst(
-      .clock          (ui_clk),
-      .reset          (ui_cpu_reset),
-
-      .s0_axi_awid    (core_axi_awid),
-      .s0_axi_awaddr  (core_axi_awaddr),
-      .s0_axi_awlen   (core_axi_awlen),
-      .s0_axi_awsize  (core_axi_awsize),
-      .s0_axi_awburst (core_axi_awburst),
-      .s0_axi_awlock  (core_axi_awlock),
-      .s0_axi_awcache (core_axi_awcache),
-      .s0_axi_awprot  (core_axi_awprot),
-      .s0_axi_awqos   (core_axi_awqos),
-      .s0_axi_awvalid (core_axi_awvalid),
-      .s0_axi_awready (core_axi_awready),
-      .s0_axi_wdata   (core_axi_wdata),
-      .s0_axi_wstrb   (core_axi_wstrb),
-      .s0_axi_wlast   (core_axi_wlast),
-      .s0_axi_wvalid  (core_axi_wvalid),
-      .s0_axi_wready  (core_axi_wready),
-      .s0_axi_bid     (core_axi_bid),
-      .s0_axi_bresp   (core_axi_bresp),
-      .s0_axi_bvalid  (core_axi_bvalid),
-      .s0_axi_bready  (core_axi_bready),
-      .s0_axi_arid    (core_axi_arid),
-      .s0_axi_araddr  (core_axi_araddr),
-      .s0_axi_arlen   (core_axi_arlen),
-      .s0_axi_arsize  (core_axi_arsize),
-      .s0_axi_arburst (core_axi_arburst),
-      .s0_axi_arlock  (core_axi_arlock),
-      .s0_axi_arcache (core_axi_arcache),
-      .s0_axi_arprot  (core_axi_arprot),
-      .s0_axi_arqos   (core_axi_arqos),
-      .s0_axi_arvalid (core_axi_arvalid),
-      .s0_axi_arready (core_axi_arready),
-      .s0_axi_rid     (core_axi_rid_arb),
-      .s0_axi_rdata   (core_axi_rdata_arb),
-      .s0_axi_rresp   (core_axi_rresp_arb),
-      .s0_axi_rlast   (core_axi_rlast_arb),
-      .s0_axi_rvalid  (core_axi_rvalid_arb),
-      .s0_axi_rready  (core_axi_rready_arb),
-
-      .s1_axi_awid    (device_axi_awid),
-      .s1_axi_awaddr  (device_axi_awaddr),
-      .s1_axi_awlen   (device_axi_awlen),
-      .s1_axi_awsize  (device_axi_awsize),
-      .s1_axi_awburst (device_axi_awburst),
-      .s1_axi_awlock  (device_axi_awlock),
-      .s1_axi_awcache (device_axi_awcache),
-      .s1_axi_awprot  (device_axi_awprot),
-      .s1_axi_awqos   (device_axi_awqos),
-      .s1_axi_awvalid (device_axi_awvalid),
-      .s1_axi_awready (device_axi_awready),
-      .s1_axi_wdata   (device_axi_wdata),
-      .s1_axi_wstrb   (device_axi_wstrb),
-      .s1_axi_wlast   (device_axi_wlast),
-      .s1_axi_wvalid  (device_axi_wvalid),
-      .s1_axi_wready  (device_axi_wready),
-      .s1_axi_bid     (device_axi_bid),
-      .s1_axi_bresp   (device_axi_bresp),
-      .s1_axi_bvalid  (device_axi_bvalid),
-      .s1_axi_bready  (device_axi_bready),
-      .s1_axi_arid    (device_axi_arid),
-      .s1_axi_araddr  (device_axi_araddr),
-      .s1_axi_arlen   (device_axi_arlen),
-      .s1_axi_arsize  (device_axi_arsize),
-      .s1_axi_arburst (device_axi_arburst),
-      .s1_axi_arlock  (device_axi_arlock),
-      .s1_axi_arcache (device_axi_arcache),
-      .s1_axi_arprot  (device_axi_arprot),
-      .s1_axi_arqos   (device_axi_arqos),
-      .s1_axi_arvalid (device_axi_arvalid),
-      .s1_axi_arready (device_axi_arready),
-      .s1_axi_rid     (device_axi_rid),
-      .s1_axi_rdata   (device_axi_rdata),
-      .s1_axi_rresp   (device_axi_rresp),
-      .s1_axi_rlast   (device_axi_rlast),
-      .s1_axi_rvalid  (device_axi_rvalid),
-      .s1_axi_rready  (device_axi_rready),
-
-      .m_axi_awid     (m_axi_awid),
-      .m_axi_awaddr   (m_axi_awaddr),
-      .m_axi_awlen    (m_axi_awlen),
-      .m_axi_awsize   (m_axi_awsize),
-      .m_axi_awburst  (m_axi_awburst),
-      .m_axi_awlock   (m_axi_awlock),
-      .m_axi_awcache  (m_axi_awcache),
-      .m_axi_awprot   (m_axi_awprot),
-      .m_axi_awqos    (m_axi_awqos),
-      .m_axi_awvalid  (m_axi_awvalid),
-      .m_axi_awready  (m_axi_awready),
-      .m_axi_wdata    (m_axi_wdata),
-      .m_axi_wstrb    (m_axi_wstrb),
-      .m_axi_wlast    (m_axi_wlast),
-      .m_axi_wvalid   (m_axi_wvalid),
-      .m_axi_wready   (m_axi_wready),
-      .m_axi_bid      (m_axi_bid),
-      .m_axi_bresp    (m_axi_bresp),
-      .m_axi_bvalid   (m_axi_bvalid),
-      .m_axi_bready   (m_axi_bready),
-      .m_axi_arid     (m_axi_arid),
-      .m_axi_araddr   (m_axi_araddr),
-      .m_axi_arlen    (m_axi_arlen),
-      .m_axi_arsize   (m_axi_arsize),
-      .m_axi_arburst  (m_axi_arburst),
-      .m_axi_arlock   (m_axi_arlock),
-      .m_axi_arcache  (m_axi_arcache),
-      .m_axi_arprot   (m_axi_arprot),
-      .m_axi_arqos    (m_axi_arqos),
-      .m_axi_arvalid  (m_axi_arvalid),
-      .m_axi_arready  (m_axi_arready),
-      .m_axi_rid      (m_axi_rid),
-      .m_axi_rdata    (m_axi_rdata),
-      .m_axi_rresp    (m_axi_rresp),
-      .m_axi_rlast    (m_axi_rlast),
-      .m_axi_rvalid   (m_axi_rvalid),
-      .m_axi_rready   (m_axi_rready)
-   );
-
-   // Register slice on the core-side read response: arbiter s0 R (_arb) -> core_axi_r*.
-   // AW/W skid into the MIG: breaks the arbiter->upsizer setup cones (-0.57ns class),
-   // same recipe as the R slice below. AR passes through (read-address cone was clean).
-   axi_aww_reg_slice #(.IDW(3), .AW(32), .DW(64)) mig_aww_slice (
-      .clock(ui_clk), .reset(ui_cpu_reset),
-      .s_awid(m_axi_awid), .s_awaddr(m_axi_awaddr), .s_awlen(m_axi_awlen), .s_awsize(m_axi_awsize),
-      .s_awburst(m_axi_awburst), .s_awlock(m_axi_awlock), .s_awcache(m_axi_awcache),
-      .s_awprot(m_axi_awprot), .s_awqos(m_axi_awqos), .s_awvalid(m_axi_awvalid), .s_awready(m_axi_awready),
-      .s_wdata(m_axi_wdata), .s_wstrb(m_axi_wstrb), .s_wlast(m_axi_wlast),
-      .s_wvalid(m_axi_wvalid), .s_wready(m_axi_wready),
-      .m_awid(mig_awid), .m_awaddr(mig_awaddr), .m_awlen(mig_awlen), .m_awsize(mig_awsize),
-      .m_awburst(mig_awburst), .m_awlock(mig_awlock), .m_awcache(mig_awcache),
-      .m_awprot(mig_awprot), .m_awqos(mig_awqos), .m_awvalid(mig_awvalid), .m_awready(mig_awready),
-      .m_wdata(mig_wdata), .m_wstrb(mig_wstrb), .m_wlast(mig_wlast),
-      .m_wvalid(mig_wvalid), .m_wready(mig_wready));
-
-   axi_r_reg_slice #(.IDW(3), .DW(64)) core_r_slice (
-      .clock    (ui_clk),        .reset    (ui_cpu_reset),
-      .s_rid    (core_axi_rid_arb),   .s_rdata (core_axi_rdata_arb),
-      .s_rresp  (core_axi_rresp_arb), .s_rlast (core_axi_rlast_arb),
-      .s_rvalid (core_axi_rvalid_arb), .s_rready (core_axi_rready_arb),
-      .m_rid    (core_axi_rid),       .m_rdata (core_axi_rdata),
-      .m_rresp  (core_axi_rresp),     .m_rlast (core_axi_rlast),
-      .m_rvalid (core_axi_rvalid),    .m_rready (core_axi_rready));
-   end else begin : gen_ddr_direct
-      assign m_axi_awid        = core_axi_awid;
-      assign m_axi_awaddr      = core_axi_awaddr;
-      assign m_axi_awlen       = core_axi_awlen;
-      assign m_axi_awsize      = core_axi_awsize;
-      assign m_axi_awburst     = core_axi_awburst;
-      assign m_axi_awlock      = core_axi_awlock;
-      assign m_axi_awcache     = core_axi_awcache;
-      assign m_axi_awprot      = core_axi_awprot;
-      assign m_axi_awqos       = core_axi_awqos;
-      assign m_axi_awvalid     = core_axi_awvalid;
-      assign core_axi_awready  = m_axi_awready;
-
-      assign m_axi_wdata       = core_axi_wdata;
-      assign m_axi_wstrb       = core_axi_wstrb;
-      assign m_axi_wlast       = core_axi_wlast;
-      assign m_axi_wvalid      = core_axi_wvalid;
-      assign core_axi_wready   = m_axi_wready;
-
-      assign core_axi_bid      = m_axi_bid;
-      assign core_axi_bresp    = m_axi_bresp;
-      assign core_axi_bvalid   = m_axi_bvalid;
-      assign m_axi_bready      = core_axi_bready;
-
-      assign m_axi_arid        = core_axi_arid;
-      assign m_axi_araddr      = core_axi_araddr;
-      assign m_axi_arlen       = core_axi_arlen;
-      assign m_axi_arsize      = core_axi_arsize;
-      assign m_axi_arburst     = core_axi_arburst;
-      assign m_axi_arlock      = core_axi_arlock;
-      assign m_axi_arcache     = core_axi_arcache;
-      assign m_axi_arprot      = core_axi_arprot;
-      assign m_axi_arqos       = core_axi_arqos;
-      assign m_axi_arvalid     = core_axi_arvalid;
-      assign core_axi_arready  = m_axi_arready;
-
-      assign core_axi_rid      = m_axi_rid;
-      assign core_axi_rdata    = m_axi_rdata;
-      assign core_axi_rresp    = m_axi_rresp;
-      assign core_axi_rlast    = m_axi_rlast;
-      assign core_axi_rvalid   = m_axi_rvalid;
-      assign m_axi_rready      = core_axi_rready;
-   end
-   endgenerate
-
    // ===================== The core: rv_soc_top at probe_clk =====================
    // rv_soc_top (core + I$/D$ + CLINT/PLIC/UART + boot SRAM) at probe_clk; its tagged DDR
-   // memory port -> ddr_port_cdc (three async FIFOs) -> ddr_port_axi -> the core_axi_* arbiter
-   // input (the MIG path). virtio-blk/net and the MMIO bridge hang off its virtio passthrough below.
+   // memory port -> ddr_port_cdc (three async FIFOs) -> ddr4_mem, our controller, beside the DMA
+   // masters' AXI port. virtio-blk/net and the MMIO bridge hang off its virtio passthrough below.
    wire         pq_valid, pq_ready, pq_we, pr_valid, pr_ready, pr_last, pw_valid, pw_ready;
    wire [4:0]   pq_id, pr_id, pw_id;  wire [57:0] pq_addr;  wire [63:0] pq_wmask;  wire [511:0] pq_wdata;
    wire [1:0]   pr_beat;  wire [127:0] pr_data;
@@ -2208,8 +1900,8 @@ module rk_xcku5p(
    // cycles (12 us; a DDR read takes ~30), and stays up. Each ILA triggers on it (ila_mem_m
    // through a synchronizer), so with the trigger at the end of the window the 4096 samples
    // before it show how the path stopped. ila_mem_p is the core side, ila_mem_m the ui_clk side:
-   // the CDC's far end, the core's and the devices' AXI masters, and the arbiter's AXI into the
-   // controller (m_axi_*, and the AW/W slice's output, mig_*).
+   // the CDC's far end, the devices' AXI master, and ddr4_mem's PHY-only port (its column
+   // commands and their tags, slot 1's row and slot 0's column).
    reg  [5:0]  ila_rd_out, ila_wr_out;   // reads and writes the port owes a response
    reg  [10:0] ila_quiet;                // cycles waiting with no handshake, saturating
    reg         ila_trig;
@@ -2241,18 +1933,21 @@ module rk_xcku5p(
       .clk    (ui_clk),
       .probe0 ({ila_trig_m[2], mq_valid, mq_ready, mq_we,
                 mr_valid, mr_ready, mw_valid, mw_ready}),             // 8
-      .probe1 ({core_axi_arvalid, core_axi_arready, core_axi_rvalid, core_axi_rready,
-                core_axi_rlast, core_axi_awvalid, core_axi_awready, core_axi_wvalid,
-                core_axi_wready, core_axi_wlast, core_axi_bvalid, core_axi_bready}),  // 12
+      .probe1 ({mcRdCAS, mcWrCAS, rdDataEn, wrDataEn, per_rd_done, gt_data_ready, winInjTxn,
+                init_calib_complete, mc_CS_n[0], mc_CS_n[2], mc_CS_n[6], mc_ACT_n[2]}),  // 12
       .probe2 ({device_axi_arvalid, device_axi_arready, device_axi_rvalid, device_axi_rready,
                 device_axi_rlast, device_axi_awvalid, device_axi_awready, device_axi_wvalid,
                 device_axi_wready, device_axi_wlast, device_axi_bvalid, device_axi_bready}),  // 12
-      .probe3 ({m_axi_arvalid, m_axi_arready, m_axi_rvalid, m_axi_rready, m_axi_rlast,
-                m_axi_awvalid, m_axi_awready, m_axi_wvalid, m_axi_wready, m_axi_wlast,
-                m_axi_bvalid, m_axi_bready,
-                mig_awvalid, mig_awready, mig_wvalid, mig_wready, mig_wlast}),        // 17
-      .probe4 ({m_axi_arid, m_axi_rid, m_axi_awid, m_axi_bid}),      // 12
-      .probe5 ({m_axi_araddr[23:6], m_axi_awaddr[23:6]})              // 36: line index, low bits
+      .probe3 ({winBuf, rdDataAddr, wrDataAddr, mc_ODT[0], mc_ODT[4]}),             // 17
+      .probe4 ({mc_BA[0], mc_BA[8], mc_BG[0], mc_BA[2], mc_BA[10], mc_BG[2],
+                mc_BA[6], mc_BA[14], mc_BG[6], mc_ADR[16*8+6], mc_ADR[15*8+6], mc_ADR[14*8+6]}),  // 12
+      .probe5 ({mc_ADR[16*8+2], mc_ADR[15*8+2], mc_ADR[14*8+2], mc_ADR[13*8+2], mc_ADR[12*8+2],
+                mc_ADR[11*8+2], mc_ADR[10*8+2], mc_ADR[9*8+2], mc_ADR[8*8+2], mc_ADR[7*8+2],
+                mc_ADR[6*8+2], mc_ADR[5*8+2], mc_ADR[4*8+2], mc_ADR[3*8+2], mc_ADR[2*8+2],
+                mc_ADR[1*8+2], mc_ADR[0*8+2],                                      // slot 1's row
+                mc_ADR[16*8], mc_ADR[15*8], mc_ADR[14*8], mc_ADR[12*8], mc_ADR[11*8], mc_ADR[10*8],
+                mc_ADR[9*8], mc_ADR[8*8], mc_ADR[7*8], mc_ADR[6*8], mc_ADR[5*8], mc_ADR[4*8],
+                mc_ADR[3*8], mc_ADR[2*8], mc_ADR[1*8], mc_ADR[0*8], mc_BA[0], mc_BG[0], mc_CS_n[0]})  // 36
    );
 `endif
 
@@ -2268,26 +1963,30 @@ module rk_xcku5p(
       .m_r_valid(mr_valid), .m_r_ready(mr_ready), .m_r_id(mr_id), .m_r_beat(mr_beat), .m_r_last(mr_last),
       .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id));
 
-   ddr_port_axi probe_bridge (
-      .clk(ui_clk), .reset(ui_cpu_reset),
+   ddr4_mem u_mem (
+      .clk(ui_clk), .reset(ui_cpu_reset), .cal_done(init_calib_complete),
       .q_valid(mq_valid), .q_ready(mq_ready), .q_id(mq_id), .q_we(mq_we), .q_addr(mq_addr),
       .q_wmask(mq_wmask), .q_wdata(mq_wdata),
       .r_valid(mr_valid), .r_ready(mr_ready), .r_id(mr_id), .r_beat(mr_beat), .r_last(mr_last),
       .r_data(mr_data), .w_valid(mw_valid), .w_ready(mw_ready), .w_id(mw_id),
-      .m_axi_awid(core_axi_awid), .m_axi_awaddr(core_axi_awaddr), .m_axi_awlen(core_axi_awlen),
-      .m_axi_awsize(core_axi_awsize), .m_axi_awburst(core_axi_awburst), .m_axi_awlock(core_axi_awlock),
-      .m_axi_awcache(core_axi_awcache), .m_axi_awprot(core_axi_awprot), .m_axi_awqos(core_axi_awqos),
-      .m_axi_awvalid(core_axi_awvalid), .m_axi_awready(core_axi_awready),
-      .m_axi_wdata(core_axi_wdata), .m_axi_wstrb(core_axi_wstrb), .m_axi_wlast(core_axi_wlast),
-      .m_axi_wvalid(core_axi_wvalid), .m_axi_wready(core_axi_wready),
-      .m_axi_bid(core_axi_bid), .m_axi_bresp(core_axi_bresp), .m_axi_bvalid(core_axi_bvalid),
-      .m_axi_bready(core_axi_bready),
-      .m_axi_arid(core_axi_arid), .m_axi_araddr(core_axi_araddr), .m_axi_arlen(core_axi_arlen),
-      .m_axi_arsize(core_axi_arsize), .m_axi_arburst(core_axi_arburst), .m_axi_arlock(core_axi_arlock),
-      .m_axi_arcache(core_axi_arcache), .m_axi_arprot(core_axi_arprot), .m_axi_arqos(core_axi_arqos),
-      .m_axi_arvalid(core_axi_arvalid), .m_axi_arready(core_axi_arready),
-      .m_axi_rid(core_axi_rid), .m_axi_rdata(core_axi_rdata), .m_axi_rresp(core_axi_rresp),
-      .m_axi_rlast(core_axi_rlast), .m_axi_rvalid(core_axi_rvalid), .m_axi_rready(core_axi_rready));
+      .s_axi_awid(device_axi_awid), .s_axi_awaddr(device_axi_awaddr), .s_axi_awlen(device_axi_awlen),
+      .s_axi_awsize(device_axi_awsize), .s_axi_awburst(device_axi_awburst),
+      .s_axi_awvalid(device_axi_awvalid), .s_axi_awready(device_axi_awready),
+      .s_axi_wdata(device_axi_wdata), .s_axi_wstrb(device_axi_wstrb), .s_axi_wlast(device_axi_wlast),
+      .s_axi_wvalid(device_axi_wvalid), .s_axi_wready(device_axi_wready),
+      .s_axi_bid(device_axi_bid), .s_axi_bresp(device_axi_bresp), .s_axi_bvalid(device_axi_bvalid),
+      .s_axi_bready(device_axi_bready),
+      .s_axi_arid(device_axi_arid), .s_axi_araddr(device_axi_araddr), .s_axi_arlen(device_axi_arlen),
+      .s_axi_arsize(device_axi_arsize), .s_axi_arburst(device_axi_arburst),
+      .s_axi_arvalid(device_axi_arvalid), .s_axi_arready(device_axi_arready),
+      .s_axi_rid(device_axi_rid), .s_axi_rdata(device_axi_rdata), .s_axi_rresp(device_axi_rresp),
+      .s_axi_rlast(device_axi_rlast), .s_axi_rvalid(device_axi_rvalid), .s_axi_rready(device_axi_rready),
+      .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n),
+      .mc_ODT(mc_ODT), .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS),
+      .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2), .winBuf(winBuf), .winInjTxn(winInjTxn),
+      .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
+      .wrData(wrData), .wrDataMask(wrDataMask), .wrDataEn(wrDataEn), .wrDataAddr(wrDataAddr),
+      .rdDataEn(rdDataEn), .rdDataAddr(rdDataAddr), .rdData(rdData), .per_rd_done(per_rd_done));
 
    // UART at probe_clk. rs232 ROUNDS the divisor (period=(CLK+BAUD/2)/BAUD), so at
    // 66.67 MHz (ui_clk/5) / 3 Mbaud -> period 22 -> 3.030 Mbaud (1.0% err, within tolerance).

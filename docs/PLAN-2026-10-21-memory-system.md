@@ -64,31 +64,46 @@ and larger-footprint workloads (Tommy is adding them) keep more of it.
 
 ## The design
 
-### The controller
+### The controller (built: `src/ddr4_ctl.v`, `ddr4_mem.v`, its bench `tb_ddr4_mem.v`)
 
-- **Clocking.** The controller runs in ui_clk (333 MHz), as the PHY requires. The core's side crosses
-  synchronously: the clocks are related 2:1, so the crossing is registers and a multicycle constraint,
-  not asynchronous FIFOs (which take block RAM at 512 bits and cost cycles each way).
-- **The client side** is the line port as it is: tagged requests, responses by id, out of order. A read
-  returns as two 32-byte halves on consecutive ui_clks, one 64-byte line a core cycle; a client always
-  takes it (its free buffer). A write's data stays in the client's buffer until the controller takes
-  it, in the cycle its write burst needs it, so the controller holds no write data of its own.
-- **Address map.** The line's two halves are two bursts to the same row, in different bank groups, so
-  the second follows at tCCD_S (4 tCK) rather than tCCD_L; consecutive lines go to different banks;
-  the row is the top. Streams stay in open rows.
-- **Scheduling.** Per bank its open row. Reads first (a demand fill does not wait behind a write-back,
-  the arbiter's rule today), row hits before misses, the oldest first among equals; writes drain in
-  batches once their queue passes a mark, so the write-to-read turnaround (tWTR) is paid per batch,
-  not per line. Refresh every tREFI and ZQ calibration are the controller's.
-- **Timing.** tRCD, tRP, tRAS, tRC, tRRD_S/L, tFAW, tCCD_S/L, tWTR_S/L, tWR, tRTP, tRFC, tREFI, as the
-  IP's own controller takes them today (`ddr4_v2_2_mc*.sv`, a working reference for their use).
-- **The PHY's interface.** The generated IP's controller drives the calibration/PHY block's `mcal_*`
-  port: per ui_clk eight command slots (ACT_n, ADR, BA, BG, CS_n, CKE, ODT), per byte-lane channel
-  the data out, strobes and output enables, data in. In the Physical Layer Only mode PG150 documents
-  this as the PHY-only interface, where each CAS carries a buffer address that comes back with its
-  data: a response tagged by the requester, as rule B1 wants. **To check in PG150 before any RTL**:
-  the interface's exact slots and latencies, and that the PHY-only mode initialises the DRAM and
-  calibrates before it hands over (`calDone`).
+- **The PHY-only interface** (PG150's "PHY Only Interface"; the generated IP's `mc_*` port, which its
+  own controller drives today). The IP keeps the PHY, the calibration and its MicroBlaze; before
+  `calDone` they reset, program the mode registers (fixed by the IP's parameters), ZQCL and train the
+  DRAM. After it every command is ours: four command slots a ui_clk, CAS only in slots 0 and 2, one BL8
+  burst (32 bytes) a cycle each way. A write CAS at cycle N gets `wrDataEn` with its tag at N+2 and
+  wants the data at N+3 (the PHY holds none); a read CAS returns its burst and tag at a fixed,
+  calibrated latency (about 15-16 cycles), in CAS order, with no back-pressure. The controller also
+  owes refresh, ZQCS, ODT on writes and the PHY's VT tracking: in every microsecond a read, three
+  cycles with no read CAS and then a `gt_data_ready` pulse. The free budget: the IP's AXI shim,
+  controller and UI, 5,656 LUTs and 6,475 flops.
+- **Clocking.** The controller runs on ui_clk (333 MHz), as the PHY requires. The first landing keeps
+  `ddr_port_cdc`'s asynchronous FIFOs to the core; the synchronous 2:1 crossing (probe_clk is a
+  BUFGCE_DIV of ui_clk, about 2.7 ns behind it: registers held two ui_clks, a multicycle path) is its
+  own step after.
+- **Requesters own the data.** A request is {line, read or write, the requester's buffer}; the PHY's
+  tag is {buffer, half}, so a read's bursts land straight in that buffer and a write's data is read
+  from it the cycle after `wrDataEn`. The caches' line port (`ddr4_port_line`) has eight read and four
+  write buffers and streams a landed line back as today's four 128-bit beats; the DMA masters' AXI port
+  (`ddr4_port_axi`, until coherent DMA) takes one transaction at a time, each within one line (the
+  virtio masters' single beats, the scanout's line reads), and goes first.
+- **Address map** (`line` = the DRAM window's line index): a line lives in one bank, its two bursts at
+  columns c and c+8 of one row (tCCD_L apart, one ACT a line); consecutive lines alternate bank
+  groups, so a stream keeps the bus busy; then the line in the row, the bank, the row
+  (`line[0]` group, `[6:1]` column, `[8:7]` bank, `[25:9]` row).
+- **Scheduling.** One queue of eight. Column commands go in queue order, so data comes back in
+  request order; rows open and close ahead: each bank's owner is its oldest queued request, and only
+  the owner precharges or activates it (the oldest owner first). Banks stay open (open page) until
+  another row's owner or a refresh closes them. Reads ahead of writes and write batching wait for a
+  measurement that wants them.
+- **Timing.** Each rule a down-counter in cycles for the fixed slots (CAS 0, ACT 1, PRE/REF/ZQCS 3),
+  each with a registered zero flag. The bench's DRAM model (`src/ddr4_phy_model.vh`) checks every rule
+  in DRAM clocks. The column commands' counters are at their exact minimum (tRCD, tCCD_L, tWTR_S/L,
+  read to write: one cycle less fails in the model); PRE and ACT are chosen a cycle before their
+  slots, so the row rules carry that cycle (tRP, tRRD, tRFC fail at two cycles less; tFAW cannot
+  bind, ACTs being three cycles apart at least), as do tRAS, tRTP and write recovery against a PRE.
+  The bench also fails a slow refresh rate, swapped write or DMA read halves and a missing VT read.
+- **VT tracking.** A read is injected when none has issued by cycle 200 of an interval (the head's
+  own line, or an open bank's row), and a refresh waits for its interval's read.
 
 ### Coherent DMA
 

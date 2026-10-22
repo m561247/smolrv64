@@ -1684,15 +1684,24 @@ through the D$ (§8), so their misses are D$ fills.
 The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes out on the
 `ddr_*` port: the testbench's model, or on the board:
 - `ddr_port_cdc`: three block-RAM async FIFOs into ui_clk;
-- `ddr_port_axi`: one AXI ID, up to 8 reads and 8 writes in flight, 8-beat INCR bursts, an
-  in-order id FIFO per channel, posted writes;
-- `axi_two_master_arbiter`: the core against the virtio DMA, granted per transaction, with R
-  and B routed by an ID bit it stamps.
+- `ddr4_mem`: our DDR4 controller (`ddr4_ctl`) on the DDR4 IP's PHY-only port (AMD PG150), whose
+  PHY and calibration train the DRAM before `calDone`. A requester owns its line buffers (this
+  port eight for reads and four for writes, `ddr4_port_line`); the PHY's tag is {buffer, half}, so
+  a read's two bursts land in its buffer and a write's are taken from it the cycle after
+  `wrDataEn`, and a landed line streams back as four 128-bit beats. One queue of eight: column
+  commands in queue order (so data comes back in request order), rows opened and closed ahead by
+  each bank's oldest request, banks left open. A line lives in one bank (its two bursts at
+  columns c and c+8, tCCD_L apart); consecutive lines alternate bank groups; then the bank and
+  the row (`line[0]` group, `[6:1]` column, `[8:7]` bank, `[25:9]` row). Refresh every tREFI,
+  ZQCS, ODT on writes and the PHY's VT tracking are its own. The DMA masters' AXI port
+  (`ddr4_port_axi`: one transaction, within one line, at a time) goes first.
 
 The testbench model keeps 8 transactions in flight. Each draws the measured latency at
-acceptance, and they are answered in request order as the MIG answers; `+ddr_reorder` answers
-in any order. `tb_ddr_port` proves the board path under random load with a concurrent DMA
-master, in order and reordering.
+acceptance, and they are answered in request order; `+ddr_reorder` answers in any order.
+`tb_ddr_port` proves the board path (`ddr_port_cdc` and `ddr4_mem` across the two clocks, a DMA
+master beside the core's traffic) on `ddr4_phy_model`, which checks every DRAM rule in DRAM clocks;
+`tb_ddr4_mem` drives `ddr4_mem` alone through streams, write-only and idle stretches and row
+conflicts.
 
 **MEASURED ON THE BOARD** (166.67 MHz; `tools/board/membench`, whose `chase2` counts its own
 user-mode cycles with the core's counters: a dependent chase over one random cycle of 64-byte
@@ -2279,7 +2288,7 @@ abort at that retire (the check's self-test; it does on retire 35, the boot's fi
 | Build | `make bit` (`SMOLRV64_CORE=1 SMOLRV64_HW=8 PROBE_CLK_DIV8=48` are the defaults; HW=4 until 2026-09-05) |
 
 Read `probe_clk` from the **Intra Clock Table**, not global WNS — global WNS is usually
-pinned by the MIG's `ui_clk`.
+pinned by `ui_clk`'s paths.
 
 ---
 
