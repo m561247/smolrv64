@@ -1692,7 +1692,8 @@ The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes ou
   commands in queue order (so data comes back in request order), rows opened and closed ahead by
   each bank's oldest request, banks left open. A line lives in one bank (its two bursts at
   columns c and c+8, tCCD_L apart); consecutive lines alternate bank groups; then the bank and
-  the row (`line[0]` group, `[6:1]` column, `[8:7]` bank, `[25:9]` row). Refresh every tREFI,
+  the row (`line[0]` group, `[6:1]` column, `[25:9]` row, bank `[8:7] ^ row[1:0] ^ row[3:2]`: a stream's
+  D$ victim, 128 KiB back, never shares its fill's bank). Refresh every tREFI,
   ZQCS, ODT on writes and the PHY's VT tracking are its own. The DMA masters' AXI port
   (`ddr4_port_axi`: one transaction, within one line, at a time; register slices on AW/W and R
   before it) goes first.

@@ -89,7 +89,7 @@ and larger-footprint workloads (Tommy is adding them) keep more of it.
 - **Address map** (`line` = the DRAM window's line index): a line lives in one bank, its two bursts at
   columns c and c+8 of one row (tCCD_L apart, one ACT a line); consecutive lines alternate bank
   groups, so a stream keeps the bus busy; then the line in the row, the bank, the row
-  (`line[0]` group, `[6:1]` column, `[8:7]` bank, `[25:9]` row).
+  (`line[0]` group, `[6:1]` column, `[25:9]` row, bank `[8:7] ^ row[1:0] ^ row[3:2]`).
 - **Scheduling.** One queue of eight. Column commands go in queue order, so data comes back in
   request order; rows open and close ahead: each bank's owner is its oldest queued request, and only
   the owner precharges or activates it (the oldest owner first). Banks stay open (open page) until

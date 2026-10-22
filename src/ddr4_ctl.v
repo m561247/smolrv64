@@ -10,7 +10,11 @@
 // THE ADDRESS MAP, on the line index of the DRAM window (src/dram_window.vh): a line lives in one
 // bank, its two bursts at columns c and c+8 of one row; consecutive lines alternate bank groups,
 // so a stream keeps the bus busy (tCCD_S between the groups, tCCD_L within one).
-//     line[0] bank group   line[6:1] the line in its row   line[8:7] bank   line[25:9] row
+//     line[0] bank group   line[6:1] the line in its row   line[25:9] row
+//     line[8:7] ^ row[1:0] ^ row[3:2] bank
+// The row bits in the bank put a line and the lines 64 and 128 KiB from it, at the same place in
+// their rows, in different banks: a D$ set's lines are 4 KiB apart within 128 KiB, and a stream's
+// victim is the line 128 KiB back, so its fills and their write-backs do not take turns at a bank.
 // A 2 GiB board's parts lack A16 (row bit 16, line[25]): its upper 2 GiB repeats the lower.
 //
 // REQUESTS carry a line, read or write, and the requester's buffer (4 bits). The PHY's tag is
@@ -97,7 +101,7 @@ module ddr4_ctl #(
    assign winRmw     = 1'b0;
    assign winRank    = 2'b00;
 
-   function [2:0]  bank_of(input [25:0] l); bank_of = {l[0], l[8:7]}; endfunction   // {group, bank}
+   function [2:0]  bank_of(input [25:0] l); bank_of = {l[0], l[8:7] ^ l[10:9] ^ l[12:11]}; endfunction   // {group, bank}
    function [16:0] row_of (input [25:0] l); row_of  = l[25:9]; endfunction
    function [7:0]  dn(input [7:0] t); dn = (t == 8'd0) ? 8'd0 : t - 8'd1; endfunction
    function [7:0]  mx(input [7:0] x, input [7:0] y); mx = (x > y) ? x : y; endfunction
@@ -228,7 +232,7 @@ module ddr4_ctl #(
    reg  [25:0]  inj_line;
    always @* begin
       inj_line = 26'd0;
-      for (b = 7; b >= 0; b = b - 1) if (b_open[b]) inj_line = {b_row[b], b[1:0], 6'd0, b[2]};
+      for (b = 7; b >= 0; b = b - 1) if (b_open[b]) inj_line = {b_row[b], b[1:0] ^ b_row[b][1:0] ^ b_row[b][3:2], 6'd0, b[2]};
    end
    assign rq_ready = cal_done && !inj_enq && (q_n < QN[QB:0]);
    wire         enq    = inj_enq || (rq_valid && rq_ready);

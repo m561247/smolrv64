@@ -68,9 +68,10 @@ module ddr4_phy_model #(
    int     n_ref, n_rd, n_wr, n_act, n_pre, n_inj;
    bit [255:0] mem [bit [26:0]];        // {group, bank, row, col[9:3]}
 `ifdef DDR4_PHY_STORE
-   // the line of a key, by ddr4_ctl's map: line[0] group, [6:1] col[9:4], [8:7] bank, [25:9] row
+   // the line of a key, by ddr4_ctl's map: line[0] group, [6:1] col[9:4], [8:7] bank ^ row[1:0] ^
+   // row[3:2], [25:9] row
    function automatic longint st_idx(input bit [26:0] k);
-      return {k[23:7], k[25:24], k[6:1], k[26]} & ((64'd1 << (`SMOLRV64_MEM_SIZE_LG2 - 6)) - 1);
+      return {k[23:7], k[25:24] ^ k[8:7] ^ k[10:9], k[6:1], k[26]} & ((64'd1 << (`SMOLRV64_MEM_SIZE_LG2 - 6)) - 1);
    endfunction
    function automatic bit [255:0] st_rd(input bit [26:0] k); return `DDR4_PHY_STORE[st_idx(k)][k[0]*256 +: 256]; endfunction
    function automatic void st_wr(input bit [26:0] k, input bit [255:0] d, input bit [31:0] keep);
