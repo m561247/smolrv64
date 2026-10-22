@@ -1655,6 +1655,14 @@ module tb;
       else
          $display("INO-LINUX TIMEOUT after %0d cycles (retires=%0d pc~%h)", ncyc, nret,
                   dut.imem_addr);
+      // rv_soc_top's ddr_hpm over the whole run, as workloads/ddrhpm reads it on the board: lines,
+      // latency sums (core cycles from acceptance) and the log2 bins [1] [2-3] ... [64+]
+      $display("[ddr-hpm: rd %0d sum %0d bins %0d %0d %0d %0d %0d %0d %0d  wr %0d sum %0d bins %0d %0d %0d %0d %0d %0d %0d]",
+               dut.u_ddr_hpm.rd_cnt, dut.u_ddr_hpm.rd_sum, dut.u_ddr_hpm.rdb[1], dut.u_ddr_hpm.rdb[2],
+               dut.u_ddr_hpm.rdb[3], dut.u_ddr_hpm.rdb[4], dut.u_ddr_hpm.rdb[5], dut.u_ddr_hpm.rdb[6],
+               dut.u_ddr_hpm.rdb[7], dut.u_ddr_hpm.wr_cnt, dut.u_ddr_hpm.wr_sum, dut.u_ddr_hpm.wrb[1],
+               dut.u_ddr_hpm.wrb[2], dut.u_ddr_hpm.wrb[3], dut.u_ddr_hpm.wrb[4], dut.u_ddr_hpm.wrb[5],
+               dut.u_ddr_hpm.wrb[6], dut.u_ddr_hpm.wrb[7]);
       $display("[blk: dma rd=%0d wr=%0d]", n_dma_rd, n_dma_wr);   // virtio-blk beats (B6); 0/0 without +disk
       $display("[dma-agent: bursts=%0d]", dma_ctr);   // B4 memrand; 0 without +dma_rand
       // B3: perf-stat text, the shape tools/perf-cpi-stack.py parses (`<count> r<code>`).

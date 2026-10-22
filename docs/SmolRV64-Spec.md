@@ -2237,9 +2237,12 @@ faster memory path): `rv_soc_top`'s `ddr_hpm` read with `workloads/ddrhpm` on 41
 reads 35.2 and writes 21.3 cycles mean from acceptance at the line port. Bare-metal kernels in the
 lockstep against the same code on the board (user mode, 512 KiB arrays): a dependent chase 45.89 vs
 45.87 cycles a load, a read stream 3.27 vs ~3.2 cycles an element, a daxpy 7.32 vs 7.4, a fill 2.04
-vs 2.03; a copy 3.81 vs 4.15, 8% fast and not yet explained: the board's line port never refuses
-(its 16-deep request FIFO holds the 11 requests the caches can have out, where the model takes 8),
-and both answer each direction in order. Integer subtests' Top-Down matches
+vs 2.03; a copy 3.81 vs 4.15, which is bare metal against Linux, not the model: the same binary
+under Linux in the RTL, from a Simmerv checkpoint, copies at 4.53 cycles an element against the
+board's 4.64, with the same lines (16.5 K reads, 8.2 K write-backs a pass of 512 KiB) and read
+latencies 38.4 against 36.8. Under translation the RTL runs that copy 20% slower than bare metal;
+the model errs slow on a read stream (3.48 against 3.32), having no open-row hits. At its end the
+lockstep prints `ddr_hpm`'s totals (`[ddr-hpm: ...]`). Integer subtests' Top-Down matches
 the board's within a few points; the FP subtests' back end is about twice the sim's on the board
 (Machine Learning 56.7% vs 21.5%), which the latencies do not explain. On GB5's 77 SimPoints a port
 10 cycles faster is worth 4.31% of the single-core cycles, 20 cycles 7.74% (no L2).

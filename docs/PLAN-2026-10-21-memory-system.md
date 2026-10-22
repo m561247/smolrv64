@@ -117,15 +117,14 @@ and larger-footprint workloads (Tommy is adding them) keep more of it.
 Every step is measured or modelled first, then gated as today (riscv-tests, the unit benches, lint, the
 60 M / 300 M lockstep, the glibc, sysd and storm locksteps, a build, the board, GB5).
 
-0. **Find what the model still misses, in the lockstep first.** The FP subtests' back end on the board
-   is about twice the sim's (Machine Learning 56.7% against 21.5%) with every latency calibrated, and a
-   copy runs 8% slower on the board than in the lockstep. Neither refusals nor order: the board's line
-   port never refuses (its 16-deep request FIFO holds the 11 requests the caches can have out), and the
-   model, like the board, answers each direction in order. The lockstep's `rv_soc_top` has the same
-   `ddr_hpm`: the copy read through it in both says which. Different counts are traffic one side
-   has and the other does not (the board's copy over 4 MiB read 3.3 lines a write-back, where source
-   and write-allocate make 2); different means are the shape the model draws; neither, and the gap is
-   not the memory's.
+0. **What the model still misses -- DONE 2026-10-21.** The copy's gap was the comparison: the
+   calibration ran its kernels bare metal in the lockstep and under Linux on the board. One binary
+   read `ddr_hpm` in-process around its timed passes, and under Linux in the RTL (from a Simmerv
+   checkpoint) it copies at 4.53 cycles an element against the board's 4.64, with the same lines and
+   read latencies of 38.4 against 36.8. Bare metal, the same RTL copies at 3.77: translation costs
+   that copy 20% (a core item, not the memory's). The model errs slow on a read stream (open-row hits
+   it lacks: 36.9 against the board's 31.9), which the bank-aware model below brings. The FP
+   subtests' back end (twice the sim's on the board) stays open for that model to answer.
 1. **The controller, in its own bench first**: our controller against a DDR4 timing-checking model
    behind a PHY-interface model, every timing rule asserted; then on the board in place of the IP's
    controller and its AXI path, below today's line port, with the synchronous crossing. Measured with
