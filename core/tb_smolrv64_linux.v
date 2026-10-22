@@ -46,8 +46,13 @@ module tb;
    wire        ddr_q_valid, ddr_q_we, ddr_r_ready, ddr_w_ready;
    wire [4:0]  ddr_q_id;  wire [57:0] ddr_q_addr;  wire [63:0] ddr_q_wmask;  wire [511:0] ddr_q_wdata;
    wire        ddr_q_ready;
+`ifdef TB_DDR4
+   wire        ddr_r_valid, ddr_r_last, ddr_w_valid;
+   wire [4:0]  ddr_r_id, ddr_w_id;  wire [1:0] ddr_r_beat;  wire [127:0] ddr_r_data;
+`else
    reg         ddr_r_valid, ddr_r_last, ddr_w_valid;
    reg  [4:0]  ddr_r_id, ddr_w_id;  reg [1:0] ddr_r_beat;  reg [127:0] ddr_r_data;
+`endif
    wire        rx_ready;
 
    // Model the hardware's 3 Mbps serializer instead of an instant drain: a 10-bit
@@ -201,6 +206,55 @@ module tb;
    localparam [63:0] LBASE  = BASE >> 6;
    localparam integer DDR_NOUT = 8;
    reg [511:0] lram [0:NLINES-1];
+`ifdef TB_DDR4
+   // TB_DDR4 (VDEFS=-DTB_DDR4): the board's path below the port instead of the drawn latencies --
+   // ddr_port_cdc into a ui_clk of twice the core's, our controller (ddr4_mem) and the PHY-only
+   // model, whose DRAM is lram at the controller's map (src/ddr4_phy_model.vh). The DMA masters'
+   // port is idle: the testbench's DMA writes lram itself.
+   reg ui_clk = 1'b1;  always #2.5 ui_clk = ~ui_clk;          // its rising edges on clk's
+   wire        mq_valid, mq_ready, mq_we, mr_valid, mr_ready, mr_last, mw_valid, mw_ready;
+   wire [4:0]  mq_id, mr_id, mw_id;  wire [57:0] mq_addr;  wire [63:0] mq_wmask;  wire [511:0] mq_wdata;
+   wire [1:0]  mr_beat;  wire [127:0] mr_data;
+   wire [7:0]   mc_ACT_n, mc_BG, mc_CS_n, mc_ODT, mc_CKE;  wire [135:0] mc_ADR;  wire [15:0] mc_BA;
+   wire         mcRdCAS, mcWrCAS, mcCasSlot2, winInjTxn, winRmw, gt_data_ready, cal_done;
+   wire [1:0]   mcCasSlot, winRank;  wire [4:0] winBuf, rdDataAddr, wrDataAddr;
+   wire [255:0] wrData, rdData;  wire [31:0] wrDataMask;  wire rdDataEn, wrDataEn, per_rd_done;
+   ddr_port_cdc u_ddr_cdc (
+      .clk_p(clk), .reset_p(reset),
+      .p_q_valid(ddr_q_valid), .p_q_ready(ddr_q_ready), .p_q_id(ddr_q_id), .p_q_we(ddr_q_we), .p_q_addr(ddr_q_addr),
+      .p_q_wmask(ddr_q_wmask), .p_q_wdata(ddr_q_wdata),
+      .p_r_valid(ddr_r_valid), .p_r_ready(ddr_r_ready), .p_r_id(ddr_r_id), .p_r_beat(ddr_r_beat), .p_r_last(ddr_r_last),
+      .p_r_data(ddr_r_data), .p_w_valid(ddr_w_valid), .p_w_ready(ddr_w_ready), .p_w_id(ddr_w_id),
+      .clk_m(ui_clk), .reset_m(reset),
+      .m_q_valid(mq_valid), .m_q_ready(mq_ready), .m_q_id(mq_id), .m_q_we(mq_we), .m_q_addr(mq_addr),
+      .m_q_wmask(mq_wmask), .m_q_wdata(mq_wdata),
+      .m_r_valid(mr_valid), .m_r_ready(mr_ready), .m_r_id(mr_id), .m_r_beat(mr_beat), .m_r_last(mr_last),
+      .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id));
+   ddr4_mem u_ddr_mem (
+      .clk(ui_clk), .reset(reset), .cal_done(cal_done),
+      .q_valid(mq_valid), .q_ready(mq_ready), .q_id(mq_id), .q_we(mq_we), .q_addr(mq_addr),
+      .q_wmask(mq_wmask), .q_wdata(mq_wdata),
+      .r_valid(mr_valid), .r_ready(mr_ready), .r_id(mr_id), .r_beat(mr_beat), .r_last(mr_last),
+      .r_data(mr_data), .w_valid(mw_valid), .w_ready(mw_ready), .w_id(mw_id),
+      .s_axi_awid(3'd0), .s_axi_awaddr(32'd0), .s_axi_awlen(8'd0), .s_axi_awsize(3'd3), .s_axi_awburst(2'b01),
+      .s_axi_awvalid(1'b0), .s_axi_awready(), .s_axi_wdata(64'd0), .s_axi_wstrb(8'd0), .s_axi_wlast(1'b0),
+      .s_axi_wvalid(1'b0), .s_axi_wready(), .s_axi_bid(), .s_axi_bresp(), .s_axi_bvalid(), .s_axi_bready(1'b1),
+      .s_axi_arid(3'd0), .s_axi_araddr(32'd0), .s_axi_arlen(8'd0), .s_axi_arsize(3'd3), .s_axi_arburst(2'b01),
+      .s_axi_arvalid(1'b0), .s_axi_arready(), .s_axi_rid(), .s_axi_rdata(), .s_axi_rresp(), .s_axi_rlast(),
+      .s_axi_rvalid(), .s_axi_rready(1'b1),
+      .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
+      .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
+      .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
+      .wrData(wrData), .wrDataMask(wrDataMask), .wrDataEn(wrDataEn), .wrDataAddr(wrDataAddr),
+      .rdDataEn(rdDataEn), .rdDataAddr(rdDataAddr), .rdData(rdData), .per_rd_done(per_rd_done));
+   ddr4_phy_model #(.CAL(20)) u_ddr_phy (
+      .clk(ui_clk), .reset(reset), .calDone(cal_done),
+      .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
+      .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
+      .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
+      .wrData(wrData), .wrDataMask(wrDataMask), .wrDataEn(wrDataEn), .wrDataAddr(wrDataAddr),
+      .rdDataEn(rdDataEn), .rdDataAddr(rdDataAddr), .rdData(rdData), .per_rd_done(per_rd_done));
+`else
    `TB_RAND(ddr_rnd, ddr_rs)
    reg         ddr_reorder;
    initial ddr_reorder = $test$plusargs("ddr_reorder");
@@ -289,6 +343,7 @@ module tb;
    always @(posedge clk) if (!reset) begin
       if (d_nv > DDR_NOUT) $fatal(1, "tb: DDR model holds %0d transactions", d_nv);
    end
+`endif
 
 
    // ==================== virtio-blk (B6, 2026-09-17; from the retired tb_cosim_linux.v) ====================
@@ -1663,6 +1718,9 @@ module tb;
                dut.u_ddr_hpm.rdb[7], dut.u_ddr_hpm.wr_cnt, dut.u_ddr_hpm.wr_sum, dut.u_ddr_hpm.wrb[1],
                dut.u_ddr_hpm.wrb[2], dut.u_ddr_hpm.wrb[3], dut.u_ddr_hpm.wrb[4], dut.u_ddr_hpm.wrb[5],
                dut.u_ddr_hpm.wrb[6], dut.u_ddr_hpm.wrb[7]);
+`ifdef TB_DDR4
+      u_ddr_phy.report();
+`endif
       $display("[blk: dma rd=%0d wr=%0d]", n_dma_rd, n_dma_wr);   // virtio-blk beats (B6); 0/0 without +disk
       $display("[dma-agent: bursts=%0d]", dma_ctr);   // B4 memrand; 0 without +dma_rand
       // B3: perf-stat text, the shape tools/perf-cpi-stack.py parses (`<count> r<code>`).
@@ -1800,3 +1858,8 @@ module tb;
 endmodule
 
 `default_nettype wire
+
+`ifdef TB_DDR4
+ `define DDR4_PHY_STORE tb.lram
+ `include "ddr4_phy_model.vh"
+`endif

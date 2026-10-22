@@ -1701,7 +1701,10 @@ acceptance, and they are answered in request order; `+ddr_reorder` answers in an
 `tb_ddr_port` proves the board path (`ddr_port_cdc` and `ddr4_mem` across the two clocks, a DMA
 master beside the core's traffic) on `ddr4_phy_model`, which checks every DRAM rule in DRAM clocks;
 `tb_ddr4_mem` drives `ddr4_mem` alone through streams, write-only and idle stretches and row
-conflicts.
+conflicts. Built with `VDEFS=-DTB_DDR4`, the Linux lockstep puts the board's path below the port
+instead of the drawn latencies: `ddr_port_cdc` into a ui_clk of twice the core's, `ddr4_mem` and
+`ddr4_phy_model`, whose DRAM is `lram` at the controller's map. The 60 M boot runs clean on it,
+retiring 58,047,166 (+4.04% over the drawn model's 55,791,913), port reads at 27.0 cycles mean.
 
 **MEASURED ON THE BOARD** (166.67 MHz; `tools/board/membench`, whose `chase2` counts its own
 user-mode cycles with the core's counters: a dependent chase over one random cycle of 64-byte

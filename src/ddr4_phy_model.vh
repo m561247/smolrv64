@@ -12,7 +12,10 @@
 // Data: a write CAS at cycle N raises wrDataEn with its winBuf at N+2 and takes wrData and
 // wrDataMask (1: byte kept) at N+3; a read CAS at N returns its burst and winBuf on rdDataEn and
 // rdDataAddr at N+RDLAT (per_rd_done when winInjTxn). Memory is sparse, bursts of 32 bytes keyed by
-// {bank group, bank, row, column}; a byte never written reads as zero.
+// {bank group, bank, row, column}; a byte never written reads as zero. With `DDR4_PHY_STORE defined
+// (a 512-bit line array of 2^(`SMOLRV64_MEM_SIZE_LG2 - 6) lines, the Linux testbench's lram) the
+// bursts live there instead, at the line ddr4_ctl's address map puts them: the testbench's images,
+// checkpoints and DMA are then the DRAM's contents.
 module ddr4_phy_model #(
    parameter integer RDLAT  = 16,       // CAS -> rdDataEn, cycles (the board's calibrated latency)
    parameter integer CAL    = 200,      // cycles to calDone
@@ -64,6 +67,23 @@ module ddr4_phy_model #(
    longint last_ref, cal_cyc;
    int     n_ref, n_rd, n_wr, n_act, n_pre, n_inj;
    bit [255:0] mem [bit [26:0]];        // {group, bank, row, col[9:3]}
+`ifdef DDR4_PHY_STORE
+   // the line of a key, by ddr4_ctl's map: line[0] group, [6:1] col[9:4], [8:7] bank, [25:9] row
+   function automatic longint st_idx(input bit [26:0] k);
+      return {k[23:7], k[25:24], k[6:1], k[26]} & ((64'd1 << (`SMOLRV64_MEM_SIZE_LG2 - 6)) - 1);
+   endfunction
+   function automatic bit [255:0] st_rd(input bit [26:0] k); return `DDR4_PHY_STORE[st_idx(k)][k[0]*256 +: 256]; endfunction
+   function automatic void st_wr(input bit [26:0] k, input bit [255:0] d, input bit [31:0] keep);
+      for (int j = 0; j < 32; j++) if (keep[j]) `DDR4_PHY_STORE[st_idx(k)][k[0]*256 + j*8 +: 8] = d[j*8 +: 8];
+   endfunction
+`else
+   function automatic bit [255:0] st_rd(input bit [26:0] k); return mem.exists(k) ? mem[k] : '0; endfunction
+   function automatic void st_wr(input bit [26:0] k, input bit [255:0] d, input bit [31:0] keep);
+      bit [255:0] o = st_rd(k);
+      for (int j = 0; j < 32; j++) if (keep[j]) o[j*8 +: 8] = d[j*8 +: 8];
+      mem[k] = o;
+   endfunction
+`endif
    // the data pipelines
    bit         wpipe_v  [0:3];   bit [4:0] wpipe_t [0:3];   bit [26:0] wpipe_a [0:3];
    bit         rpipe_v  [0:63];  bit [4:0] rpipe_t [0:63];  bit [255:0] rpipe_d [0:63];  bit rpipe_i [0:63];
@@ -90,18 +110,13 @@ module ddr4_phy_model #(
    end
 
    bit cas_seen, cas_rd;  int cas_slot;
-   bit [255:0] o;
    always @(posedge clk) begin
       cas_seen = 0;  cas_rd = 0;  cas_slot = -1;
       cyc <= cyc + 1;
       calDone <= !reset && (cyc >= CAL);
       // data out: this cycle's write request and read return, from the pipelines
       wrDataEn <= wpipe_v[0];  wrDataAddr <= wpipe_t[0];      // CAS cycle + 2
-      if (wpipe_v[2]) begin                         // N+3: the data (mask 1 keeps the byte)
-         o = mem.exists(wpipe_a[2]) ? mem[wpipe_a[2]] : '0;
-         for (int k = 0; k < 32; k++) if (!wrDataMask[k]) o[k*8 +: 8] = wrData[k*8 +: 8];
-         mem[wpipe_a[2]] = o;
-      end
+      if (wpipe_v[2]) st_wr(wpipe_a[2], wrData, ~wrDataMask);   // N+3: the data (mask 1 keeps the byte)
       for (int k = 3; k > 0; k--) begin wpipe_v[k] = wpipe_v[k-1]; wpipe_t[k] = wpipe_t[k-1]; wpipe_a[k] = wpipe_a[k-1]; end
       wpipe_v[0] = 0;
       rdDataEn <= rpipe_v[RDLAT-1] && !rpipe_i[RDLAT-1];
@@ -152,7 +167,7 @@ module ddr4_phy_model #(
                      need(t, wr_g[1-g], WR_RD_S, "write to read, the other group (CWL + BL/2 + tWTR_S)");
                      rd_any = t;  b_rd[bk] = t;  n_rd++;
                      rpipe_v[0] = 1;  rpipe_t[0] = winBuf;  rpipe_i[0] = winInjTxn;  n_inj += winInjTxn;
-                     rpipe_d[0] = mem.exists({bk[2:0], b_row[bk], a[9:3]}) ? mem[{bk[2:0], b_row[bk], a[9:3]}] : '0;
+                     rpipe_d[0] = st_rd({bk[2:0], b_row[bk], a[9:3]});
                   end else begin
                      need(t, rd_any, RD_WR, "read to write (RL + BL/2 - WL + 4)");
                      wr_g[g] = t;  b_wr[bk] = t;  n_wr++;
