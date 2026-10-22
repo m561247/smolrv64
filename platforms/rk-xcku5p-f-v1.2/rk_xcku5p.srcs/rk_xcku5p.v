@@ -1963,24 +1963,49 @@ module rk_xcku5p(
       .m_r_valid(mr_valid), .m_r_ready(mr_ready), .m_r_id(mr_id), .m_r_beat(mr_beat), .m_r_last(mr_last),
       .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id));
 
+   // The DMA masters' AXI into ddr4_mem through register slices (AW/W in, R out), as it reached the
+   // IP's controller before: the devices then need not sit beside the controller's port.
+   wire [2:0]  dm_awid, dm_rid;  wire [31:0] dm_awaddr;  wire [7:0] dm_awlen, dm_wstrb;
+   wire [2:0]  dm_awsize, dm_awprot;  wire [1:0] dm_awburst, dm_rresp;  wire [3:0] dm_awcache, dm_awqos;
+   wire        dm_awlock, dm_awvalid, dm_awready, dm_wlast, dm_wvalid, dm_wready;
+   wire [63:0] dm_wdata, dm_rdata;  wire dm_rlast, dm_rvalid, dm_rready;
+   axi_aww_reg_slice #(.IDW(3), .AW(32), .DW(64)) dev_aww_slice (
+      .clock(ui_clk), .reset(ui_cpu_reset),
+      .s_awid(device_axi_awid), .s_awaddr(device_axi_awaddr), .s_awlen(device_axi_awlen),
+      .s_awsize(device_axi_awsize), .s_awburst(device_axi_awburst), .s_awlock(device_axi_awlock),
+      .s_awcache(device_axi_awcache), .s_awprot(device_axi_awprot), .s_awqos(device_axi_awqos),
+      .s_awvalid(device_axi_awvalid), .s_awready(device_axi_awready),
+      .s_wdata(device_axi_wdata), .s_wstrb(device_axi_wstrb), .s_wlast(device_axi_wlast),
+      .s_wvalid(device_axi_wvalid), .s_wready(device_axi_wready),
+      .m_awid(dm_awid), .m_awaddr(dm_awaddr), .m_awlen(dm_awlen), .m_awsize(dm_awsize),
+      .m_awburst(dm_awburst), .m_awlock(dm_awlock), .m_awcache(dm_awcache), .m_awprot(dm_awprot),
+      .m_awqos(dm_awqos), .m_awvalid(dm_awvalid), .m_awready(dm_awready),
+      .m_wdata(dm_wdata), .m_wstrb(dm_wstrb), .m_wlast(dm_wlast), .m_wvalid(dm_wvalid), .m_wready(dm_wready));
+   axi_r_reg_slice #(.IDW(3), .DW(64)) dev_r_slice (
+      .clock(ui_clk), .reset(ui_cpu_reset),
+      .s_rid(dm_rid), .s_rdata(dm_rdata), .s_rresp(dm_rresp), .s_rlast(dm_rlast),
+      .s_rvalid(dm_rvalid), .s_rready(dm_rready),
+      .m_rid(device_axi_rid), .m_rdata(device_axi_rdata), .m_rresp(device_axi_rresp),
+      .m_rlast(device_axi_rlast), .m_rvalid(device_axi_rvalid), .m_rready(device_axi_rready));
+
    ddr4_mem u_mem (
       .clk(ui_clk), .reset(ui_cpu_reset), .cal_done(init_calib_complete),
       .q_valid(mq_valid), .q_ready(mq_ready), .q_id(mq_id), .q_we(mq_we), .q_addr(mq_addr),
       .q_wmask(mq_wmask), .q_wdata(mq_wdata),
       .r_valid(mr_valid), .r_ready(mr_ready), .r_id(mr_id), .r_beat(mr_beat), .r_last(mr_last),
       .r_data(mr_data), .w_valid(mw_valid), .w_ready(mw_ready), .w_id(mw_id),
-      .s_axi_awid(device_axi_awid), .s_axi_awaddr(device_axi_awaddr), .s_axi_awlen(device_axi_awlen),
-      .s_axi_awsize(device_axi_awsize), .s_axi_awburst(device_axi_awburst),
-      .s_axi_awvalid(device_axi_awvalid), .s_axi_awready(device_axi_awready),
-      .s_axi_wdata(device_axi_wdata), .s_axi_wstrb(device_axi_wstrb), .s_axi_wlast(device_axi_wlast),
-      .s_axi_wvalid(device_axi_wvalid), .s_axi_wready(device_axi_wready),
+      .s_axi_awid(dm_awid), .s_axi_awaddr(dm_awaddr), .s_axi_awlen(dm_awlen),
+      .s_axi_awsize(dm_awsize), .s_axi_awburst(dm_awburst),
+      .s_axi_awvalid(dm_awvalid), .s_axi_awready(dm_awready),
+      .s_axi_wdata(dm_wdata), .s_axi_wstrb(dm_wstrb), .s_axi_wlast(dm_wlast),
+      .s_axi_wvalid(dm_wvalid), .s_axi_wready(dm_wready),
       .s_axi_bid(device_axi_bid), .s_axi_bresp(device_axi_bresp), .s_axi_bvalid(device_axi_bvalid),
       .s_axi_bready(device_axi_bready),
       .s_axi_arid(device_axi_arid), .s_axi_araddr(device_axi_araddr), .s_axi_arlen(device_axi_arlen),
       .s_axi_arsize(device_axi_arsize), .s_axi_arburst(device_axi_arburst),
       .s_axi_arvalid(device_axi_arvalid), .s_axi_arready(device_axi_arready),
-      .s_axi_rid(device_axi_rid), .s_axi_rdata(device_axi_rdata), .s_axi_rresp(device_axi_rresp),
-      .s_axi_rlast(device_axi_rlast), .s_axi_rvalid(device_axi_rvalid), .s_axi_rready(device_axi_rready),
+      .s_axi_rid(dm_rid), .s_axi_rdata(dm_rdata), .s_axi_rresp(dm_rresp),
+      .s_axi_rlast(dm_rlast), .s_axi_rvalid(dm_rvalid), .s_axi_rready(dm_rready),
       .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n),
       .mc_ODT(mc_ODT), .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS),
       .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2), .winBuf(winBuf), .winInjTxn(winInjTxn),

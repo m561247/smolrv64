@@ -1694,7 +1694,8 @@ The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes ou
   columns c and c+8, tCCD_L apart); consecutive lines alternate bank groups; then the bank and
   the row (`line[0]` group, `[6:1]` column, `[8:7]` bank, `[25:9]` row). Refresh every tREFI,
   ZQCS, ODT on writes and the PHY's VT tracking are its own. The DMA masters' AXI port
-  (`ddr4_port_axi`: one transaction, within one line, at a time) goes first.
+  (`ddr4_port_axi`: one transaction, within one line, at a time; register slices on AW/W and R
+  before it) goes first.
 
 The testbench model keeps 8 transactions in flight. Each draws the measured latency at
 acceptance, and they are answered in request order; `+ddr_reorder` answers in any order.
