@@ -248,6 +248,14 @@ set_property USER_CLOCK_ROOT X1Y1 [get_nets -of_objects [get_pins -hier -filter 
 # the requirement -- that is what limited the design to the N x 3.000 ns ladder before.
 set_false_path -to [get_pins -hier -filter {NAME =~ *fbdiag_rst_sync_reg[0]/D}]
 
+# ddr4_mem (rk_xcku5p.v u_mem), our DDR4 controller, sits where the IP's own controller, UI and AXI
+# shim sat: the two clock regions of the DDR4 pins. The PHY-only IP is half the old IP's cells, and
+# left free the placer spread the controller toward the devices and reflowed the core around it
+# (f30ebc84/a47f5c1f: probe_clk -0.14 to -0.32 over most of the core's families).
+create_pblock pb_ddr4_mem
+add_cells_to_pblock [get_pblocks pb_ddr4_mem] [get_cells u_mem]
+resize_pblock [get_pblocks pb_ddr4_mem] -add {CLOCKREGION_X0Y0:CLOCKREGION_X0Y1}
+
 # ---- TinyVGA adapter on the 40-pin header (vga_scanout) ------------------------------------
 # Header names from the board's pin table (doc/RK-XCKU5P-F V1.2管脚定义.xls, sheet "40 PIN"),
 # all bank 87. The outputs are vga_scanout's own registers, so they pack into the IOBs.
