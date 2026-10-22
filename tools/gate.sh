@@ -35,9 +35,10 @@ echo "=== GATE: $WHAT ==="
 # Evidence outlives the build tree. `make clean` deletes *.log inside the platform dir, so a
 # log written there is gone the moment the NEXT gate runs -- which is how the 2026-09-02 pass
 # lost its timing report and with it the answer to "where is the margin now". Results go
-# under the repo root, keyed by commit, and nothing in the platform Makefile can reach them.
+# under the main checkout's root, keyed by commit, where nothing in the platform Makefile
+# reaches them and a worktree's deletion does not take them.
 SHA=$(git rev-parse --short HEAD)
-RES="$REPO/gate-results/$SHA"
+RES="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/gate-results/$SHA"
 mkdir -p "$RES"
 git log -1 --format='%H%n%s%n%ci' > "$RES/commit.txt"
 
@@ -84,7 +85,7 @@ echo "--- netlist boot (rule F5) ---"
 NB=$(grep -a "^NETLIST-BOOT:" "$RES/netlist-boot.log" | tail -1)
 echo "$NB"
 if ! echo "$NB" | grep -q "NETLIST-BOOT: PASS"; then
-   echo "GATE: FAIL (netlist)   [evidence: gate-results/$SHA/netlist-boot.log]"; exit 1
+   echo "GATE: FAIL (netlist)   [evidence: $RES/netlist-boot.log]"; exit 1
 fi
 # THE IDENTITY STAMP. The build's identity is INIT bits alone (docs/rtl-rules.md I2): a met probe
 # of exactly these sources at the shipping configuration IS this gate's design, placed and routed,
@@ -154,7 +155,7 @@ if [ ! -f "$BIT" ]; then
    if grep -q 'RAM INFERENCE REGRESSED' "$RES/build.log"; then WHY="ram-inference: $(grep -oE '^ +[a-z_0-9]+ +is no longer a RAM' "$RES/build.log" | awk '{print $1}' | tr '\n' ' ')"
    elif [ -z "$WNS" ]; then WHY="build: $(grep -E '^ERROR:|^Error|^make: ' "$RES/build.log" | head -1 | cut -c1-120)"
    else WHY="timing"; fi
-   echo "GATE: FAIL ($WHY) $WNS   [evidence: gate-results/$SHA/]"
+   echo "GATE: FAIL ($WHY) $WNS   [evidence: $RES/]"
    printf '%s\n' "$WORST"
    exit 1
 fi
@@ -166,12 +167,12 @@ cp "$BIT" "$RES/rk_xcku5p.bit"
 # NO_BOARD=1: stop here -- for a build whose board is busy (a Geekbench run on the last gate's
 # bitstream); tools/board-gate.sh on the evidence directory finishes the gate later.
 if [ "${NO_BOARD:-0}" != 0 ]; then
-   echo "GATE: BUILT (board pending)  ($WHAT)  $WNS   [evidence: gate-results/$SHA/, bitstream banked there]"; exit 0
+   echo "GATE: BUILT (board pending)  ($WHAT)  $WNS   [evidence: $RES/, bitstream banked there]"; exit 0
 fi
 
 # ---- 3. the board: tools/board-gate.sh, runnable alone on a banked bitstream ------------
 tools/board-gate.sh "$RES" | tee "$RES/board.log"
 if [ "${PIPESTATUS[0]}" -eq 0 ]; then
-   echo "GATE: PASS  ($WHAT)  $WNS   [evidence: gate-results/$SHA/]"; exit 0
+   echo "GATE: PASS  ($WHAT)  $WNS   [evidence: $RES/]"; exit 0
 fi
-echo "GATE: FAIL (board)   [evidence: gate-results/$SHA/]"; exit 1
+echo "GATE: FAIL (board)   [evidence: $RES/]"; exit 1
