@@ -21,6 +21,10 @@ This plan joins `PLAN-2026-10-03-dcache-vipt-l2.md`'s L2 to a controller of our 
   draining while the other fills.
 - **64 bytes wide everywhere, 32 bytes only if 64 cannot fit.**
 - **The L2 is relaxed inclusive**: a line may be in the L1, the L2, or both.
+- **The L2 is 2 MiB first** (Tommy, 2026-10-22: the UltraRAM holds it): all 64 URAM288, eight wide (a
+  line in one access) by eight deep -- 8 ways of 4096 sets, a way to a row of the cascade -- the tags
+  in block RAM. Its first customers by the step 1 measurements: Clang (8.1 I$ misses per 1000
+  instructions; +10% from 9 cycles off a miss), SQLite's code, Navigation's and Speech's data.
 
 ## What is there today (414eda07)
 
@@ -143,11 +147,14 @@ Every step is measured or modelled first, then gated as today (riscv-tests, the 
    that copy 20% (a core item, not the memory's). The model errs slow on a read stream (open-row hits
    it lacks: 36.9 against the board's 31.9), which the bank-aware model below brings. The FP
    subtests' back end (twice the sim's on the board) stays open for that model to answer.
-1. **The controller, in its own bench first**: our controller against a DDR4 timing-checking model
-   behind a PHY-interface model, every timing rule asserted; then on the board in place of the IP's
-   controller and its AXI path, below today's line port, with the synchronous crossing. Measured with
-   `ddr_hpm`, the membench and GB5. The lockstep keeps its line-port model, recalibrated to the new
-   latencies from `ddr_hpm`.
+1. **The controller -- DONE 2026-10-22.** Our controller in its own bench, every DRAM rule asserted;
+   then on the board in place of the IP's controller and its AXI path, behind the synchronous crossing.
+   A DRAM load 45.2 -> 33.9 cycles, reads from DRAM 2.48 -> 3.05 and writes 4.82 -> 5.08 bytes a cycle;
+   GB5 18 single-core (-3.81% cycles, workloads/gb5/result-2026-10-22.md). Two findings on the way: a
+   stream's D$ victim (128 KiB back, the D$'s ways being 4 KiB pages) shared its fill's bank until the
+   bank hashed the row's low bits; and the FIFOs' crossing was 9 of a miss's 43 cycles, which no
+   simulation showed (their lockstep model is two flops). The lockstep's line-port model is
+   recalibrated to the new latencies (reads 22.0, writes 17.9 cycles mean).
 2. **Coherent DMA**: the D$'s snoop tag copy, the DMA clients on the coherent side with two buffers
    each, the device tree's `dma-coherent`.
 3. **The L2** (the L2 plan's step), relaxed inclusive, 64 bytes wide, in the clock the step 1
