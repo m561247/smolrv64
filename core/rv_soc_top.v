@@ -107,8 +107,9 @@ module rv_soc_top #(
    input  wire             virtio_irq,
    input  wire             virtio_net_irq,   // PLIC source 12 (ubuntu-nfs.dts virtio@10003000)
    input  wire             dma_wr,           // a device wrote memory (a pulse, in this clock): fence.i clears the I$
-   // a DMA master's line, cleaned (keep) or flushed in the D$ before the master moves it: held until
-   // dma_sn_ack, the line as the masters' AXI address names it (PA - 0x8000_0000, src/dram_window.vh)
+   // a DMA master's line, cleaned (keep) or flushed in the D$ and then the L2 before the master moves
+   // it: held until dma_sn_ack, the line as the masters' AXI address names it (PA - 0x8000_0000,
+   // src/dram_window.vh)
    input  wire             dma_sn_valid,
    input  wire [25:0]      dma_sn_line,
    input  wire             dma_sn_keep,
@@ -948,23 +949,29 @@ module rv_soc_top #(
    assign ic_l2_ack = ic_use;
    // THE D$'S OUTSIDE REQUEST: the I$'s clean and a DMA master's clean or flush, each held until its
    // answer. A requester owns the port from its first cycle to the answer, and the two take turns.
+   // The DMA's line goes on to the L2 (l2_sn) once the D$ has answered for it; the L2 answers the master.
    reg  ox_own, ox_dma, ox_last;                  // the port is owned, by the DMA, the DMA had it last
-   wire ox_pick = dma_sn_valid & (~dc_ic_req | ~ox_last);
+   reg  l2_sn;                                    // the DMA's line is the L2's to answer
+   wire dma_ox  = dma_sn_valid & ~l2_sn;
+   wire ox_pick = dma_ox & (~dc_ic_req | ~ox_last);
    wire ox_sel  = ox_own ? ox_dma : ox_pick;
-   assign ox_req  = dc_ic_req | dma_sn_valid;
+   assign ox_req  = dc_ic_req | dma_ox;
    assign ox_pa   = ox_sel ? {31'd0, dma_sn_line[25], ~dma_sn_line[25], dma_sn_line[24:0], 6'd0}
                            : {ic_l2_addr, 6'd0};
    assign ox_keep = ~ox_sel | dma_sn_keep;
    assign dc_ic_ack  = ox_ack & ~ox_dma;
-   assign dma_sn_ack = ox_ack &  ox_dma;
    always @(posedge clk)
-      if (reset) begin ox_own <= 1'b0;  ox_dma <= 1'b0;  ox_last <= 1'b0; end
-      else if (ox_ack) begin ox_own <= 1'b0;  ox_last <= ox_dma; end
-      else if (ox_req & ~ox_own) begin ox_own <= 1'b1;  ox_dma <= ox_pick; end
+      if (reset) begin ox_own <= 1'b0;  ox_dma <= 1'b0;  ox_last <= 1'b0;  l2_sn <= 1'b0; end
+      else begin
+         if (ox_ack) begin ox_own <= 1'b0;  ox_last <= ox_dma; end
+         else if (ox_req & ~ox_own) begin ox_own <= 1'b1;  ox_dma <= ox_pick; end
+         if (ox_ack & ox_dma) l2_sn <= 1'b1;  else if (dma_sn_ack) l2_sn <= 1'b0;
+      end
    always @(posedge clk) if (!reset) begin
       if (ox_ack & ~ox_own) $fatal(1, "rv_soc_top: the D$ answered an outside request no one owns");
       if (ox_own & ~(ox_dma ? dma_sn_valid : dc_ic_req) & ~ox_ack)
          $fatal(1, "rv_soc_top: the outside request's owner (%s) let go before its answer", ox_dma ? "DMA" : "I$");
+      if (l2_sn & ~dma_sn_valid) $fatal(1, "rv_soc_top: the DMA let go of its line before the L2 answered");
    end
    always @(posedge clk) if (!reset & ic_l2_req & ic_p)
       $fatal(1, "rv_soc_top: an I$ line read asked while the last one is still owed");
@@ -994,11 +1001,12 @@ module rv_soc_top #(
       .mr_last(m_r_last), .mr_data(m_r_data),
       .mw_valid(m_w_valid), .mw_ready(m_w_ready), .mw_id(m_w_id));
 
-   // ---------------- memory: internal local SRAM (BRAM) + EXTERNAL DDR port ----------------
+   // ---------------- memory: internal local SRAM (BRAM) + the L2 and the EXTERNAL DDR port ----------------
    // Each request is region-decoded: the on-chip local SRAM at LBASE (boot/monitor; FPGA = BRAM
-   // init'd from mem.even/odd) is served here; the DDR region at BASE goes out on the ddr_*
-   // port -- the sim TB's model, or the FPGA's crossing into the DDR4 controller. The cache is
-   // PIPT so it fills/writes either region transparently. (lmem is $readmemh-loadable.)
+   // init'd from mem.even/odd) is served here; the DDR region at BASE goes to the L2 (rv_l2), and
+   // its misses and write-backs out on the ddr_* port -- the sim TB's model, or the FPGA's crossing
+   // into the DDR4 controller. The caches are PIPT so they fill/write either region transparently.
+   // (lmem is $readmemh-loadable.)
    localparam LSIZE = 1<<LRAM_LG2;
    wire [63:0] m_pa       = {{6{1'b0}}, m_q_addr} << 6;     // physical byte addr of the line
    wire        m_is_local = (m_pa >= LBASE) && (m_pa < LBASE + LSIZE);
@@ -1027,8 +1035,10 @@ module rv_soc_top #(
    reg  [1:0]     l_beat;
    reg  [511:0]   l_q, l_q2;                     // the line, and the block RAM's output register
    wire           l_take   = m_q_valid & m_is_local & ~l_busy;
-   wire           l_r_go   = l_rd & ~ddr_r_valid;               // a beat leaves this cycle
-   wire           l_w_go   = l_wd & ~ddr_w_valid;
+   wire           l2_r_valid, l2_r_last, l2_w_valid;
+   wire [MIDW-1:0] l2_r_id, l2_w_id;  wire [1:0] l2_r_beat;  wire [127:0] l2_r_data;
+   wire           l_r_go   = l_rd & ~l2_r_valid;                // a beat leaves this cycle
+   wire           l_w_go   = l_wd & ~l2_w_valid;
    always @(posedge clk) begin
       if (l_take) begin
          // lmem has NLLINE entries, so a LAW-bit (58) index at the array bracket is a silent
@@ -1057,25 +1067,31 @@ module rv_soc_top #(
       end
    end
 
-   // the external DDR port: requests outside the SRAM go out as they are
-   assign ddr_q_valid = m_q_valid & ~m_is_local;
-   assign ddr_q_id    = m_q_id;
-   assign ddr_q_we    = m_q_we;
-   assign ddr_q_addr  = m_q_addr;
-   assign ddr_q_wmask = m_q_wmask;
-   assign ddr_q_wdata = m_q_wdata;
-   assign m_q_ready   = m_is_local ? ~l_busy : ddr_q_ready;
-   assign ddr_r_ready = m_r_ready;
-   assign ddr_w_ready = m_w_ready;
+   // the L2: requests outside the SRAM; its own below, on the external DDR port
+   wire           l2_q_ready;
+   assign m_q_ready = m_is_local ? ~l_busy : l2_q_ready;
+   rv_l2 #(.IDW(MIDW), .AW(LAW)) u_l2
+     (.clk(clk), .reset(reset),
+      .u_q_valid(m_q_valid & ~m_is_local), .u_q_ready(l2_q_ready), .u_q_id(m_q_id), .u_q_we(m_q_we),
+      .u_q_addr(m_q_addr), .u_q_wmask(m_q_wmask), .u_q_wdata(m_q_wdata),
+      .u_r_valid(l2_r_valid), .u_r_ready(m_r_ready), .u_r_id(l2_r_id), .u_r_beat(l2_r_beat),
+      .u_r_last(l2_r_last), .u_r_data(l2_r_data),
+      .u_w_valid(l2_w_valid), .u_w_ready(m_w_ready), .u_w_id(l2_w_id),
+      .d_q_valid(ddr_q_valid), .d_q_ready(ddr_q_ready), .d_q_id(ddr_q_id), .d_q_we(ddr_q_we),
+      .d_q_addr(ddr_q_addr), .d_q_wmask(ddr_q_wmask), .d_q_wdata(ddr_q_wdata),
+      .d_r_valid(ddr_r_valid), .d_r_ready(ddr_r_ready), .d_r_id(ddr_r_id), .d_r_beat(ddr_r_beat),
+      .d_r_last(ddr_r_last), .d_r_data(ddr_r_data),
+      .d_w_valid(ddr_w_valid), .d_w_ready(ddr_w_ready), .d_w_id(ddr_w_id),
+      .s_valid(l2_sn), .s_line(dma_sn_line), .s_keep(dma_sn_keep), .s_ack(dma_sn_ack), .s_rel(dma_sn_rel));
 
-   // responses: the DDR side's, else the SRAM's
-   assign m_r_valid = ddr_r_valid | l_r_go;
-   assign m_r_id    = ddr_r_valid ? ddr_r_id   : l_id;
-   assign m_r_beat  = ddr_r_valid ? ddr_r_beat : l_beat;
-   assign m_r_last  = ddr_r_valid ? ddr_r_last : (l_beat == 2'd3);
-   assign m_r_data  = ddr_r_valid ? ddr_r_data : l_q2[l_beat*128 +: 128];
-   assign m_w_valid = ddr_w_valid | l_w_go;
-   assign m_w_id    = ddr_w_valid ? ddr_w_id : l_id;
+   // responses: the L2's, else the SRAM's
+   assign m_r_valid = l2_r_valid | l_r_go;
+   assign m_r_id    = l2_r_valid ? l2_r_id   : l_id;
+   assign m_r_beat  = l2_r_valid ? l2_r_beat : l_beat;
+   assign m_r_last  = l2_r_valid ? l2_r_last : (l_beat == 2'd3);
+   assign m_r_data  = l2_r_valid ? l2_r_data : l_q2[l_beat*128 +: 128];
+   assign m_w_valid = l2_w_valid | l_w_go;
+   assign m_w_id    = l2_w_valid ? l2_w_id : l_id;
 
    // DDR latency HPM: per request id, the cycles from the request's acceptance to its read's last
    // beat or its write done (core cycles), into read/write log2 histograms, read-only at

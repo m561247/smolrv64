@@ -1678,11 +1678,11 @@ rate** — i.e. the LSU cost is hit latency, not misses.
 
 ### 9.2 Below L1
 
-There is no L2 cache. **`rv_mem_arbiter`** puts the caches onto one tagged **memory port**
+**`rv_mem_arbiter`** puts the caches onto one tagged **memory port**
 (docs/PLAN-2026-09-25-dcache-vhpr.md, "The memory port"), with three valid/ready channels:
 - **request:** `{id, we, line address, 64-bit byte mask, 512-bit line}`;
 - **read data:** four 128-bit beats `{id, beat, last, data}`;
-- **write done:** `{id}`, raised on the DRAM's write response.
+- **write done:** `{id}`, raised when the line is in the L2 (below it, on the DRAM's write response).
 
 Any number of transactions may be in flight, and a response is matched by the id its request
 carried, never by order. Ids are `{client, slot}`. Among waiting requests a read wins over a
@@ -1692,8 +1692,42 @@ MSHRs' fills, 8-9 its write-backs, 10 the NC slot, so up to 11 are in flight. Th
 keeps its single-outstanding line handshake behind `rv_mem_line_client`. Page-table walks go
 through the D$ (§8), so their misses are D$ fills.
 
-The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes out on the
-`ddr_*` port: the testbench's model, or on the board:
+The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes to the L2.
+
+**The L2** (`rv_l2`, 2 MiB; docs/PLAN-2026-10-21-memory-system.md, "The L2") sits on the port with the
+same port below it, in the core's clock. 4096 sets of 8 ways of 64-byte lines, keyed by the line's
+index in the DRAM window (`dram_axi`, so a wrong-path fetch of PA 0 finds the window's wrap as the
+port below does). The data is all 64 UltraRAMs (`smolrv64_uram_be`: 32 K x 512 at {way, set}, a
+write enable per byte; port A takes fill beats, port B hit reads, victim reads and write hits). They
+are the XCKU5P's one URAM column, the die's full height through the middle of the core, so both
+ports' inputs are registered first: read latency 5, the register and the cascade's 4. The tags
+(14 bits), valid, dirty and NRU bits are two block RAMs of half a set each.
+- **One lookup at a time:** the set is read (LK0), compared (LK1), acted on and written back (ACT).
+  A read hit reads its line four times on port B, a beat each: its first beat leaves the L2 eight
+  cycles after the request reached it, its last eleven.
+- **Misses are non-blocking:** a read miss takes one of 8 MSHRs (its id below) and a victim way --
+  invalid, else not recently used, never one a fill holds -- and the request is taken; the fill's
+  beats go into the way and up as they arrive (behind a hit's beats in a 16-deep queue when they
+  meet). A dirty victim is read into one of 4 write-back buffers. Below, reads go before write-backs.
+- **Relaxed inclusive, write-back:** a fill goes into both levels; a victim leaves alone. A write
+  hits, or allocates and looks up again to hit -- a whole line (a D$ write-back) with no read below,
+  a partial one (an NC store) after fetching its line -- so only a hit or a fill writes the array;
+  the write's done goes up when the line is in it. A request for a line a fill or a write-back holds
+  repeats its lookup until that is done.
+- **Coherent DMA:** a DMA master's line goes to the D$'s outside request, then to the L2 as a
+  lookup ahead of any waiting request. Dirty there, it is written back and left clean (a read's) or
+  invalid (a write's), and answered when the write's done is back; else answered at once, a flush
+  invalidating it. A flushed line stays blocked in the L2, as in the D$, until its DMA write is in
+  the controller (`dma_sn_rel`).
+
+Measured in the lockstep (the drawn DDR model, 2026-10-22): the 60 M boot retires +7.61%, the 300 M
++6.98% (over a count from before the DDR model's recalibration); over GB5's single-core section as its 77 SimPoints the cycles fall 2.75% -- Clang 9.5%,
+N-Body 5.0%, Machine Learning 4.6%, Gaussian Blur 4.0%, Navigation 3.7%, the rest of the integer
+subtests 0.4% to 3.1% -- while AES-XTS, Horizon Detection and HDR, which stream past it, stay within
+0.4%: a miss pays the L2's lookup and a register each way, about 5 cycles. The data array's input
+register costs 0.2% of that (2.95% at read latency 4).
+
+The L2's misses and write-backs go out on the `ddr_*` port: the testbench's model, or on the board:
 - `ddr_port_sync`: into ui_clk as registers, probe_clk being ui_clk / 2 from a BUFGCE_DIV (its edges
   ~2.7 ns late): ui_clk finds the phase from probe_clk's own toggle sampled on its falling edge (CAP
   a register, as it alternates), and captures a request at the ui_clk edge 3.3 ns after the port's
@@ -1879,6 +1913,17 @@ flops, 32 RAMB36, WNS +0.050 ns at 6 ns; `make ooc MODULE=rv_dcache GENERICS=RTW
 | waiters | 65 | ~70 | ~4 500 | flops and the PA in LUTRAM (one per requester tag, one for the store) |
 | store queue | 3 | PA, data, mask | ~400 | LUTRAM, its flags in flops |
 | write-back lines | 2 | 512 | 1 024 | flops |
+
+The L2 (`rv_l2`, 2 MiB; out of context 1.5 k logic LUTs, 0.38 k LUTs of distributed RAM, 1.7 k flops,
+16 RAMB36, 64 URAM288, WNS +1.087 ns at 6 ns; `make ooc MODULE=rv_l2`):
+
+| array | shape | width | bits | storage |
+|---|---|---|---|---|
+| data | 32 K × 512 (4096 sets × 8 ways) | 512 | 16 777 216 | **UltraRAM**, all 64 (`smolrv64_uram_be`: port A the fills' beats, port B reads and write hits; a write enable per byte; inputs registered, read latency 5) |
+| tags | 2 × 4096 × 68 | four ways' {valid, dirty, 14-bit tag} and their NRU bits | 557 056 | BRAM (`smolrv64_sdpram`), a set's two halves read together |
+| write-back lines | 4 × 512 | 512 | 2 048 | LUTRAM, written by the victim's read |
+| fill-beat queue | 16 × 136 | {id, beat, last, data} | 2 176 | LUTRAM |
+| MSHRs | 8 | line 26, way 3, id 5, 3 flags | 296 | flops |
 
 The I$ (`rv_icache`, 128 KiB): data 4 banks of `4096 × 64` (1 048 576 bits, BRAM), even/odd chunk
 banking per way, so any read at any byte offset is served by one access (§9.1). Each way's

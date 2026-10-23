@@ -355,10 +355,10 @@ module tb;
 
    // ==================== virtio-blk (B6, 2026-09-17; from the retired tb_cosim_linux.v) ====================
    // +disk=<image> attaches a file-backed SPI-mode SD card behind virtio_blk (virtio_mmio at
-   // 0x10002000, PLIC source 11; the DTB must carry the node). The device DMAs straight into
-   // lram[] -- non-coherent, as on the board -- and every write beat is mirrored into simmerv
-   // (cosim_dma_write, drained between the two retires it separates), so the reference sees the
-   // same bytes the DUT's cache does not. Without +disk the region answers as a device with no
+   // 0x10002000, PLIC source 11; the DTB must carry the node). The device DMAs into lram[] through
+   // the coherent AXI slave below -- each line cleaned or flushed in the caches first, as on the
+   // board -- and every write beat is mirrored into simmerv (cosim_dma_write, drained between the
+   // two retires it separates). Without +disk the region answers as a device with no
    // media and the default DTB never touches it. +disk_ro keeps the image's writes in RAM.
    //
    // soc's device window is pages 2..7 of 0x1000_0000: virtio_addr[14:12] is the page, 2 = blk.
@@ -443,12 +443,13 @@ module tb;
    // (src/dram_window.vh), so its line is the snoop's.
    reg axi_rvalid, axi_bvalid;  reg [63:0] axi_rdata;  integer ka;
    reg [63:0] ar_line, aw_line;  reg [9:0] ar_bp, aw_bp;  integer n_dma_rd = 0, n_dma_wr = 0, n_snoop = 0;
-   localparam [1:0] SN_I = 2'd0, SN_R = 2'd1, SN_W = 2'd2, SN_A = 2'd3;   // idle, a read's, a write's, the agent's
-   reg  [1:0]  sn_st = SN_I;
+   // idle, a read's, a write's, the agent's burst, the agent's look at its ack word
+   localparam [2:0] SN_I = 3'd0, SN_R = 3'd1, SN_W = 3'd2, SN_A = 3'd3, SN_P = 3'd4;
+   reg  [2:0]  sn_st = SN_I;
    reg         sn_req = 1'b0, sn_got = 1'b0, sn_rel_q = 1'b0, sn_kq = 1'b0;  reg [25:0] sn_lq = 26'd0;
    assign sn_p_valid = sn_req;  assign sn_p_line = sn_lq;  assign sn_p_keep = sn_kq;  assign sn_p_rel = sn_rel_q;
-   wire        ag_due;                                  // the DMA agent's burst is due (below)
-   wire [25:0] ag_line;
+   wire        ag_due, ag_poll;                         // the DMA agent's burst is due, its ack's look (below)
+   wire [25:0] ag_line, ag_ackl;
    assign ax_arready = (sn_st == SN_R) && sn_got && !axi_rvalid;
    assign ax_awready = (sn_st == SN_W) && sn_got && !axi_bvalid;
    assign ax_wready  = ax_awready;
@@ -468,6 +469,8 @@ module tb;
                   sn_st <= SN_W;  sn_req <= 1'b1;  sn_kq <= 1'b0;  sn_lq <= ax_awaddr[31:6];
                end else if (ag_due) begin
                   sn_st <= SN_A;  sn_req <= 1'b1;  sn_kq <= 1'b0;  sn_lq <= ag_line;
+               end else if (ag_poll) begin
+                  sn_st <= SN_P;  sn_req <= 1'b1;  sn_kq <= 1'b1;  sn_lq <= ag_ackl;
                end
          default: if (sn_p_ack) begin sn_req <= 1'b0;  sn_got <= 1'b1;  n_snoop = n_snoop + 1; end
                   else if (sn_got) begin                 // the line moves this cycle: done
@@ -506,21 +509,25 @@ module tb;
    // ---- the DMA agent (B4 memrand, 2026-09-17): +dma_rand=<seed> ---------------------------------
    // A device that DMAs on its own schedule: every 20-100 k cycles it writes a 64-byte burst of
    // random bytes into a random line of the 4 KiB DMA window (DDR offset 0x120_0000; the last line
-   // holds the ack word) -- coherently, its line flushed from the D$ first (the snoop machine
+   // holds the ack word) -- coherently, its line flushed from the caches first (the snoop machine
    // above) -- mirrors each beat into the reference (the same DPI-ordered queue as the virtio-blk
    // slave), and raises PLIC source 11 (shared with virtio-blk's irq). The program's
-   // S-mode handler sums the window through its NC mapping, writes the burst count to the ack word
-   // and completes; the agent drops the irq once the ack word in lram shows the count, then
-   // schedules the next burst. Race-free by protocol: the interrupt orders every read of the window
+   // S-mode handler sums the window, writes the burst count to the ack word (an NC store, which the
+   // L2 holds like any write) and completes; the agent looks at the ack word every 1000 cycles as a
+   // device would, the line cleaned from the caches first, drops the irq once it shows the count,
+   // then schedules the next burst. Race-free by protocol: the interrupt orders every read of the window
    // after the beats on both sides (a polled flag would not be: a beat landing between a poll's
    // execution and its retire is applied to the reference before that poll is compared).
    localparam [63:0] DMA_OFF = 64'h0120_0000;
    reg         dma_on = 1'b0, dma_irq = 1'b0;
    reg  [31:0] dma_seed = 32'd1, dma_lfsr = 32'hACE1_5EED, dma_ctr = 32'd0, dl;
-   reg  [63:0] dma_next = 64'd50000, dma_line;  reg [63:0] dma_beat;  integer dk;
+   reg  [63:0] dma_next = 64'd50000, dma_line, dma_look = 64'd0;  reg [63:0] dma_beat;  integer dk;
    wire [63:0] dma_ack = lram[(DMA_OFF >> 6) + 64'd63][448 +: 64];
    wire        ag_go = (sn_st == SN_A) && sn_got && !sn_p_ack;   // the agent's line moves now
+   wire        ag_look = (sn_st == SN_P) && sn_got && !sn_p_ack; // its ack word is in lram now
    assign ag_due  = dma_on && !dma_irq && c >= dma_next;
+   assign ag_poll = dma_on && dma_irq && c >= dma_look;
+   assign ag_ackl = DMA_OFF[31:6] + 26'd63;
    assign ag_line = DMA_OFF[31:6] + {20'd0, dma_lfsr[5:0] == 6'd63 ? 6'd0 : dma_lfsr[5:0]};
    always @(posedge clk)
       tb_dma_wr <= ~reset & ((ax_awvalid && ax_awready && ax_wvalid && ax_wready) | ag_go);
@@ -536,9 +543,10 @@ module tb;
             cosim_dma_write((dma_line << 6) + dk*8, dma_beat, 8'hFF);
 `endif
          end
-         dma_lfsr <= dl;  dma_ctr <= dma_ctr + 1;  dma_irq <= 1'b1;
-      end else if (dma_irq && dma_ack == {32'd0, dma_ctr}) begin
-         dma_irq <= 1'b0;  dma_next <= c + 64'd20000 + {48'd0, dma_lfsr[15:0]};
+         dma_lfsr <= dl;  dma_ctr <= dma_ctr + 1;  dma_irq <= 1'b1;  dma_look <= c + 64'd1000;
+      end else if (ag_look) begin
+         if (dma_ack == {32'd0, dma_ctr}) begin dma_irq <= 1'b0;  dma_next <= c + 64'd20000 + {48'd0, dma_lfsr[15:0]}; end
+         else dma_look <= c + 64'd1000;
       end
    end
 

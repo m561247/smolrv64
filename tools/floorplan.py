@@ -21,6 +21,7 @@ BLOCKS = [  # label, tag, colour, pattern on the cell's hierarchy
     ('fe: fetch, aligner, own',        'fe',     '#00b4d8', C + r'fe/'),
     ('I$ + iTLB',                      'I$',     '#0f8b8d', r'probe_core/(u_icache|u_ic_mem|core/u_immu)/'),
     ('D$',                             'D$',     '#8c564b', r'probe_core/u_dcache/'),
+    ('L2',                             'L2',     '#00e676', r'probe_core/u_l2/'),
     ('LSU + dTLB + landing buffers',   'LSU',    '#f2a541', C + r'(u_lsu|u_la|u_sa|g_lp\[\d+\]\.u_lbd)/'),
     ('SQ',                             'SQ',     '#ff6f00', C + r'u_sq/'),
     ('LQ',                             'LQ',     '#ffd08a', C + r'u_lq/'),

@@ -140,6 +140,41 @@ gives it to the I$ and the DMA masters in turn.
   diverges); the disk lockstep (`dma-coherent`, no CBOs) mounts, checks, writes and re-reads its
   ext4 image: BLKCHECK-OK, no divergence. glibc, systemd and the interrupt storm pass.
 
+### The L2 (step 3, designed 2026-10-22)
+
+- **Where.** Inside `rv_soc_top`, on the DDR side of the split between the on-chip SRAM and DRAM:
+  `rv_l2` takes the caches' tagged line port from `rv_mem_arbiter` and gives the same port to
+  `ddr_*`. So the testbench's memory model and the board's crossing do not change, and the lockstep
+  runs the L2 from its first build.
+- **Clock: the core's.** Step 1 decides it: an L2 hit then crosses nothing (a crossing is about 4 cycles
+  each way of a miss), and Clang's gain from 9 cycles off a miss is two thirds instruction refills; the
+  URAM closes at 166.67 MHz with margin (48 out of context: +2.8 ns), not at 333 MHz (+0.1 ns).
+- **Geometry.** 2 MiB: all 64 URAM288, 4096 sets x 8 ways, a way to a row of the cascade (the data array
+  is 32 K x 512 bits, addressed {way, set}, a write enable per byte: a fill writes a beat, a write its
+  mask). Tags, dirty and NRU bits in block RAM, a set's 8 ways a read; NRU replacement. Measured (Simmerv, 172 GB5 windows behind the VIPT
+  128 KiB D$): DRAM reads 2.18 per 1000 instructions against 2.43 at 1.5 MiB 6-way.
+- **Policy.** Relaxed inclusive: a fill goes into the L2 and the L1; an L1 write-back (a whole line)
+  goes into the L2 dirty, allocating without a DRAM read; an L2 victim leaves alone (no reverse
+  directory), written back if dirty. A partial write (the D$'s NC store) merges into a hit; on a
+  miss it fetches the line first. The write's done goes back when the line is in the array.
+- **One lookup at a time, misses non-blocking** (as built, `core/rv_l2.v`). A request's set is read
+  (block RAM), compared, and acted on, three cycles, the set's tags written back. A read hit reads
+  its line on the data array's port B four times, a beat each, so no line register holds it. A read
+  miss takes an MSHR (8) and a victim way and is taken: the fill's beats go into the way on port A
+  as they arrive, and up -- straight, or behind a hit's beats in a 16-deep queue. A dirty victim is
+  read out into a write-back buffer (4, LUTRAM). A write hits, or allocates and comes round again
+  to hit, so only a hit or a fill writes the array. A request for a line an MSHR is filling or a
+  write-back buffer holds, or whose set has no way free of fills, repeats its lookup until it is
+  done: the waiting is the request's, nothing replays. Below: reads first, then write-backs.
+- **Coherent DMA.** The DMA master's line goes to the D$'s outside request first (step 2), then to
+  the L2 as a lookup ahead of any waiting request: dirty, written back and left clean or invalid,
+  and answered once the write's done is back; else answered at once, a flush invalidating. A flush's
+  line is blocked in the L2 too until its release, so no fill reads DRAM ahead of the DMA's write.
+- **Order.** `rv_l2` in its own bench (`core/run-l2-tb.sh`: a reference memory, reads, whole and
+  partial writes and DMA snoops above, reordering memory below, a 16-set build and the 4096-set
+  one), then the SoC: riscv-tests, the 60 M and 300 M locksteps, glibc, systemd, the storm,
+  memrand; a build (64 URAMs placed), the board, GB5.
+
 ### 64 bytes wide, and the fallback
 
 - **The L2**: its line is eight URAM288s wide already (512 data bits), one access a line.
