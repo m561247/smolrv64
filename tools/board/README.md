@@ -9,8 +9,8 @@ reads the SoC's integrity log. Both runners wait for an idle machine (`idle-wait
 reads the core's own counters around its timed loop, with clamchowder's MemoryLatency and
 MemoryBandwidth and dsheffie's mem-lat, all built on the board with the full `-march`.
 `membench/summary.sh` is the short set `gb5-run.sh` runs before every Geekbench run, its figures in
-`/var/tmp/gb5-<rtl>-mem.txt`: `chase2` at 16 KiB (a D$ hit, load-use), 256 KiB (beyond the D$),
-4 MiB (the dTLB's second level as well) and 64 MiB (a page walk on every load), and `bw`'s
-sequential 8-byte reads and writes over 32 KiB (in the D$), 512 KiB (beyond it, where an L2 would
-serve) and 64 MiB, all in core cycles. `membench/` goes
+`/var/tmp/gb5-<rtl>-mem.txt`: `chase2` at 16 KiB (a D$ hit, load-use), 256 KiB (beyond the D$, the
+L2), 4 MiB (the dTLB's second level as well, and beyond the L2) and 64 MiB (a page walk on every
+load), and `bw`'s sequential 8-byte reads and writes over 32 KiB (in the D$), 512 KiB (beyond it,
+the L2) and 64 MiB, all in core cycles. `membench/` goes
 to the boards' `/var/tmp/membench` with the scripts.

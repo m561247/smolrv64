@@ -206,17 +206,30 @@ Every step is measured or modelled first, then gated as today (riscv-tests, the 
    bank hashed the row's low bits; and the FIFOs' crossing was 9 of a miss's 43 cycles, which no
    simulation showed (their lockstep model is two flops). The lockstep's line-port model is
    recalibrated to the new latencies (reads 22.0, writes 17.9 cycles mean).
-2. **Coherent DMA**: the D$'s snoop tag copy, the DMA clients on the coherent side with two buffers
-   each, the device tree's `dma-coherent`.
-3. **The L2** (the L2 plan's step), relaxed inclusive, 64 bytes wide, in the clock the step 1
-   measurements favour.
-4. **64-byte fills into the D$.**
+2. **Coherent DMA -- DONE 2026-10-23 (bfcfef51).** The D$'s outside request (the I$'s clean,
+   generalized): a DMA read cleans its line, a write flushes it and blocks its fills until the write is
+   in the controller; the request crosses ddr_port_sync as toggles; every device tree `dma-coherent`.
+   Its own builds missed by 0.1 to 0.4 ns on the core's families, so it was gated with the L2.
+3. **The L2 -- DONE 2026-10-23 (6d436df4, 864d0c73).** 2 MiB, all 64 UltraRAMs, in the core's clock,
+   relaxed inclusive, a line a word (above). A dependent load from it takes 21.0 cycles on the board
+   (DRAM 33.9); GB5's single-core wall -1.67%, cycles -1.50% (workloads/gb5/result-2026-10-23.md), where
+   the SimPoints said -2.75%. The URAM column runs the die's height through the core: unregistered,
+   the build routed at -0.523 ns; with the array's inputs registered -0.140, with the L2's logic in a
+   pblock along the column -0.075, and the last-mile physopt closed it.
+4. **64-byte fills into the D$** -- sized 2026-10-23, waiting on a decision. The D$ installs a line
+   and releases its waiters after the last of the four beats, so a line delivered whole would release
+   them three cycles sooner on an L2 hit (a DRAM fill ends at its last beat either way). The L2's
+   hits made three cycles shorter in the lockstep (the data array's latency 5 -> 2, an experiment):
+   GB5's SimPoints -0.55% (Clang -2.4%, N-Body -1.3%, Machine Learning -1.1%, SQLite -1.1%). The
+   cost: a 512-bit read path from the L2 through the arbiter, the D$'s 512-bit rotate by way and its
+   merge buffers read a line at a time -- about 2 K LUTs and 1 K flops, in the D$'s near-critical
+   families.
 
 ## Open
 
-- **Where the L2 sits**: in ui_clk next to the controller (a line in two half-beats, the plan's
-  original place) or in the core's clock (a line a cycle, no crossing on an L2 hit).
-- **The write path's buffering**: whether "the controller takes write data from the client's buffer
-  when its burst needs it" meets timing at 333 MHz, or needs one line of staging.
+- **The L2's gain on the board against the SimPoints'**: three fifths of the predicted -2.75%; Clang
+  half (4.85% against 9.5%), Gaussian Blur, Machine Learning and Structure from Motion 37% to 52%,
+  while N-Body, SQLite and Text Compression match or beat theirs. Not the scanout's snoops (with the
+  scanout off the board's run is +0.19%, noise).
 - **Ordering between a DMA write and the core**: a DMA write visible to the core after its snoop, and
   the device's completion interrupt after both; the PLIC's ordering against the snoop.

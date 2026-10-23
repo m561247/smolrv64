@@ -7,20 +7,20 @@ boots stock Ubuntu on a Kintex UltraScale+ FPGA at 166.67 MHz and runs Geekbench
 It is a three-wide out-of-order machine with register renaming, a decoupled fetch stream
 over a virtually tagged 128 KiB instruction cache, four schedulers, a load queue and a senior
 store queue, non-blocking tagged loads into a non-blocking 128 KiB data cache, a tagged
-four-deep FPU pipeline, and a memory system that lets the Linux kernel run non-coherent
-virtio DMA without a coherent fabric. Every committed instruction is checked in lockstep
-against an independent ISA model, and every non-trivial change has to boot Ubuntu to a
-login prompt on the board with zero faults before it lands.
+four-deep FPU pipeline, a 2 MiB second-level cache in UltraRAM, and coherent DMA: every
+device's line is cleaned or flushed in the caches before it moves. Every committed
+instruction is checked in lockstep against an independent ISA model, and every non-trivial
+change has to boot Ubuntu to a login prompt on the board with zero faults before it lands.
 
 ![Geekbench 5 single-core scores per subtest](docs/images/gb5-single-core.svg)
 
 | | |
 |---|---|
-| Geekbench 5.4.1, board, 2026-10-22 | **18** single-core (Integer 21, Crypto 2, Floating Point 13), **18** multi-core ([result 24745170](https://browser.geekbench.com/v5/cpu/24745170), [every subtest](workloads/gb5/result-2026-10-22.md)); the whole suite in 1 h 43 min at IPC 1.25 |
-| Memory, board, 2026-10-22 | a dependent load **3.0** cycles from the D$, 33.9 from DRAM (40.5 with a second-level dTLB lookup, 73.5 with a page walk); sequential reads 7.89 bytes a cycle in the D$, 3.05 from DRAM, writes 7.10 and 5.08 (`tools/board/membench/summary.sh`, beside every Geekbench run) |
+| Geekbench 5.4.1, board, 2026-10-23 | **18** single-core (Integer 22, Crypto 2, Floating Point 13), **18** multi-core ([result 24746633](https://browser.geekbench.com/v5/cpu/24746633), [every subtest](workloads/gb5/result-2026-10-23.md)); the whole suite in 1 h 41 min at IPC 1.27 |
+| Memory, board, 2026-10-23 | a dependent load **3.0** cycles from the D$, **21.0** from the L2, 44.6 from DRAM with a second-level dTLB lookup (71.1 with a page walk); sequential reads 7.81 bytes a cycle in the D$, 3.68 from the L2, 2.88 from DRAM, writes 7.10, 5.81 and 5.10 (`tools/board/membench/summary.sh`, beside every Geekbench run) |
 | Geekbench 6.7.1, board (4 GiB), 2026-10-15 to 16 | **10** single-core, **10** multi-core ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041), [every subtest](workloads/gb6/result-2026-10-16.md)); the whole suite in 17 h 48 min at IPC 1.00 |
-| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-22 | **2.67** DMIPS/MHz: 213.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
-| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-22 | **4.73** CoreMark/MHz: 211,333 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; `make run B=coremark`) |
+| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-23 | **2.67** DMIPS/MHz: 213.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
+| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-23 | **4.73** CoreMark/MHz: 211,347 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; `make run B=coremark`) |
 | `sha256sum` of a 30 MB file, board, 2026-09-25 | IPC 1.56 to 1.63 over three runs, 43 cycles per byte |
 | Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed three-wide; DDR4 at 333 MHz |
 | Software | OpenSBI and mainline Linux; Ubuntu 25.04 boots over an NFS root through the core's own virtio-net |
@@ -101,10 +101,14 @@ is read off the RTL or measured with the workload named):
   32 block RAMs, so a load reads one 64-bit word of each and a dirty line comes out whole in
   one cycle. Page-table walks read through the data cache, so a walk always sees dirty
   page-table entries.
+- **A 2 MiB L2 in the core's clock.** All 64 of the part's UltraRAMs, 8 ways of 4096 sets,
+  between both caches and DRAM: a load that misses the data cache and hits the L2 takes 21
+  cycles where DRAM takes 34. Misses do not block it (eight in flight, their lines passed up
+  beat by beat as they arrive), write-backs land in it, and a DMA master's line is cleaned or
+  flushed in it after the data cache.
 - **Virtual memory as Linux expects it.** Sv39 with hardware page-table walkers, a
   2048-entry direct-mapped dTLB (8 MiB of reach) and a 64-entry iTLB, superpages, Ssvnapot leaves, Svpbmt non-cacheable mappings plus Zicbom
-  and Zicboz cache-management operations, so the kernel drives non-coherent virtio DMA
-  rings with its standard machinery. Misaligned loads and stores are handled in hardware,
+  and Zicboz cache-management operations. Misaligned loads and stores are handled in hardware,
   including across cache lines. The physical address space is 36 bits, capped at the
   instance's top of DRAM: the MMU range-checks every resolved physical address and faults
   rather than dropping the access.
@@ -117,7 +121,7 @@ is read off the RTL or measured with the workload named):
 virtio-blk backed by an SD card over SPI, virtio-net over RGMII with an eight-slot receive
 ring and word-wide DMA, a virtio keyboard and mouse fed by USB devices through a Pico (see
 [Virtio devices](#virtio-devices)), a 256 KiB boot SRAM holding a ROM monitor that boots over TFTP or from the
-SD card or takes an XMODEM upload and has a memory-integrity command set and a DRAM test, and one 512-bit line port into DDR4 (2 GiB, or 4 GiB on a board with 16 Gb
+SD card or takes an XMODEM upload and has a memory-integrity command set and a DRAM test, the L2, and one 512-bit line port into DDR4 (2 GiB, or 4 GiB on a board with 16 Gb
 parts) with a hardware latency monitor on it, through our own DDR4 controller on the DDR4 IP's physical layer. Ubuntu boots to `login:` over an NFS root; the board has run for days at a
 time.
 
@@ -178,9 +182,8 @@ The simulator prints the same classifier's finer causes. The same counters, samp
 
 All I/O beyond the console UART is virtio-mmio (transport version 2, not legacy). Each device
 has its own 4 KiB page in the memory controller's 333 MHz domain and its own PLIC source.
-Its DMA master reaches DDR without snooping the core's caches. The device tree therefore marks
-every device `dma-noncoherent`, and Linux keeps the rings coherent with Zicbom cache
-operations. Every device offers `VIRTIO_F_VERSION_1` and `VIRTIO_F_ACCESS_PLATFORM`.
+Its DMA master snoops every line before it moves it -- cleaned in the data cache and the L2 for
+a read, flushed for a write -- so the device tree marks every device `dma-coherent`. Every device offers `VIRTIO_F_VERSION_1` and `VIRTIO_F_ACCESS_PLATFORM`.
 
 | Device | Address | PLIC source | Queues | Backend |
 |---|---|---|---|---|
@@ -297,9 +300,9 @@ explains each line and the `cpi` and `mem` sets that go under it.
 
 ## What comes next
 
-- The data cache's end state ([docs/PLAN-2026-10-03-dcache-vipt-l2.md](docs/PLAN-2026-10-03-dcache-vipt-l2.md)):
-  its dTLB read beside the data; a 1.5 MiB L2 in UltraRAM, in the memory controller's 333 MHz
-  domain; then a second load lookup.
+- The memory system's last step ([docs/PLAN-2026-10-21-memory-system.md](docs/PLAN-2026-10-21-memory-system.md)):
+  64-byte fills into the data cache. Then the data cache's dTLB read beside the data and a
+  second load lookup ([docs/PLAN-2026-10-03-dcache-vipt-l2.md](docs/PLAN-2026-10-03-dcache-vipt-l2.md)).
 - One out-of-order load/store pipe: loads and stores issued out of order, translated in
   their queues, with memory speculation and replay.
 - A review of the clock: 250 MHz would be worth 50%, with the memory controller's 333 MHz
