@@ -256,6 +256,14 @@ create_pblock pb_ddr4_mem
 add_cells_to_pblock [get_pblocks pb_ddr4_mem] [get_cells u_mem]
 resize_pblock [get_pblocks pb_ddr4_mem] -add {CLOCKREGION_X0Y0:CLOCKREGION_X0Y1}
 
+# rv_l2 (rv_soc_top u_l2), the L2, sits along its data array: all 64 URAM288, the part's one URAM
+# column (between SLICE_X79 and SLICE_X80, the die's full height through the core), with the slices
+# either side and the two block-RAM columns beside it for its tags. Left free, its logic spread over
+# the die between the column, the caches' arbiter and the DDR crossing (SLICE X0-X110).
+create_pblock pb_l2
+add_cells_to_pblock [get_pblocks pb_l2] [get_cells probe_core/u_l2]
+resize_pblock [get_pblocks pb_l2] -add {SLICE_X74Y0:SLICE_X85Y239 URAM288_X0Y0:URAM288_X0Y63 RAMB36_X6Y0:RAMB36_X7Y47 RAMB18_X6Y0:RAMB18_X7Y95}
+
 # ddr_port_sync (rk_xcku5p.v probe_sync): the core's memory port into ui_clk as registers.
 # probe_clk is BUFGCE_DIV(ui_clk) / 2, its edges ~2.7 ns after ui_clk's, so Vivado's default check
 # of a probe_clk -> ui_clk path lands on the ui_clk edge 0.3 ns after the launch. The crossing
