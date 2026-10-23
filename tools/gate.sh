@@ -37,8 +37,11 @@ echo "=== GATE: $WHAT ==="
 # lost its timing report and with it the answer to "where is the margin now". Results go
 # under the main checkout's root, keyed by commit, where nothing in the platform Makefile
 # reaches them and a worktree's deletion does not take them.
+# A tree with uncommitted changes gets its own directory, named by its content as well: two
+# worktrees at one commit would otherwise bank their bitstreams over each other.
 SHA=$(git rev-parse --short HEAD)
-RES="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/gate-results/$SHA"
+DIRTY=$(git status --porcelain --untracked-files=no -- src core platforms/rk-xcku5p-f-v1.2/rk_xcku5p.srcs workloads/ubuntu workloads/tiny128 workloads/monitor)
+RES="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/gate-results/$SHA${DIRTY:+-c$("$REPO"/tools/bitcache.sh content)}"
 mkdir -p "$RES"
 git log -1 --format='%H%n%s%n%ci' > "$RES/commit.txt"
 
