@@ -142,17 +142,17 @@ module tb;
    // fill where the board admits dozens, the store queue never filled the way it does on the
    // board, and two six-day-old ordering defects lived through every gate.
    //
-   // MEASURED on the board at 166.67 MHz on 2026-10-21 (414eda07, the 2 GiB board; rv_soc_top's
-   // ddr_hpm read with workloads/ddrhpm around each of five kernels -- a dependent chase over
-   // 256 KiB, and over 4 MiB arrays a read stream, a copy, a daxpy and a fill):
-   //     read  (fill):       mean 33.9-36.0 cycles -- 26-46% in 16-31, 50-71% in 32-63, 3-4% in 64+
-   //     write (write-back): mean 21.1-21.8 cycles -- 95-96% in 16-31, 0.2-0.7% in 32-63, 3-4% in 64+
-   // The traffic barely moves them (a copy's reads 1.2 cycles over the chase's): the port's latency
-   // is the controller's and the clock crossing's, not queueing; the crossing (RELATED_CLOCKS=0)
-   // is about 4.5 cycles of it each way. Reads and writes differ because writes post at the bridge,
-   // so they draw separately; the tails are occasional excursions (refresh, bank conflicts), not a
-   // wide uniform spread.
-   // The bands are placed so the means match: reads 28-31 and 31-38, writes 17-20.
+   // MEASURED on the board at 166.67 MHz on 2026-10-22 (our DDR4 controller behind the synchronous
+   // crossing, the 2 GiB board; rv_soc_top's ddr_hpm read with workloads/ddrhpm around each of five
+   // kernels -- a dependent chase over 256 KiB, and over 4 MiB arrays a read stream, a copy, a daxpy
+   // and a fill):
+   //     read  (fill):       mean 20.9-22.5 cycles -- 93-97% in 16-31, 0.6-3.4% in 32-63, 2.7-3.3% in 64+
+   //     write (write-back): mean 16.4-18.7 cycles -- 64% in 8-15, 30% in 16-31, 0.8% in 32-63, 3.6% in 64+
+   // The traffic barely moves them (a copy's reads 0.1 cycles over the chase's): the port's latency
+   // is the controller's and the crossing's, not queueing. A write's done comes once the PHY has
+   // its data, so writes draw separately; the tails are refreshes (tRFC is 92 cycles) and row
+   // conflicts, not a wide uniform spread.
+   // The bands are placed so the means match: reads 18-21, writes 12-15 and 16-19.
    //
    //   +ddr_lat=N     flat N-cycle latency, reads and writes alike (the old model; sweeps)
    //   -DDDR_LAT=N    the same, at compile time (kept for the existing sweep scripts)
@@ -182,13 +182,14 @@ module tb;
          r = dlfsr[9:0];
          if (ddr_lat_arg != 0)              ddr_draw = ddr_lat_arg[7:0];
          else if (is_wr) begin
-            if      (r < 10'd36)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 3.5%: 64-127
-            else if (r < 10'd41)            ddr_draw = 8'd32 + {3'd0, r[4:0]};   // 0.5%: 32-63
-            else                            ddr_draw = 8'd17 + {6'd0, r[1:0]};   // 96%:  17-20; mean 21.3
+            if      (r < 10'd37)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 3.6%: 64-127
+            else if (r < 10'd45)            ddr_draw = 8'd32 + {3'd0, r[4:0]};   // 0.8%: 32-63
+            else if (r < 10'd357)           ddr_draw = 8'd16 + {6'd0, r[1:0]};   // 30.5%: 16-19
+            else                            ddr_draw = 8'd12 + {6'd0, r[1:0]};   // 65%:  12-15; mean 17.9
          end else begin
-            if      (r < 10'd36)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 3.5%: 64-127
-            else if (r < 10'd323)           ddr_draw = 8'd28 + {6'd0, r[1:0]};   // 28%:  28-31
-            else                            ddr_draw = 8'd31 + {5'd0, r[2:0]};   // 68.5%: 31-38; mean 35.2
+            if      (r < 10'd31)            ddr_draw = 8'd64 + {2'd0, r[5:0]};   // 3.0%: 64-127
+            else if (r < 10'd37)            ddr_draw = 8'd32 + {3'd0, r[4:0]};   // 0.6%: 32-63
+            else                            ddr_draw = 8'd18 + {6'd0, r[1:0]};   // 96.4%: 18-21; mean 22.0
          end
       end
    endfunction
