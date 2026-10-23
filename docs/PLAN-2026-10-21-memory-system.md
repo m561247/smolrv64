@@ -229,7 +229,7 @@ Every step is measured or modelled first, then gated as today (riscv-tests, the 
 
 - **The L2's gain on the board against the SimPoints'**: three fifths of the predicted -2.75%; Clang
   half (4.85% against 9.5%), Gaussian Blur, Machine Learning and Structure from Motion 37% to 52%,
-  while N-Body, SQLite and Text Compression match or beat theirs. Not the scanout's snoops (with the
-  scanout off the board's run is +0.19%, noise).
+  while N-Body, SQLite and Text Compression match or beat theirs. Untested: the scanout's DMA snoops,
+  which the lockstep does not have (a GB5 run with the scanout really off).
 - **Ordering between a DMA write and the core**: a DMA write visible to the core after its snoop, and
   the device's completion interrupt after both; the PLIC's ordering against the snoop.
