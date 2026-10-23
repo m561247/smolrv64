@@ -9,7 +9,10 @@
 // full queue), idle stretches (its injected read alone), one bank's rows in turn (precharge after
 // write recovery). A reference memory takes each write when its request enters the controller,
 // the one order every requester's data is defined by, and every read's data is checked against
-// the line as it stood then. At the end every request has completed: PASS.
+// the line as it stood then. The bench answers the DMA port's snoops after a random wait, as the D$
+// would, and checks that each DMA line goes to the controller only after its own snoop's answer (a
+// clean for a read, a flush for a write) and that a flushed write's release comes as the controller
+// takes it. At the end every request has completed: PASS.
 module tb_ddr4_mem;
    reg clk = 0, reset = 1;
    always #1.5 clk = ~clk;
@@ -31,6 +34,8 @@ module tb_ddr4_mem;
    wire [1:0]   mcCasSlot, winRank;  wire [4:0] winBuf;
    wire [255:0] wrData, rdData;  wire [31:0] wrDataMask;
    wire         wrDataEn, rdDataEn, per_rd_done, calDone;  wire [4:0] wrDataAddr, rdDataAddr;
+   // ---- the snoops ----
+   wire         sn_valid, sn_keep, sn_rel;  wire [25:0] sn_line;  reg sn_ack = 0;
 
    ddr4_mem dut (
       .clk(clk), .reset(reset), .cal_done(calDone),
@@ -43,6 +48,7 @@ module tb_ddr4_mem;
       .s_axi_bready(bready), .s_axi_arid(arid), .s_axi_araddr(araddr), .s_axi_arlen(arlen), .s_axi_arsize(3'd3),
       .s_axi_arburst(2'b01), .s_axi_arvalid(arvalid), .s_axi_arready(arready), .s_axi_rid(rid), .s_axi_rdata(rdata),
       .s_axi_rresp(rresp), .s_axi_rlast(rlast), .s_axi_rvalid(rvalid), .s_axi_rready(rready),
+      .sn_valid(sn_valid), .sn_line(sn_line), .sn_keep(sn_keep), .sn_ack(sn_ack), .sn_rel(sn_rel),
       .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
       .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
       .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
@@ -143,6 +149,29 @@ module tb_ddr4_mem;
       end
    end
 
+   // ---- the snoops: answered after 0..15 cycles; each DMA line enters behind its own answer (one
+   // answered snoop an engine: a clean is the read engine's, a flush the write engine's) ----
+   int  sn_wait = -1, n_sn = 0;
+   bit  sn_r_v = 0, sn_w_v = 0;  bit [25:0] sn_r_line, sn_w_line;
+   always @(posedge clk) if (!reset) begin
+      sn_ack <= 1'b0;
+      if (sn_valid && !sn_ack) begin
+         if (sn_wait < 0) sn_wait = $urandom % 16;
+         else if (sn_wait == 0) begin
+            sn_ack <= 1'b1;  sn_wait = -1;  n_sn++;
+            if (sn_keep ? sn_r_v : sn_w_v) $fatal(1, "tb: an engine's second snoop before its line entered");
+            if (sn_keep) begin sn_r_v = 1;  sn_r_line = sn_line; end else begin sn_w_v = 1;  sn_w_line = sn_line; end
+         end else sn_wait--;
+      end
+      if (sn_rel != (dut.a_rq_valid && dut.rq_ready && dut.a_rq_we))
+         $fatal(1, "tb: sn_rel %0d as a DMA write enters %0d", sn_rel, dut.a_rq_valid && dut.rq_ready && dut.a_rq_we);
+      if (dut.a_rq_valid && dut.rq_ready) begin
+         if (dut.a_rq_we ? !(sn_w_v && sn_w_line == dut.a_rq_line) : !(sn_r_v && sn_r_line == dut.a_rq_line))
+            $fatal(1, "tb: DMA line %h (we %0d) entered without its snoop", dut.a_rq_line, dut.a_rq_we);
+         if (dut.a_rq_we) sn_w_v = 0; else sn_r_v = 0;
+      end
+   end
+
    // ---- the DMA port: one read and one write at a time, like the bridge ----
    always @(posedge clk) if (!reset) begin
       // the bridge's requests enter the controller: the reference memory moves then
@@ -203,8 +232,8 @@ module tb_ddr4_mem;
       repeat (3000) @(posedge clk);
       if (busy_n() != 0) $fatal(1, "tb: %0d requests still in flight after draining", busy_n());
       u_phy.report();
-      $display("tb_ddr4_mem: line port %0d reads %0d writes, DMA %0d reads %0d writes; read latency %0d..%0d, mean %0d.%0d cycles",
-               n_l_rd, n_l_wr, n_a_rd, n_a_wr, lat_min, lat_max, lat_sum / lat_n, (lat_sum * 10 / lat_n) % 10);
+      $display("tb_ddr4_mem: line port %0d reads %0d writes, DMA %0d reads %0d writes (%0d snoops); read latency %0d..%0d, mean %0d.%0d cycles",
+               n_l_rd, n_l_wr, n_a_rd, n_a_wr, n_sn, lat_min, lat_max, lat_sum / lat_n, (lat_sum * 10 / lat_n) % 10);
       $display("tb_ddr4_mem: PASS");
       $finish;
    end

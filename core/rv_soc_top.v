@@ -107,6 +107,13 @@ module rv_soc_top #(
    input  wire             virtio_irq,
    input  wire             virtio_net_irq,   // PLIC source 12 (ubuntu-nfs.dts virtio@10003000)
    input  wire             dma_wr,           // a device wrote memory (a pulse, in this clock): fence.i clears the I$
+   // a DMA master's line, cleaned (keep) or flushed in the D$ before the master moves it: held until
+   // dma_sn_ack, the line as the masters' AXI address names it (PA - 0x8000_0000, src/dram_window.vh)
+   input  wire             dma_sn_valid,
+   input  wire [25:0]      dma_sn_line,
+   input  wire             dma_sn_keep,
+   output wire             dma_sn_ack,
+   input  wire             dma_sn_rel,       // a pulse: a flushed line's DMA write is in the controller
    input  wire             virtio_kbd_irq,   // PLIC source 4 (virtio_mmio@10004000, as in simmerv)
    output wire [17:0]      irq_dbg,         // interrupt-path debug for the wrapper ILA (probe_clk)
    // Cache data-array integrity (meaningful only in a -DCACHE_PARITY build; tied to 0
@@ -691,6 +698,7 @@ module rv_soc_top #(
    wire        dcr_req;  wire [63:0] dcr_addr;     // muxed D$ read port (LSU + 3 PTW), assigned below
    wire dc_inv_req, dc_inv_busy;
    wire dc_ic_req, dc_ic_ack, dc_ic_dty;          // the I$'s line clean beside each fill
+   wire ox_req, ox_keep, ox_ack;  wire [63:0] ox_pa;   // the D$'s outside request (below)
    // Zihpm cache-event taps (D$/I$ line-lookup + miss pulses) -> core hpm_ev.
    wire dc_access, dc_miss, ic_access, ic_miss;
    // the D$'s memory-port client wires (client 0 of the arbiter below)
@@ -722,7 +730,7 @@ module rv_soc_top #(
       .wr_data(dmem_wdata), .wr_mask(dmem_wmask), .wr_nc(dmem_wuncached),
       .cbo_req(dmem_cbo & ~dc_wr_cpl & ~is_dev_w), .cbo_zero(dmem_cbo_zero), .cbo_keep(dmem_cbo_keep),
       .wr_room(dc_wr_room), .wr_acc(dc_wr_acc), .wr_cpl(dc_wr_cpl),
-      .ic_req(dc_ic_req), .ic_pa({ic_l2_addr, 6'd0}), .ic_ack(dc_ic_ack), .ic_dty(dc_ic_dty),
+      .ox_req(ox_req), .ox_pa(ox_pa), .ox_keep(ox_keep), .ox_ack(ox_ack), .ox_dty(dc_ic_dty), .ox_rel(dma_sn_rel),
       .inv_req(dc_inv_req), .inv_busy(dc_inv_busy),
       .cq_valid(mc_q_valid[0]), .cq_ready(mc_q_ready[0]), .cq_slot(mc_q_slot[0*MSW +: MSW]),
       .cq_we(mc_q_we[0]), .cq_addr(mc_q_addr[0*LAW +: LAW]), .cq_wmask(mc_q_wmask[0*64 +: 64]),
@@ -938,6 +946,26 @@ module rv_soc_top #(
       end
    assign dc_ic_req = ic_p & ~ic_ak;
    assign ic_l2_ack = ic_use;
+   // THE D$'S OUTSIDE REQUEST: the I$'s clean and a DMA master's clean or flush, each held until its
+   // answer. A requester owns the port from its first cycle to the answer, and the two take turns.
+   reg  ox_own, ox_dma, ox_last;                  // the port is owned, by the DMA, the DMA had it last
+   wire ox_pick = dma_sn_valid & (~dc_ic_req | ~ox_last);
+   wire ox_sel  = ox_own ? ox_dma : ox_pick;
+   assign ox_req  = dc_ic_req | dma_sn_valid;
+   assign ox_pa   = ox_sel ? {31'd0, dma_sn_line[25], ~dma_sn_line[25], dma_sn_line[24:0], 6'd0}
+                           : {ic_l2_addr, 6'd0};
+   assign ox_keep = ~ox_sel | dma_sn_keep;
+   assign dc_ic_ack  = ox_ack & ~ox_dma;
+   assign dma_sn_ack = ox_ack &  ox_dma;
+   always @(posedge clk)
+      if (reset) begin ox_own <= 1'b0;  ox_dma <= 1'b0;  ox_last <= 1'b0; end
+      else if (ox_ack) begin ox_own <= 1'b0;  ox_last <= ox_dma; end
+      else if (ox_req & ~ox_own) begin ox_own <= 1'b1;  ox_dma <= ox_pick; end
+   always @(posedge clk) if (!reset) begin
+      if (ox_ack & ~ox_own) $fatal(1, "rv_soc_top: the D$ answered an outside request no one owns");
+      if (ox_own & ~(ox_dma ? dma_sn_valid : dc_ic_req) & ~ox_ack)
+         $fatal(1, "rv_soc_top: the outside request's owner (%s) let go before its answer", ox_dma ? "DMA" : "I$");
+   end
    always @(posedge clk) if (!reset & ic_l2_req & ic_p)
       $fatal(1, "rv_soc_top: an I$ line read asked while the last one is still owed");
    rv_mem_line_client #(.SW(MSW), .AW(LAW)) u_ic_mem

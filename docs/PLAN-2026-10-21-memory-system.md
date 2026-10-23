@@ -114,15 +114,31 @@ and larger-footprint workloads (Tommy is adding them) keep more of it.
 
 ### Coherent DMA
 
-- **DMA goes through the coherent side** in 64-byte lines, each client double-buffered: a read lands
-  whole in its free buffer; a write is presented whole with its byte mask when its buffer is full.
-  Scanout at 1080p60 is about one line every 21 core cycles, under 5% of the DRAM's peak.
-- **The L2 is relaxed inclusive, so the D$ is snooped.** A third tag copy in the D$ (beside the
-  lookup's and the store lookup's), read at the set PA[11:6] for each DMA line: a DMA read that hits a
-  dirty line takes it (or has it written back first); a DMA write that hits invalidates the line,
-  merging the D$'s dirty bytes for a partial write. The I$ stays non-coherent (Linux issues
-  `fence.i` after loading code).
-- **Linux**: the device tree marks the DMA masters `dma-coherent`, and the CBOs around their buffers go.
+As built (step 2): **the D$'s outside request, the I$'s clean generalized.** The port the I$ used to
+ask for a line cleaned before its fill (`ox_req`, a CBO by PA queued behind every older store,
+answered when memory has the D$'s bytes) takes a kind bit and a second requester: `rv_soc_top`
+gives it to the I$ and the DMA masters in turn.
+- **A DMA read cleans its line first**, then reads: memory has any dirty bytes, written back ahead of
+  the read in the controller's order.
+- **A DMA write flushes its line first** (written back if dirty, then dropped -- so a partial write
+  merges with the D$'s bytes, the dirty bit being per line), then writes. The flush's completion
+  **blocks** its line in the D$ until the master's write is in the controller (the release): a
+  miss on it waits, so a fill that follows reads the master's bytes. A fill already started is the
+  flush's to wait for and drop, never blocked -- a block at the memory port would wait on it.
+- **The crossing**: `ddr_port_sync` carries a snoop channel the other way, the request and the
+  release as toggles, the answer's toggle back at CAP.
+- **Linux**: every DMA master's node says `dma-coherent`; the CBOs around their buffers are gone.
+- **Cost**: a DMA line takes a store-queue slot and an urgent main-lookup cycle (scanout at
+  1024x768 RGB565 ~1%). The third tag copy (a filter keeping the misses out of the lookup) waits
+  for a measurement that shows the cost. The clients' two 64-byte buffers each (virtio's masters
+  write 8-byte beats: a snoop a beat) are next.
+- **Verified in sim**: the D$ bench's outside flushes, the device's write landing in memory only at
+  the release (without the block 27 of 30 runs fail); `tb_ddr4_mem` and `tb_ddr_port` answering
+  the DMA port's snoops (3.7 K a run); the Linux lockstep's DMA (virtio-blk's slave and the
+  +dma_rand agent) snooping through `rv_soc_top`'s port -- memrand seeds 1 and 2 with the
+  handler reading the agent's lines cached (the agent's flush turned into a clean: seed 1
+  diverges); the disk lockstep (`dma-coherent`, no CBOs) mounts, checks, writes and re-reads its
+  ext4 image: BLKCHECK-OK, no divergence. glibc, systemd and the interrupt storm pass.
 
 ### 64 bytes wide, and the fallback
 

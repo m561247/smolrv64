@@ -1,7 +1,7 @@
 `default_nettype none
 // ddr_port_sync -- rv_soc_top's DDR memory port (clk_p, the core's probe_clk) across into ui_clk
 // (clk_m) where clk_p is clk_m / 2 from a BUFGCE_DIV: related clocks, so the crossing is registers,
-// not ddr_port_cdc's asynchronous FIFOs. The same ports as ddr_port_cdc.
+// not asynchronous FIFOs.
 //
 // THE PHASE. clk_p's edges fall on every other clk_m edge, late by the BUFGCE_DIV's insertion delay
 // (about 2.7 ns of the 3 ns on the board). The clk_p side toggles p_t every cycle; clk_m samples it
@@ -29,6 +29,14 @@
 // PLACEMENT. A request has a second clk_m register between its capture registers, by the core, and
 // the controller; a beat or a done crosses from its launch register, by the controller, to its clk_p
 // register by the core. Both keep a request and a beat a clk_p cycle.
+//
+// THE SNOOP CHANNEL runs the other way: a DMA master's line, to be cleaned (keep) or flushed in the
+// D$ before the master moves it, one at a time. The request is a toggle with its line, launched at
+// an other edge as a read beat is (m_s_valid held until m_s_ack); the core side presents it while
+// its toggle differs from the answer's (p_s_valid, until p_s_ack), and the answer's toggle comes back
+// captured at CAP as a request is (c_atog). The release after a flush (m_s_rel, a pulse: the DMA
+// write is in the controller) goes the same way as the request, a toggle, a pulse (p_s_rel) again.
+// Both land in clk_p registers first, as the beats do.
 module ddr_port_sync #(
    parameter integer IDW = 5
 ) (
@@ -69,7 +77,18 @@ module ddr_port_sync #(
    input  wire [127:0]   m_r_data,
    input  wire           m_w_valid,
    output wire           m_w_ready,
-   input  wire [IDW-1:0] m_w_id
+   input  wire [IDW-1:0] m_w_id,
+   // ---- the snoop channel: clk_m -> clk_p, the answer back ----
+   input  wire           m_s_valid,             // held until m_s_ack
+   input  wire [25:0]    m_s_line,              // the line, as the DMA masters' AXI address names it
+   input  wire           m_s_keep,              // clean; else flush
+   output reg            m_s_ack,
+   input  wire           m_s_rel,
+   output wire           p_s_valid,             // held until p_s_ack
+   output reg  [25:0]    p_s_line,
+   output reg            p_s_keep,
+   input  wire           p_s_ack,
+   output wire           p_s_rel
 );
    // ---- the phase: clk_p's toggle, sampled by clk_m's falling edge ----
    reg p_t;
@@ -129,8 +148,38 @@ module ddr_port_sync #(
       q_rid <= pr_id;  q_rbeat <= pr_beat;  q_rlast <= pr_last;  q_rdata <= pr_data;  q_wid <= pw_id;
    end
 
+   // ---- the snoop channel ----
+   reg            s_tog, s_out, s_keep;  reg [25:0] s_line;   // clk_m: launched at the other edges
+   reg            s_tq, a_tog;                                 // clk_p: the request's toggle, the answer's
+   reg            c_atog;                                      // clk_m: the answer, captured at CAP
+   assign p_s_valid = s_tq ^ a_tog;
+   always @(posedge clk_p) begin
+      s_tq <= !reset_p && s_tog;  p_s_line <= s_line;  p_s_keep <= s_keep;
+      a_tog <= reset_p ? 1'b0 : a_tog ^ p_s_ack;
+   end
+   always @(posedge clk_m) begin
+      if (cap) c_atog <= a_tog;
+      m_s_ack <= 1'b0;
+      if (reset_m) begin
+         s_tog <= 1'b0;  s_out <= 1'b0;  c_atog <= 1'b0;
+      end else if (s_out) begin
+         if (c_atog == s_tog) begin s_out <= 1'b0;  m_s_ack <= 1'b1; end
+      end else if (m_s_valid && !m_s_ack && !cap) begin
+         s_tog <= ~s_tog;  s_out <= 1'b1;  s_line <= m_s_line;  s_keep <= m_s_keep;
+      end
+   end
+   reg            r_tog, r_pend;                               // clk_m: the release
+   reg            r_tq, r_seen;                                // clk_p
+   assign p_s_rel = r_tq ^ r_seen;
+   always @(posedge clk_p) begin r_tq <= !reset_p && r_tog;  r_seen <= !reset_p && r_tq; end
+   always @(posedge clk_m)
+      if (reset_m) begin r_tog <= 1'b0;  r_pend <= 1'b0; end
+      else if (!cap && (r_pend || m_s_rel)) begin r_tog <= ~r_tog;  r_pend <= 1'b0; end
+      else if (m_s_rel) r_pend <= 1'b1;
+
 `ifndef SYNTHESIS
    always @(posedge clk_p) if (!reset_p) begin
+      if (p_s_ack && !p_s_valid) $fatal(1, "ddr_port_sync: a snoop answered with none asked");
       if (p_r_valid && !p_r_ready) $fatal(1, "ddr_port_sync: a read beat the port did not take (id %0d)", p_r_id);
       if (p_w_valid && !p_w_ready) $fatal(1, "ddr_port_sync: a write done the port did not take (id %0d)", p_w_id);
    end

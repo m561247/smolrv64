@@ -57,6 +57,12 @@ module ddr4_mem #(
    output wire            s_axi_rlast,
    output wire            s_axi_rvalid,
    input  wire            s_axi_rready,
+   // ---- the DMA port's snoops (ddr_port_sync's snoop channel) ----
+   output wire            sn_valid,
+   output wire [25:0]     sn_line,
+   output wire            sn_keep,
+   input  wire            sn_ack,
+   output wire            sn_rel,               // the controller has the flushed line's DMA write
    // ---- the DDR4 IP's PHY-only port ----
    output wire [7:0]      mc_ACT_n,
    output wire [135:0]    mc_ADR,
@@ -127,6 +133,7 @@ module ddr4_mem #(
       .s_axi_arsize(s_axi_arsize), .s_axi_arburst(s_axi_arburst), .s_axi_arvalid(s_axi_arvalid),
       .s_axi_arready(s_axi_arready), .s_axi_rid(s_axi_rid), .s_axi_rdata(s_axi_rdata),
       .s_axi_rresp(s_axi_rresp), .s_axi_rlast(s_axi_rlast), .s_axi_rvalid(s_axi_rvalid), .s_axi_rready(s_axi_rready),
+      .sn_valid(sn_valid), .sn_line(sn_line), .sn_keep(sn_keep), .sn_ack(sn_ack), .sn_rel(sn_rel),
       .rq_valid(a_rq_valid), .rq_ready(a_rq_ready), .rq_we(a_rq_we), .rq_line(a_rq_line), .rq_buf(a_rq_buf),
       .rdDataEn(rdDataEn), .rdDataAddr(rdDataAddr), .rdData(rdData),
       .wrDataEn(wrDataEn), .wrDataAddr(wrDataAddr),

@@ -3,8 +3,11 @@
 // W1) and an NC window W2 over the DMA region, delegates, enables PLIC source 11 for S-mode,
 // and drops to S-mode main_s, which seeds the pointer page and runs the generated op stream
 // (ops.S). The testbench's DMA agent (+dma_rand) writes bursts into the DMA region and raises
-// source 11; the S-mode handler sums the window through W2, acks, completes. Every load's value
-// and every store's bytes are judged by the lockstep; MEMRAND-DONE on the console ends the run.
+// source 11; the S-mode handler sums the window through the identity mapping, cached -- DMA is
+// coherent, so a line the last burst left in the D$ is gone by the time this one has written it, and
+// a stale copy would diverge from the reference -- acks through W2 (uncached: the agent reads the
+// ack from memory), completes. Every load's value and every store's bytes are judged by the
+// lockstep; MEMRAND-DONE on the console ends the run.
 #include <stdint.h>
 #define UART  ((volatile uint8_t *)0x10000000)
 #define PLIC  0x0C000000UL
@@ -42,7 +45,7 @@ void trap_c(uint64_t cause, uint64_t epc, uint64_t tval) {
         uint32_t src = mmio_r32(PLIC + 0x201004);       /* claim (context 1) */
         if (src == 11) {
             uint64_t s = 0;
-            for (uint64_t off = 0; off < 0xFF8; off += 8) s += *(volatile uint64_t *)(W2 + off);
+            for (uint64_t off = 0; off < 0xFC0; off += 8) s += *(volatile uint64_t *)(DMA_PA + off);
             dma_sum += s;  dma_bursts++;
             *(volatile uint64_t *)(W2 + 0xFF8) = dma_bursts;    /* the ack the agent waits for */
         }

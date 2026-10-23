@@ -11,7 +11,9 @@
 // partial-mask writes, never two in flight on one line (the data cache's promise) -- and checks
 // every read's bytes against a shadow, and that every id is answered exactly once. The DMA master
 // runs its own line writes and line reads in a range of its own at the same time, reading back
-// only lines whose writes have been answered, and checks those against its own shadow.
+// only lines whose writes have been answered, and checks those against its own shadow. Its snoops
+// cross the snoop channel to the core side, which answers each after a random wait, as the D$
+// would; every flush answered must come back as one release.
 //
 //   +n=N (transactions, default 20000)  +seed=N
 `include "tb_rand.vh"
@@ -39,6 +41,8 @@ module tb;
    wire        mq_valid, mq_ready, mq_we, mr_valid, mr_ready, mr_last, mw_valid, mw_ready;
    wire [4:0]  mq_id, mr_id, mw_id;  wire [57:0] mq_addr;  wire [63:0] mq_wmask;  wire [511:0] mq_wdata;
    wire [1:0]  mr_beat;  wire [127:0] mr_data;
+   wire        sm_valid, sm_keep, sm_ack, sm_rel, sp_valid, sp_keep, sp_rel;  wire [25:0] sm_line, sp_line;
+   reg         sp_ack = 1'b0;
    ddr_port_sync cdc
      (.clk_p(clk_p), .reset_p(reset_p),
       .p_q_valid(pq_valid), .p_q_ready(pq_ready), .p_q_id(pq_id), .p_q_we(pq_we), .p_q_addr(pq_addr),
@@ -49,7 +53,9 @@ module tb;
       .m_q_valid(mq_valid), .m_q_ready(mq_ready), .m_q_id(mq_id), .m_q_we(mq_we), .m_q_addr(mq_addr),
       .m_q_wmask(mq_wmask), .m_q_wdata(mq_wdata),
       .m_r_valid(mr_valid), .m_r_ready(mr_ready), .m_r_id(mr_id), .m_r_beat(mr_beat), .m_r_last(mr_last),
-      .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id));
+      .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id),
+      .m_s_valid(sm_valid), .m_s_line(sm_line), .m_s_keep(sm_keep), .m_s_ack(sm_ack), .m_s_rel(sm_rel),
+      .p_s_valid(sp_valid), .p_s_line(sp_line), .p_s_keep(sp_keep), .p_s_ack(sp_ack), .p_s_rel(sp_rel));
 
    // ---------------- the controller on the PHY model ----------------
    wire [2:0]  d_bid, d_rid;  wire [1:0] d_bresp, d_rresp;  wire [63:0] d_rdata;
@@ -72,6 +78,7 @@ module tb;
       .s_axi_arid(3'd1), .s_axi_araddr(d_araddr), .s_axi_arlen(8'd7), .s_axi_arsize(3'd3), .s_axi_arburst(2'b01),
       .s_axi_arvalid(d_arvalid), .s_axi_arready(d_arready), .s_axi_rid(d_rid), .s_axi_rdata(d_rdata),
       .s_axi_rresp(d_rresp), .s_axi_rlast(d_rlast), .s_axi_rvalid(d_rvalid), .s_axi_rready(1'b1),
+      .sn_valid(sm_valid), .sn_line(sm_line), .sn_keep(sm_keep), .sn_ack(sm_ack), .sn_rel(sm_rel),
       .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
       .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
       .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
@@ -145,6 +152,24 @@ module tb;
    reg [511:0] shadow [0:NLN-1];
    reg [511:0] got [0:31];  reg [3:0] got_n [0:31];
    integer     issued = 0, done = 0, nfly = 0, errors = 0, k, ln, idf, cyc = 0;
+   // the core side's answers to the snoops: after 0..7 clk_p cycles; a flush owes one release
+   integer sp_wait = -1, n_snoop = 0, rel_owed = 0;
+   always @(posedge clk_p) if (!reset_p) begin
+      sp_ack <= 1'b0;
+      if (sp_rel) begin
+         if (rel_owed == 0) begin $display("FAIL: a release with no flush answered"); errors = errors + 1; end
+         rel_owed = rel_owed - 1;
+      end
+      if (sp_valid && !sp_ack) begin
+         if (sp_wait < 0) sp_wait = prnd(0) % 8;
+         else if (sp_wait == 0) begin
+            sp_ack <= 1'b1;  sp_wait = -1;  n_snoop = n_snoop + 1;
+            if (!sp_keep) rel_owed = rel_owed + 1;
+            if (rel_owed > 1) begin $display("FAIL: a flush answered before the last one's release"); errors = errors + 1; end
+         end else sp_wait = sp_wait - 1;
+      end
+   end
+
    reg         q_v = 0;  reg [4:0] q_id;  reg q_we;  reg [57:0] q_addr;  reg [63:0] q_mask;  reg [511:0] q_data;
    reg [511:0] mbits, nd, t_data;  reg [63:0] t_mask;  reg t_we;
    assign pq_valid = q_v;  assign pq_id = q_id;  assign pq_we = q_we;  assign pq_addr = q_addr;
@@ -195,9 +220,10 @@ module tb;
          end
       end
       if (done == ntrans) begin
-         if (errors == 0) $display("tb_ddr_port: PASS (%0d transactions, DMA %0d reads %0d writes, %0d clk_p cycles)",
-                                   ntrans, dma_r, dma_w, cyc);
-         else             $display("tb_ddr_port: FAIL (%0d errors)", errors);
+         if (errors == 0 && n_snoop >= dma_r + dma_w && n_snoop > 0)
+            $display("tb_ddr_port: PASS (%0d transactions, DMA %0d reads %0d writes, %0d snoops, %0d clk_p cycles)",
+                     ntrans, dma_r, dma_w, n_snoop, cyc);
+         else $display("tb_ddr_port: FAIL (%0d errors; %0d snoops for %0d DMA lines, %0d releases owed)", errors, n_snoop, dma_r + dma_w, rel_owed);
          $finish;
       end
    end

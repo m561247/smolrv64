@@ -121,6 +121,7 @@ module tb;
  `define TB_IC_KB 128
 `endif
    reg tb_dma_wr = 1'b0;           // a device wrote memory this cycle (the virtio-blk slave, the DMA agent)
+   wire        sn_p_valid, sn_p_keep, sn_p_ack, sn_p_rel;  wire [25:0] sn_p_line;   // the tb's DMA snoops (below)
    rv_soc_top #(.RESET_PC(`TB_RESET_PC), .DC_KB(`TB_DC_KB), .SIZE_KB(`TB_IC_KB)) dut
      (.clk(clk), .reset(reset), .retire(retire),
       .dmem_wen(dmem_wen), .dmem_waddr(dmem_waddr), .dmem_wdata(dmem_wdata),
@@ -134,7 +135,8 @@ module tb;
       .uart_tx_valid(uart_tx_v), .uart_tx_data(uart_tx_d), .uart_tx_ready(uart_tx_rdy),
       .virtio_addr(virtio_addr), .virtio_read(virtio_read), .virtio_write(virtio_write),
       .virtio_wdata(virtio_wdata), .virtio_be(virtio_be),
-      .virtio_rdata(virtio_rd_q), .virtio_rvalid(virtio_rvalid), .virtio_irq(virtio_irq | dma_irq), .virtio_net_irq(1'b0), .virtio_kbd_irq(1'b0), .dma_wr(tb_dma_wr), .irq_dbg());
+      .virtio_rdata(virtio_rd_q), .virtio_rvalid(virtio_rvalid), .virtio_irq(virtio_irq | dma_irq), .virtio_net_irq(1'b0), .virtio_kbd_irq(1'b0), .dma_wr(tb_dma_wr), .irq_dbg(),
+      .dma_sn_valid(sn_p_valid), .dma_sn_line(sn_p_line), .dma_sn_keep(sn_p_keep), .dma_sn_ack(sn_p_ack), .dma_sn_rel(sn_p_rel));
    initial if (dut.core.IW != IW) $fatal(1, "tb: the bench is built for IW=%0d, the core has %0d", IW, dut.core.IW);
 
    // THE DDR MODEL IS THE MEASURED ONE BY DEFAULT. Until 2026-09-04 the default was a flat
@@ -220,6 +222,7 @@ module tb;
    wire         mcRdCAS, mcWrCAS, mcCasSlot2, winInjTxn, winRmw, gt_data_ready, cal_done;
    wire [1:0]   mcCasSlot, winRank;  wire [4:0] winBuf, rdDataAddr, wrDataAddr;
    wire [255:0] wrData, rdData;  wire [31:0] wrDataMask;  wire rdDataEn, wrDataEn, per_rd_done;
+   wire         sn_m_valid, sn_m_keep, sn_m_ack, sn_m_rel;  wire [25:0] sn_m_line;
    ddr_port_sync u_ddr_sync (
       .clk_p(clk), .reset_p(reset),
       .p_q_valid(ddr_q_valid), .p_q_ready(ddr_q_ready), .p_q_id(ddr_q_id), .p_q_we(ddr_q_we), .p_q_addr(ddr_q_addr),
@@ -230,7 +233,9 @@ module tb;
       .m_q_valid(mq_valid), .m_q_ready(mq_ready), .m_q_id(mq_id), .m_q_we(mq_we), .m_q_addr(mq_addr),
       .m_q_wmask(mq_wmask), .m_q_wdata(mq_wdata),
       .m_r_valid(mr_valid), .m_r_ready(mr_ready), .m_r_id(mr_id), .m_r_beat(mr_beat), .m_r_last(mr_last),
-      .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id));
+      .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id),
+      .m_s_valid(sn_m_valid), .m_s_line(sn_m_line), .m_s_keep(sn_m_keep), .m_s_ack(sn_m_ack), .m_s_rel(sn_m_rel),
+      .p_s_valid(), .p_s_line(), .p_s_keep(), .p_s_ack(1'b0), .p_s_rel());   // the tb's DMA snoops on its own (below)
    ddr4_mem u_ddr_mem (
       .clk(ui_clk), .reset(reset), .cal_done(cal_done),
       .q_valid(mq_valid), .q_ready(mq_ready), .q_id(mq_id), .q_we(mq_we), .q_addr(mq_addr),
@@ -243,6 +248,7 @@ module tb;
       .s_axi_arid(3'd0), .s_axi_araddr(32'd0), .s_axi_arlen(8'd0), .s_axi_arsize(3'd3), .s_axi_arburst(2'b01),
       .s_axi_arvalid(1'b0), .s_axi_arready(), .s_axi_rid(), .s_axi_rdata(), .s_axi_rresp(), .s_axi_rlast(),
       .s_axi_rvalid(), .s_axi_rready(1'b1),
+      .sn_valid(sn_m_valid), .sn_line(sn_m_line), .sn_keep(sn_m_keep), .sn_ack(sn_m_ack), .sn_rel(sn_m_rel),
       .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n), .mc_ODT(mc_ODT),
       .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS), .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2),
       .winBuf(winBuf), .winInjTxn(winInjTxn), .winRmw(winRmw), .winRank(winRank), .gt_data_ready(gt_data_ready),
@@ -429,11 +435,23 @@ module tb;
       .m_axi_rid(ax_rid), .m_axi_rdata(ax_rdata), .m_axi_rresp(ax_rresp), .m_axi_rlast(ax_rlast),
       .m_axi_rvalid(ax_rvalid), .m_axi_rready(ax_rready));
 
-   // behavioral always-ready single-beat AXI slave into lram[] (non-coherent DMA);
-   // ax_*addr is the DDR byte offset (src/dram_window.vh).
+   // behavioral single-beat AXI slave into lram[], COHERENT: before a beat moves, its line is
+   // snooped through rv_soc_top's DMA port (the D$ cleans it for a read, flushes it for a write,
+   // as ddr4_port_axi has it done on the board); a write moves into lram, and into simmerv (cosim_dma_write,
+   // drained between the two retires it separates), at the answer, and its release follows a cycle
+   // later -- until then the D$ starts no fill of the line. ax_*addr is the DDR byte offset
+   // (src/dram_window.vh), so its line is the snoop's.
    reg axi_rvalid, axi_bvalid;  reg [63:0] axi_rdata;  integer ka;
-   reg [63:0] ar_line, aw_line;  reg [9:0] ar_bp, aw_bp;  integer n_dma_rd = 0, n_dma_wr = 0;
-   assign ax_arready = 1'b1; assign ax_awready = 1'b1; assign ax_wready = 1'b1;
+   reg [63:0] ar_line, aw_line;  reg [9:0] ar_bp, aw_bp;  integer n_dma_rd = 0, n_dma_wr = 0, n_snoop = 0;
+   localparam [1:0] SN_I = 2'd0, SN_R = 2'd1, SN_W = 2'd2, SN_A = 2'd3;   // idle, a read's, a write's, the agent's
+   reg  [1:0]  sn_st = SN_I;
+   reg         sn_req = 1'b0, sn_got = 1'b0, sn_rel_q = 1'b0, sn_kq = 1'b0;  reg [25:0] sn_lq = 26'd0;
+   assign sn_p_valid = sn_req;  assign sn_p_line = sn_lq;  assign sn_p_keep = sn_kq;  assign sn_p_rel = sn_rel_q;
+   wire        ag_due;                                  // the DMA agent's burst is due (below)
+   wire [25:0] ag_line;
+   assign ax_arready = (sn_st == SN_R) && sn_got && !axi_rvalid;
+   assign ax_awready = (sn_st == SN_W) && sn_got && !axi_bvalid;
+   assign ax_wready  = ax_awready;
    assign ax_rvalid = axi_rvalid; assign ax_rdata = axi_rdata; assign ax_rresp = 2'd0;
    assign ax_rlast = 1'b1; assign ax_rid = 3'd1;
    assign ax_bvalid = axi_bvalid; assign ax_bresp = 2'd0; assign ax_bid = 3'd1;
@@ -441,15 +459,32 @@ module tb;
    import "DPI-C" function void cosim_dma_write(input longint off, input longint data, input byte strb);
 `endif
    always @(posedge clk) begin
+      sn_rel_q <= 1'b0;
+      if (reset) begin sn_st <= SN_I;  sn_req <= 1'b0;  sn_got <= 1'b0; end
+      else case (sn_st)
+         SN_I: if (ax_arvalid && !axi_rvalid) begin
+                  sn_st <= SN_R;  sn_req <= 1'b1;  sn_kq <= 1'b1;  sn_lq <= ax_araddr[31:6];
+               end else if (ax_awvalid && ax_wvalid && !axi_bvalid) begin
+                  sn_st <= SN_W;  sn_req <= 1'b1;  sn_kq <= 1'b0;  sn_lq <= ax_awaddr[31:6];
+               end else if (ag_due) begin
+                  sn_st <= SN_A;  sn_req <= 1'b1;  sn_kq <= 1'b0;  sn_lq <= ag_line;
+               end
+         default: if (sn_p_ack) begin sn_req <= 1'b0;  sn_got <= 1'b1;  n_snoop = n_snoop + 1; end
+                  else if (sn_got) begin                 // the line moves this cycle: done
+                     sn_st <= SN_I;  sn_got <= 1'b0;  sn_rel_q <= !sn_kq;
+                  end
+      endcase
+   end
+   always @(posedge clk) begin
       if (reset) begin axi_rvalid<=1'b0; axi_bvalid<=1'b0; end
       else begin
-         if (ax_arvalid && ax_arready && !axi_rvalid) begin
+         if (ax_arvalid && ax_arready) begin
             ar_line = ((ax_araddr & (DDR_BYTES-1)) >> 6) & (NLINES-1);
             ar_bp   = (ax_araddr & 6'h3f) << 3;
             axi_rdata <= lram[ar_line][ar_bp +: 64];
             axi_rvalid <= 1'b1;  n_dma_rd = n_dma_rd + 1;
          end else if (axi_rvalid && ax_rready) axi_rvalid <= 1'b0;
-         if (ax_awvalid && ax_awready && ax_wvalid && ax_wready && !axi_bvalid) begin
+         if (ax_awvalid && ax_awready && ax_wvalid && ax_wready) begin
             aw_line = ((ax_awaddr & (DDR_BYTES-1)) >> 6) & (NLINES-1);
             aw_bp   = (ax_awaddr & 6'h3f) << 3;
             for (ka=0;ka<8;ka=ka+1) if (ax_wstrb[ka]) lram[aw_line][aw_bp + ka*8 +: 8] <= ax_wdata[ka*8 +: 8];
@@ -460,13 +495,20 @@ module tb;
          end else if (axi_bvalid && ax_bready) axi_bvalid <= 1'b0;
       end
    end
+   always @(posedge clk) if (!reset) begin
+      if (sn_st == SN_R && sn_got && !(ax_arvalid && ax_arready))
+         $fatal(1, "tb: the DMA read's snoop answered, but its AR is gone");
+      if (sn_st == SN_W && sn_got && !(ax_awvalid && ax_wvalid))
+         $fatal(1, "tb: the DMA write's snoop answered, but its beat is gone");
+   end
 
 
    // ---- the DMA agent (B4 memrand, 2026-09-17): +dma_rand=<seed> ---------------------------------
    // A device that DMAs on its own schedule: every 20-100 k cycles it writes a 64-byte burst of
    // random bytes into a random line of the 4 KiB DMA window (DDR offset 0x120_0000; the last line
-   // holds the ack word), mirrors each beat into the reference (the same DPI-ordered queue as the
-   // virtio-blk slave), and raises PLIC source 11 (shared with virtio-blk's irq). The program's
+   // holds the ack word) -- coherently, its line flushed from the D$ first (the snoop machine
+   // above) -- mirrors each beat into the reference (the same DPI-ordered queue as the virtio-blk
+   // slave), and raises PLIC source 11 (shared with virtio-blk's irq). The program's
    // S-mode handler sums the window through its NC mapping, writes the burst count to the ack word
    // and completes; the agent drops the irq once the ack word in lram shows the count, then
    // schedules the next burst. Race-free by protocol: the interrupt orders every read of the window
@@ -477,13 +519,15 @@ module tb;
    reg  [31:0] dma_seed = 32'd1, dma_lfsr = 32'hACE1_5EED, dma_ctr = 32'd0, dl;
    reg  [63:0] dma_next = 64'd50000, dma_line;  reg [63:0] dma_beat;  integer dk;
    wire [63:0] dma_ack = lram[(DMA_OFF >> 6) + 64'd63][448 +: 64];
+   wire        ag_go = (sn_st == SN_A) && sn_got && !sn_p_ack;   // the agent's line moves now
+   assign ag_due  = dma_on && !dma_irq && c >= dma_next;
+   assign ag_line = DMA_OFF[31:6] + {20'd0, dma_lfsr[5:0] == 6'd63 ? 6'd0 : dma_lfsr[5:0]};
    always @(posedge clk)
-      tb_dma_wr <= ~reset & ((ax_awvalid && ax_awready && ax_wvalid && ax_wready && !axi_bvalid)
-                             | (dma_on && !dma_irq && c >= dma_next));
+      tb_dma_wr <= ~reset & ((ax_awvalid && ax_awready && ax_wvalid && ax_wready) | ag_go);
    always @(posedge clk) if (dma_on && !reset) begin
-      if (!dma_irq && c >= dma_next) begin
+      if (ag_go) begin
          dl = dma_lfsr;
-         dma_line = (DMA_OFF >> 6) + {58'd0, dl[5:0] == 6'd63 ? 6'd0 : dl[5:0]};
+         dma_line = {38'd0, ag_line};
          for (dk = 0; dk < 8; dk = dk + 1) begin
             dl = dl ^ (dl << 13); dl = dl ^ (dl >> 17); dl = dl ^ (dl << 5);
             dma_beat = {dl, dl ^ 32'h9E37_79B9};

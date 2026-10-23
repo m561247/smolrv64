@@ -1510,13 +1510,24 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   copy back and keeps it clean; cbo.flush/inval drop it, written back if dirty; cbo.zero drops
   it unwritten and fills an MSHR whose merge buffer is a line of zeros. A CBO or NC store
   completes at `wr_cpl`, once memory has its write.
-- **The I$'s coherent fill.** Every I$ line read goes to memory at once, and beside it the I$
-  asks the D$ to clean that line (`ic_req`, a cbo.clean by PA queued in the store queue behind
-  every store taken before it, answered by `ic_ack`, which says `ic_dty` unless the clean found
-  the line clean on its first look). `rv_soc_top` uses the memory's data only if the D$ has
-  answered clean by then; otherwise it drops the data and reads the line again after the
-  answer, when memory is current. So `fence.i` never cleans the D$: it drains the core and
-  invalidates the I$. (The whole-D$ clean `inv_req` remains for a requester that wants one.)
+- **Outside requests: the I$'s coherent fill and coherent DMA.** One port asks the D$ to clean
+  or flush a line by PA (`ox_req`, `ox_keep`: a CBO queued in the store queue behind every store
+  taken before it, answered by `ox_ack`); `rv_soc_top` gives it to the I$ and the DMA masters in
+  turn, each owning it from its first cycle to its answer.
+  - The I$: every I$ line read goes to memory at once, and beside it the I$ asks for that line
+    cleaned (`ox_dty` with the answer unless the clean found the line clean on its first look).
+    `rv_soc_top` uses the memory's data only if the D$ has answered clean by then; otherwise it
+    drops the data and reads the line again after the answer, when memory is current. So
+    `fence.i` never cleans the D$: it drains the core and invalidates the I$. (The whole-D$
+    clean `inv_req` remains for a requester that wants one.)
+  - A DMA master (`ddr4_port_axi`, through `ddr_port_sync`'s snoop channel) has its line cleaned
+    before it reads it and flushed before it writes it; the answer means memory has the D$'s
+    write-back, which the controller, taking requests in order, serves ahead of the master's
+    line. An outside flush's completion BLOCKS its line (`xb_*`): no fill of it starts -- a
+    load, store, zero or NC access waits as on a line being written back -- until `ox_rel` says
+    the master's write is in the controller; a fill already started is the flush's to wait for.
+    The device trees mark every DMA master `dma-coherent`, so Linux keeps no CBOs around its
+    buffers. The I$ is not snooped: a device write still makes the next fence.i clear it.
 - **Every request carries its PA**: the core translates before it asks. The set is inside the
   page offset, so the VA names it as well; the dTLB in the access cycle, the D$ taking the VA, is
   step 2 of `docs/PLAN-2026-10-03-dcache-vipt-l2.md`'s revised order.
@@ -1689,7 +1700,9 @@ The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes ou
   (a multicycle path of 2 in the XDC), a second ui_clk register on to the controller; everything back
   to the port is launched at the other ui_clk edges, the request's ready being a promise of room made
   an edge ahead, and a read beat or a write done lands in a probe_clk register by the core -- the long
-  route is register to register;
+  route is register to register. Its snoop channel runs the other way, a DMA line to clean or flush
+  and the release after a flush as toggles launched at the other edges into probe_clk registers, the
+  answer's toggle captured at CAP;
 - `ddr4_mem`: our DDR4 controller (`ddr4_ctl`) on the DDR4 IP's PHY-only port (AMD PG150), whose
   PHY and calibration train the DRAM before `calDone`. A requester owns its line buffers (this
   port eight for reads and four for writes, `ddr4_port_line`); the PHY's tag is {buffer, half}, so
@@ -1702,7 +1715,8 @@ The on-chip SRAM at `LBASE` answers inside `rv_soc_top`. Everything else goes ou
   D$ victim, 128 KiB back, never shares its fill's bank). Refresh every tREFI,
   ZQCS, ODT on writes and the PHY's VT tracking are its own. The DMA masters' AXI port
   (`ddr4_port_axi`: one transaction, within one line, at a time; register slices on AW/W and R
-  before it) goes first.
+  before it; each line snooped in the D$ before it goes, a read's cleaned, a write's flushed and
+  released as the controller takes it) goes first.
 
 The testbench model keeps 8 transactions in flight. Each draws the measured latency at
 acceptance, and they are answered in request order; `+ddr_reorder` answers in any order.
@@ -2236,8 +2250,8 @@ from the checkpoint's first instruction.
 | Ethernet RX engine (MACs + the slot ring, two clocks) | `core/run-ethrx-tb.sh` | `eth_rx_engine: PASS` (a burst, a full ring, an ack landing mid-frame, FCS-bad, over-long) |
 | CBO behind and ahead of stores | `make -C workloads/fphammer cbozero.bin && FW=$PWD/workloads/fphammer/cbozero.bin CYC=4000000 core/run-linux.sh` | `cbozero: ok` (the tiny128 boot issues no cbo.zero; the Geekbench image does, at SLUB init) |
 | long guest (per batch) | `core/run-cosim-gb5.sh` | no divergence through the kernel boot (>400 M cycles) |
-| disk-backed lockstep: virtio-blk, non-coherent DMA (B6, 2026-09-18; 1.5 G cycles, ~80 min: userspace starts after ~1.3 G) | `make -C workloads/tiny128 cosim-blk` | no divergence, `BLKCHECK-OK` on the console (the initrd's S99blkcheck mounts the 4 MiB ext4 image, verifies every byte, writes a copy back and re-reads it past the page cache); the runner fails on `BLKCHECK-FAIL` or its absence |
-| memrand: random memory ordering under the lockstep (B4, 2026-09-18) | `make -C workloads/memrand sweep SEEDS="1 2 3 4"` (and `sweep-iw3`) | `MEMRAND seed=N: PASS` for every seed: a 50 k-op random stream of loads/stores/AMOs/LR-SC/FP/cbo/wrong-path cbo.zero and stores behind a late always-taken branch/fences/sfence.vma/pointer chases/megapage remaps over three VA aliases in S-mode, with the testbench's DMA agent interrupting through PLIC source 11; every load and every store byte judged by the lockstep |
+| disk-backed lockstep: virtio-blk, coherent DMA (`dma-coherent`: the testbench's slave snoops each line through `rv_soc_top`'s DMA port first; 1.5 G cycles, ~80 min: userspace starts after ~1.3 G) | `make -C workloads/tiny128 cosim-blk` | no divergence, `BLKCHECK-OK` on the console (the initrd's S99blkcheck mounts the 4 MiB ext4 image, verifies every byte, writes a copy back and re-reads it past the page cache); the runner fails on `BLKCHECK-FAIL` or its absence |
+| memrand: random memory ordering under the lockstep (B4, 2026-09-18) | `make -C workloads/memrand sweep SEEDS="1 2 3 4"` (and `sweep-iw3`) | `MEMRAND seed=N: PASS` for every seed: a 50 k-op random stream of loads/stores/AMOs/LR-SC/FP/cbo/wrong-path cbo.zero and stores behind a late always-taken branch/fences/sfence.vma/pointer chases/megapage remaps over three VA aliases in S-mode, with the testbench's DMA agent (its lines flushed from the D$ first) interrupting through PLIC source 11, whose handler reads the window cached (a stale line diverges: with the agent's flush turned into a clean, seed 1 does); every load and every store byte judged by the lockstep |
 | DDR-latency sweep (B7, 2026-09-17) | `tools/mem-sweep.sh docs/measurements/<date>-mem-sweep.txt` | the table of retires at 60 M for latency 4 / measured / 80 at IW=2 and IW=3; an MLP increment is judged by how much of the gap to latency 4 it closes |
 | glibc userspace (per batch) | `workloads/glibc/run-cosim.sh` | `GLIBC-TEST PASS` and `STOP-AFTER` (the runner's `STOP_AFTER` ends the lockstep 1 M cycles after that console marker, ~0.6 G cycles at 6f2bbf1f, instead of running out its 1.8 G budget) |
 | systemd userspace (per batch) | `workloads/sysd/run-cosim.sh` | `SYSD-TEST PASS` and `STOP-AFTER` (~0.45 G cycles of its 1.6 G at 6f2bbf1f) |

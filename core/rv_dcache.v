@@ -36,13 +36,20 @@
 //     goes to the main lookup, as does everything else the queue holds.
 //   - THE MAIN LOOKUP takes one request a cycle: a released waiter (replay), else a load, else a
 //     queued store-port op -- the store ahead of a load when it is urgent: the queue is full, its
-//     head is a CBO, an NC store or the I$'s clean (a requester waits on each), or the head has
+//     head is a CBO, an NC store or an outside request (a requester waits on each), or the head has
 //     waited ST_WAIT cycles.
 // A CBO or an NC store is taken once (it is held until its wr_cpl, so a second presentation while
-// one is queued is the same one). The I$ is a second, lower-priority requester of the queue: before
-// it reads a line from memory it asks for that line cleaned by PA (ic_req, held until ic_ack), a
-// cbo.clean that answers ic_ack instead of wr_cpl. It queues behind every store taken before it, so
-// memory holds their bytes when ic_ack says so, and the I$ never fills code the D$ still holds dirty.
+// one is queued is the same one). An OUTSIDE REQUEST is a second, lower-priority requester of the
+// queue: a line cleaned or flushed by PA (ox_req, held until ox_ack; ox_keep: clean), a CBO that
+// answers ox_ack instead of wr_cpl. The I$ asks for a clean before it reads a line from memory, so it
+// never fills code the D$ still holds dirty; a DMA master asks for a clean before it reads a line and
+// a flush before it writes one. The request queues behind every store taken before it, so memory
+// holds their bytes when ox_ack says so. An outside flush's completion BLOCKS its line (xb_*): no
+// fill of it starts -- a load, store or zero waits, as on a line being written back -- until ox_rel
+// says the DMA master's write is in the controller, so a fill that follows reads the master's
+// bytes. A fill already started is the flush's to wait for (it drops what lands), never blocked.
+// The block compares the line's low 12 bits only: a miss on another line that matches them waits
+// a few cycles too, which costs nothing, and the compare is half as deep.
 //
 // THE MAIN LOOKUP. A request taken at T reads row {set, c} of every array; at T+1 the set's valid
 // bits and tags are compared with its PA.
@@ -140,11 +147,13 @@ module rv_dcache #(
    output reg               wr_room,     // a store presented this cycle is taken
    output reg               wr_acc,      // taken last cycle: a plain store completes on its own
    output reg               wr_cpl,      // an NC store's or a CBO's completion
-   // ---- the I$'s clean before it fills a line from memory
-   input  wire              ic_req,      // held until ic_ack
-   input  wire [63:0]       ic_pa,
-   output reg               ic_ack,      // the line is clean in memory
-   output reg               ic_dty,      // ...and was not on the first look: memory changed since the ask
+   // ---- an outside request: the I$'s clean before it fills a line, a DMA master's before it moves one
+   input  wire              ox_req,      // held until ox_ack
+   input  wire [63:0]       ox_pa,
+   input  wire              ox_keep,     // a clean; else a flush (the line leaves the D$)
+   output reg               ox_ack,      // memory holds the line's bytes (and the D$ no copy, after a flush)
+   output reg               ox_dty,      // ...and the first look did not finish it: memory changed since the ask
+   input  wire              ox_rel,      // a pulse: the flushed line's DMA write is in the controller
    input  wire              inv_req,     // clean every dirty line (fence.i)
    output wire              inv_busy,
    // ---- the memory port (rv_mem_arbiter client)
@@ -245,17 +254,18 @@ module rv_dcache #(
    reg  [63:0]      sf_pa   [0:3], sf_wd [0:3];
    reg  [7:0]       sf_wm   [0:3];
    reg              sf_nc   [0:3], sf_cbo [0:3], sf_zero [0:3], sf_keep [0:3];
-   reg              sf_ic   [0:3];                // the I$'s clean, not the store port's
-   reg              icq;                          // the I$'s clean is queued
-   reg              ic_slow;                      // ...and did not finish clean on its first look
+   reg              sf_ox   [0:3];                // an outside request, not the store port's
+   reg              oxq;                          // an outside request is queued
+   reg              ox_slow;                      // ...and its first look did not finish it
+   reg              xb_v;  reg [11:0] xb_pl;      // the line an outside flush blocks (its low bits), until ox_rel
    wire [1:0]       sq_h1   = sq_hp + 2'd1;       // entry 1's slot
    wire [63:0]      st_wd   = sf_wd[sq_hp];      // the head's: only the head resolves
    wire [7:0]       st_wm   = sf_wm[sq_hp];
    wire             st_cbo  = sf_cbo[sq_hp], st_zero = sf_zero[sq_hp], st_keep = sf_keep[sq_hp];
    // which lookup the head's and the next entry's op go to: a plain store not yet missed is the
    // store lookup's
-   wire             fast_hp = ~sf_nc[sq_hp] & ~sf_cbo[sq_hp] & ~sf_ic[sq_hp] & ~sf_mn[sq_hp];
-   wire             fast_h1 = ~sf_nc[sq_h1] & ~sf_cbo[sq_h1] & ~sf_ic[sq_h1] & ~sf_mn[sq_h1];
+   wire             fast_hp = ~sf_nc[sq_hp] & ~sf_cbo[sq_hp] & ~sf_ox[sq_hp] & ~sf_mn[sq_hp];
+   wire             fast_h1 = ~sf_nc[sq_h1] & ~sf_cbo[sq_h1] & ~sf_ox[sq_h1] & ~sf_mn[sq_h1];
 
    // ---------------------------------------------------------------- the write-back buffer
    reg              wb_v    [0:NWB-1];
@@ -320,7 +330,7 @@ module rv_dcache #(
    wire           sq_i1  = (sc > 2'd1) & sf_iss[sq_hp] & ~sf_iss[sq_h1] & s1_hd & ~fast_h1;
    // LOADS FIRST (the header): an urgent store goes ahead of a load presented now
    reg  [2:0]     st_age;
-   wire           st_urgent = (sc == SD) | sf_cbo[sq_hp] | sf_nc[sq_hp] | sf_ic[sq_hp] | (st_age >= ST_WAIT);
+   wire           st_urgent = (sc == SD) | sf_cbo[sq_hp] | sf_nc[sq_hp] | sf_ox[sq_hp] | (st_age >= ST_WAIT);
    reg  [2:0]     fp_age;                         // the store lookup's head has waited this long
    wire           fp_hold = (fp_age >= FP_WAIT);   // ...and shuts the load door
    // M's load counts as presented whenever M holds one (f_hint, a register), so the store's turn and
@@ -342,13 +352,13 @@ module rv_dcache #(
    reg            sq_cn;                          // a CBO or an NC store is queued
    always @* begin
       sq_cn = 1'b0;
-      for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_cbo[sq_hp + i[1:0]] | sf_nc[sq_hp + i[1:0]]) & ~sf_ic[sq_hp + i[1:0]]) sq_cn = 1'b1;
+      for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_cbo[sq_hp + i[1:0]] | sf_nc[sq_hp + i[1:0]]) & ~sf_ox[sq_hp + i[1:0]]) sq_cn = 1'b1;
    end
    wire           wr_take = wr_req & (sc != SD) & ~((cbo_req | wr_nc) & sq_cn);
-   // the I$'s clean takes a slot the store port leaves: never in a cycle it presents, so the room
+   // an outside request takes a slot the store port leaves: never in a cycle it presents, so the room
    // the store port was promised stays its own
-   wire           ic_take = ic_req & ~icq & ~ic_ack & ~wr_req & (sc != SD);
-   wire           sq_take = wr_take | ic_take;
+   wire           ox_take = ox_req & ~oxq & ~ox_ack & ~wr_req & (sc != SD);
+   wire           sq_take = wr_take | ox_take;
 
    // ---------------------------------------------------------------- the store lookup's input
    // It issues the queue's head, or the entry behind it in the cycle the head is in its compare.
@@ -479,14 +489,15 @@ module rv_dcache #(
       end
    end
    // the write-back buffer: the line still in it, and a free entry
-   reg              wb_hit, wb_free_v, wb_any;  reg [WBB-1:0] wb_free;
+   reg              wb_hit, wb_free_v, wb_any, xb_hit;  reg [WBB-1:0] wb_free;
    always @* begin
-      wb_hit = 1'b0;  wb_free_v = 1'b0;  wb_free = 0;  wb_any = 1'b0;
+      wb_hit = 1'b0;  wb_free_v = 1'b0;  wb_free = 0;  wb_any = 1'b0;  xb_hit = 1'b0;
       for (i = NWB - 1; i >= 0; i = i - 1) begin
          if (wb_v[i] & (wb_pl[i][LB-1:0] == s1_pl[LB-1:0])) wb_hit = 1'b1;
          if (~wb_v[i]) begin wb_free = i[WBB-1:0]; wb_free_v = 1'b1; end
          if (wb_v[i]) wb_any = 1'b1;
       end
+      xb_hit = xb_v & (xb_pl == s1_pl[11:0]);   // the set and six tag bits: a false match only delays
    end
    // the victim (the header): an unreserved invalid way, else an unreserved unused one, else the
    // first unreserved -- and then the set's used bits clear
@@ -504,7 +515,7 @@ module rv_dcache #(
    wire cln_c     = l1_v & k_cln & hit;                               // cbo.clean on a copy
    wire absent    = l1_v & ~hit;
    wire free_ln   = absent & ~wb_hit & ~(|ms_hitv);                   // not cached, filling or being written
-   wire alloc_c   = free_ln & (k_ld | k_st | k_z) & ms_free_v;
+   wire alloc_c   = free_ln & ~xb_hit & (k_ld | k_st | k_z) & ms_free_v;
    wire ro_need   = (drop_c & drop_wb) | (alloc_c & vic_dty) | (cln_c & cp_dty);   // a dirty line leaves or cleans
    wire ro_block  = ro_need & ro_on;
    wire wb_block  = ro_need & ~ro_on & ~wb_free_v;
@@ -514,7 +525,7 @@ module rv_dcache #(
    wire cr_f;  wire [MB-1:0] cr_m;                                    // a fill beat landing now (below)
    // (no copy is valid while an MSHR fills its line, so a hit and a join never meet)
    wire m_join    = absent & ~wb_hit & (|ms_hitv) & (k_ld | k_z);    // wait on the MSHR
-   wire m_nc      = free_ln & k_nc & ~nc_v;                           // to memory through the NC slot
+   wire m_nc      = free_ln & ~xb_hit & k_nc & ~nc_v;                 // to memory through the NC slot
    wire m_cdone   = free_ln & (k_cln | k_fl);                         // a CBO with nothing cached: done
    wire m_defer   = ro_block | blk_w1;                                // replay at once
    wire m_wait    = blk_st | (l1_v & ~ans & ~m_defer & ~m_drop & ~m_alloc & ~m_clean & ~m_join & ~m_nc & ~m_cdone);
@@ -610,7 +621,7 @@ module rv_dcache #(
    wire   ws_go    = cq_ready & ~rq_v & ~nq_v & ws_v;
    assign cw_e     = cw_slot - NMS;
    assign cw_ok    = cw_valid & (cw_slot >= NMS) & (cw_e < NWS) & wb_v[cw_e[WBB-1:0]] & wb_sent[cw_e[WBB-1:0]];
-   wire   freed    = fl_v | cw_ok | st_done | nc_done;   // an MSHR, a write-back entry, the store or the NC slot frees
+   wire   freed    = fl_v | cw_ok | st_done | nc_done | ox_rel;   // an MSHR, a write-back entry, the store, the NC slot or a block frees
 
    // ---------------------------------------------------------------- the state writes
    // ONE write statement per way and field, its {we, addr, data} muxed first. The lookup is empty
@@ -652,7 +663,7 @@ module rv_dcache #(
    always @(posedge clk) begin
       if (reset) begin
          door <= 1'b0;  sdoor <= 1'b0;  s1_v <= 1'b0;  s1_f <= 1'b0;  sb_v <= 1'b0;  rd_valid <= 1'b0;  rd_f <= 1'b0;  wr_acc <= 1'b0;  wr_cpl <= 1'b0;
-         sc <= 2'd0;  sq_hp <= 2'd0;  wr_room <= 1'b0;  icq <= 1'b0;  ic_ack <= 1'b0;  ic_dty <= 1'b0;  ic_slow <= 1'b0;
+         sc <= 2'd0;  sq_hp <= 2'd0;  wr_room <= 1'b0;  oxq <= 1'b0;  xb_v <= 1'b0;  ox_ack <= 1'b0;  ox_dty <= 1'b0;  ox_slow <= 1'b0;
          nc_v <= 1'b0;  nc_rdy <= 1'b0;  cl_pend <= 1'b0;  cl_on <= 1'b0;  cl_wait <= 1'b0;
          scan_on <= 1'b1;  scan <= 6'd0;  fl_v <= 1'b0;  ra_ptr <= {TB{1'b0}};  w1_v <= 1'b0;
          st_age <= 3'd0;  fp_age <= 3'd0;
@@ -679,21 +690,23 @@ module rv_dcache #(
          // the store queue: the head leaves when it is done, a store taken joins the tail, an entry
          // behind a parked head goes back to waiting its turn
          wr_acc <= wr_take;
-         wr_cpl <= st_done & st_cbo & ~sf_ic[sq_hp] | fin_nc;
-         ic_ack <= st_done & sf_ic[sq_hp];
-         ic_dty <= ic_slow;
-         // the I$'s clean at the head in the lookup: done now and clean, or anything else -- a
+         wr_cpl <= st_done & st_cbo & ~sf_ox[sq_hp] | fin_nc;
+         ox_ack <= st_done & sf_ox[sq_hp];
+         ox_dty <= ox_slow;
+         // the outside request at the head in the lookup: done now and clean, or anything else -- a
          // write-back, a wait on a write-back or a fill of its line -- which may change memory
-         if (st_done & sf_ic[sq_hp]) ic_slow <= 1'b0;
-         else if (s1_v & s1_st & s1_head & sf_ic[sq_hp] & ~fin_now) ic_slow <= 1'b1;
-         if (ic_take) icq <= 1'b1;  else if (st_done & sf_ic[sq_hp]) icq <= 1'b0;
+         if (st_done & sf_ox[sq_hp]) ox_slow <= 1'b0;
+         else if (s1_v & s1_st & s1_head & sf_ox[sq_hp] & ~fin_now) ox_slow <= 1'b1;
+         if (ox_take) oxq <= 1'b1;  else if (st_done & sf_ox[sq_hp]) oxq <= 1'b0;
+         if (st_done & sf_ox[sq_hp] & ~sf_keep[sq_hp]) begin xb_v <= 1'b1;  xb_pl <= sf_pa[sq_hp][17:6]; end
+         else if (ox_rel) xb_v <= 1'b0;
          if (st_done) sq_hp <= sq_h1;
          if (st_go) sf_iss[sq_ps] <= 1'b1;
-         if (sq_take) begin                        // a store-port op, else the I$'s clean (a cbo.clean by PA)
-            sf_iss[sq_pt] <= 1'b0;  sf_mn[sq_pt] <= 1'b0;  sf_pa[sq_pt] <= wr_take ? wr_pa : ic_pa;
+         if (sq_take) begin                        // a store-port op, else the outside request (a CBO by PA)
+            sf_iss[sq_pt] <= 1'b0;  sf_mn[sq_pt] <= 1'b0;  sf_pa[sq_pt] <= wr_take ? wr_pa : ox_pa;
             sf_wd[sq_pt] <= wr_data;  sf_wm[sq_pt] <= wr_mask;  sf_nc[sq_pt] <= wr_take & wr_nc;
             sf_cbo[sq_pt] <= ~wr_take | cbo_req;  sf_zero[sq_pt] <= wr_take & cbo_zero;
-            sf_keep[sq_pt] <= ~wr_take | cbo_keep;  sf_ic[sq_pt] <= ~wr_take;
+            sf_keep[sq_pt] <= wr_take ? cbo_keep : ox_keep;  sf_ox[sq_pt] <= ~wr_take;
          end
          if (sq_bk) sf_iss[sq_h1] <= 1'b0;
          sc      <= sc + {1'b0, sq_take} - {1'b0, st_done};
@@ -831,6 +844,7 @@ module rv_dcache #(
    //  12 st_clean    a store taken while a clean is asked for or under way (the clean leaves it out)
    //  13 fast        M's load presented while not taken, beside another read, on a busy tag, or a
    //                 cancel with no fast load in the lookup
+   //  14 xblock      an outside flush finishing while a line is blocked, or a release with none
    wire e_orphan  = cr_f & ~ms_v[cr_m];
    wire e_slot    = cr_valid & ~cr_f & ~((cr_slot == NCS) & nc_v & ~nc_we & nc_sent);
    wire e_wdone   = cw_valid & ~cw_ok & ~fin_nc;
@@ -850,12 +864,13 @@ module rv_dcache #(
    wire e_stcl    = wr_take & (inv_req | cl_pend | cl_on | cl_wait);
    wire e_fast    = (f_req & (~f_ok | ~f_hint | rd_req | wt_v[{1'b0, f_tag}] | (s1_v & (s1_tag == {1'b0, f_tag}))))
                   | (f_cancel & ~(s1_v & s1_f));
-   wire [15:0] e_now = {2'd0, e_fast, e_stcl, e_sqord, e_vic, e_wr2, e_rorace, e_wdead, e_wtbusy, e_btwo, e_two, e_beat, e_wdone, e_slot, e_orphan};
+   wire e_xb      = (st_done & sf_ox[sq_hp] & ~sf_keep[sq_hp] & xb_v) | (ox_rel & ~xb_v);
+   wire [15:0] e_now = {1'd0, e_xb, e_fast, e_stcl, e_sqord, e_vic, e_wr2, e_rorace, e_wdead, e_wtbusy, e_btwo, e_two, e_beat, e_wdone, e_slot, e_orphan};
    reg  [15:0] e_q;
    always @(posedge clk) e_q <= reset ? 16'd0 : e_now;
    assign err = e_q;
    always @(posedge clk) if (!reset && (e_now != 0))
-      $fatal(1, "rv_dcache: invariant %b (orphan beat, bad slot, write completion, beat order, two ways, two ways at the store lookup, tag reuse, dead waiter, read-out race, two store writes, reserved victim, store-queue order, store under a clean, fast load)", e_now[13:0]);
+      $fatal(1, "rv_dcache: invariant %b (orphan beat, bad slot, write completion, beat order, two ways, two ways at the store lookup, tag reuse, dead waiter, read-out race, two store writes, reserved victim, store-queue order, store under a clean, fast load, outside block)", e_now[14:0]);
 
 endmodule
 `default_nettype wire

@@ -1847,6 +1847,9 @@ module rk_xcku5p(
    (* ASYNC_REG = "TRUE" *) reg [1:0] dma_sy = 2'd0;
    always @(posedge probe_clk) dma_sy <= {dma_sy[0], |dma_st};
    wire p_dma_wr = dma_sy[1];
+   // the DMA port's snoops: ddr4_mem (ui_clk) -> probe_sync's snoop channel -> the D$ (probe_clk)
+   wire        sn_m_valid, sn_m_keep, sn_m_ack, sn_m_rel, sn_p_valid, sn_p_keep, sn_p_ack, sn_p_rel;
+   wire [25:0] sn_m_line, sn_p_line;
    rv_soc_top #(.RESET_PC(64'h7000_0000)) probe_core (
       .clk(probe_clk), .reset(probe_reset), .fbdiag_reset_req(fbdiag_reset_req),
       .retire(core_retire), .dmem_wen(), .dmem_waddr(), .dmem_wdata(), .dmem_wmask(),
@@ -1862,7 +1865,9 @@ module rk_xcku5p(
       .virtio_addr(p_virtio_addr), .virtio_read(p_virtio_read), .virtio_write(p_virtio_write),
       .virtio_wdata(p_virtio_wdata), .virtio_be(p_virtio_be),
       .virtio_rdata(core_mmio_readdata_q), .virtio_rvalid(core_mmio_readdatavalid_q),
-      .virtio_irq(p_virtio_irq), .virtio_net_irq(p_virtio_net_irq), .virtio_kbd_irq(p_kbd_irq), .dma_wr(p_dma_wr), .core_dbg(probe_core_dbg));
+      .virtio_irq(p_virtio_irq), .virtio_net_irq(p_virtio_net_irq), .virtio_kbd_irq(p_kbd_irq), .dma_wr(p_dma_wr),
+      .dma_sn_valid(sn_p_valid), .dma_sn_line(sn_p_line), .dma_sn_keep(sn_p_keep), .dma_sn_ack(sn_p_ack), .dma_sn_rel(sn_p_rel),
+      .core_dbg(probe_core_dbg));
 
 `ifdef ILA_IRQ
    // Debug (ILA_IRQ=1): capture the virtio_blk interrupt lifecycle on probe_clk. probe_irq_dbg =
@@ -1962,7 +1967,9 @@ module rk_xcku5p(
       .m_q_valid(mq_valid), .m_q_ready(mq_ready), .m_q_id(mq_id), .m_q_we(mq_we), .m_q_addr(mq_addr),
       .m_q_wmask(mq_wmask), .m_q_wdata(mq_wdata),
       .m_r_valid(mr_valid), .m_r_ready(mr_ready), .m_r_id(mr_id), .m_r_beat(mr_beat), .m_r_last(mr_last),
-      .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id));
+      .m_r_data(mr_data), .m_w_valid(mw_valid), .m_w_ready(mw_ready), .m_w_id(mw_id),
+      .m_s_valid(sn_m_valid), .m_s_line(sn_m_line), .m_s_keep(sn_m_keep), .m_s_ack(sn_m_ack), .m_s_rel(sn_m_rel),
+      .p_s_valid(sn_p_valid), .p_s_line(sn_p_line), .p_s_keep(sn_p_keep), .p_s_ack(sn_p_ack), .p_s_rel(sn_p_rel));
 
    // The DMA masters' AXI into ddr4_mem through register slices (AW/W in, R out), as it reached the
    // IP's controller before: the devices then need not sit beside the controller's port.
@@ -2007,6 +2014,7 @@ module rk_xcku5p(
       .s_axi_arvalid(device_axi_arvalid), .s_axi_arready(device_axi_arready),
       .s_axi_rid(dm_rid), .s_axi_rdata(dm_rdata), .s_axi_rresp(dm_rresp),
       .s_axi_rlast(dm_rlast), .s_axi_rvalid(dm_rvalid), .s_axi_rready(dm_rready),
+      .sn_valid(sn_m_valid), .sn_line(sn_m_line), .sn_keep(sn_m_keep), .sn_ack(sn_m_ack), .sn_rel(sn_m_rel),
       .mc_ACT_n(mc_ACT_n), .mc_ADR(mc_ADR), .mc_BA(mc_BA), .mc_BG(mc_BG), .mc_CS_n(mc_CS_n),
       .mc_ODT(mc_ODT), .mc_CKE(mc_CKE), .mcRdCAS(mcRdCAS), .mcWrCAS(mcWrCAS),
       .mcCasSlot(mcCasSlot), .mcCasSlot2(mcCasSlot2), .winBuf(winBuf), .winInjTxn(winInjTxn),

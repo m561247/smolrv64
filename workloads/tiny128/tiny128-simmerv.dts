@@ -136,7 +136,7 @@
 			reg = <0 0x10002000 0 0x1000>;
 			interrupts = <11>;
 			interrupt-parent = <&plic>;
-			dma-noncoherent;
+			dma-coherent;
 			status = "okay";
 		};
 	};
