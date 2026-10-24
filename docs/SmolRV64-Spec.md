@@ -110,8 +110,8 @@ frontend-bound (§14) and only ALU ops reorder; the buckets it targets are `ST_M
 
 `accept` (X←F) is registered off M-stage state. The queue decouples fetch from the backend so
 a fetch bubble and a backend stall do not serialise. Fetch pushes a bundle of up to FW
-instructions a cycle (`SMOLRV64_FW`, 2 x IW unless set, up to 8: 6 at IW=3) and dispatch pops a
-group of up to IW, so the queue refills faster than dispatch drains it. Depth `SMOLRV64_QD` (16),
+instructions a cycle (`SMOLRV64_FW`, 6, up to 8; at IW=4 a width of 8 took 0.09% more cycles
+over GB5's 77 SimPoints) and dispatch pops a group of up to IW, so the queue refills faster than dispatch drains it. Depth `SMOLRV64_QD` (16),
 at least 2 x FW: a bundle is pushed only with room for a whole one.
 
 ---
@@ -594,7 +594,7 @@ Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard belo
   of a difference) is `SEQW` = 9 bits (`SMOLRV64_SEQW`), so it orders a window of 2^(SEQW−1) = 256
   ops, and `SEQ_LIVE` = FW + QD + IW + `ROB_CAP` × IW, every op from the bundle register to the ROB
   head, must fit it. The ROB holds `ROB_CAP` = min(`ROB_ROWS`, ⌊(256 − FW − QD − IW) / IW⌋) rows
-  at once -- all 64 at IW=3 (`SEQ_LIVE` 217), 57 at IW=4 (256) -- and its `ready` and dispatch's
+  at once -- all 64 at IW=3 (`SEQ_LIVE` 217), 57 at IW=4 (254) -- and its `ready` and dispatch's
   ROB credit both take the cap. Measured at IW=4 (2026-10-24): the 28 entries the cap leaves out
   cost GB5's 77 SimPoints 0.04% of their cycles (SQLite +0.61% the most) and the 60 M boot
   0.004%, where a 10-bit seqno costs every age compare a bit. An always-on check fatals when the
