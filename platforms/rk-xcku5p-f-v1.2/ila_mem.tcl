@@ -66,8 +66,9 @@ set waited 0
 while {1} {
     wait_on_hw_ila -timeout 5 $p_ila
     catch {refresh_hw_device -quiet -update_hw_probes false [current_hw_device]}
-    if {[catch {set st [get_property CORE_STATUS $p_ila]}]} { set st "armed" }
-    if {[string match -nocase "*full*" $st] || [string match -nocase "*trigger*" $st]} { break }
+    # run_hw_ila armed the core above; it reads IDLE again once its capture is complete
+    set st [get_property STATUS.CORE_STATUS $p_ila]
+    if {[string equal -nocase $st "IDLE"]} { break }
     incr waited 5
     if {$max_hours > 0 && $waited >= $max_hours * 3600} {
         puts "MEM-NO-TRIGGER after ${max_hours}h: the port never stopped with something owed."
