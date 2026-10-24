@@ -3,10 +3,10 @@
 //     -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDSIGNAL \
 //     -GSD_SLOW_HALF=3 -GSD_FAST_HALF=4 -GSD_INIT_TICKS=20   (halves >=3: miso_sync margin) \
 //     --top-module virtio_blk src/virtio_blk.v src/sd_spi_host.v \
-//     src/axi_single_beat_master.v src/virtio_blk_tb.cpp
+//     src/dma_master.v src/virtio_blk_tb.cpp
 //   ./obj_dir_blk/Vvirtio_blk
 //
-// Drives virtio_blk with a behavioral AXI slave (sparse 64-bit word DDR) for
+// Drives virtio_blk with a behavioral AXI slave (sparse 64-bit word DDR, bursts) for
 // the vring + guest buffers, and the behavioral SD card (sd_card_model.h) on
 // the SD pins as the persistent backing store. Exercises the full path:
 //   1. T_IN  (read):  SD sector -> block buffer -> guest DATA buffer
@@ -47,17 +47,20 @@ static uint16_t mem_rd16(uint32_t a){ return mem_rd_byte(a) | (mem_rd_byte(a+1)<
 static uint32_t mem_rd32(uint32_t a){ uint32_t v=0; for(int i=0;i<4;i++) v|=mem_rd_byte(a+i)<<(8*i); return v;}
 
 static Vvirtio_blk* dut;
+static void check(bool ok, const char* m);
 static SpiSdCard card;
 static bool card_in = false;    // the slot is empty until Test 0 is done
-static bool s_rvalid = false; static uint64_t s_rdata = 0;
+// the AXI slave: one read burst and one write burst at a time, a beat a cycle
+static bool s_rvalid = false; static uint32_t r_addr = 0; static int r_left = 0;
+static bool w_act = false; static uint32_t w_addr = 0; static int w_left = 0;
 static bool s_bvalid = false;
 
 static void tick() {
     dut->sd_miso = card_in ? (card.miso & 1) : 1;   // an empty slot: MISO pulled high
 
-    dut->m_axi_arready = 1; dut->m_axi_awready = 1; dut->m_axi_wready = 1;
-    dut->m_axi_rvalid = s_rvalid; dut->m_axi_rdata = s_rdata;
-    dut->m_axi_rresp = 0; dut->m_axi_rlast = 1; dut->m_axi_rid = 1;
+    dut->m_axi_arready = !s_rvalid; dut->m_axi_awready = !w_act && !s_bvalid; dut->m_axi_wready = w_act;
+    dut->m_axi_rvalid = s_rvalid; dut->m_axi_rdata = mem_rd64(r_addr);
+    dut->m_axi_rresp = 0; dut->m_axi_rlast = r_left == 0; dut->m_axi_rid = 1;
     dut->m_axi_bvalid = s_bvalid; dut->m_axi_bresp = 0; dut->m_axi_bid = 1;
     dut->clock = 0; dut->eval();
 
@@ -67,14 +70,20 @@ static void tick() {
     bool r_hs  = dut->m_axi_rvalid  && dut->m_axi_rready;
     bool b_hs  = dut->m_axi_bvalid  && dut->m_axi_bready;
     uint32_t araddr = dut->m_axi_araddr, awaddr = dut->m_axi_awaddr;
-    uint64_t wdata = dut->m_axi_wdata; uint8_t wstrb = dut->m_axi_wstrb;
+    int arlen = dut->m_axi_arlen, awlen = dut->m_axi_awlen;
+    uint64_t wdata = dut->m_axi_wdata; uint8_t wstrb = dut->m_axi_wstrb; bool wlast = dut->m_axi_wlast;
 
     dut->clock = 1; dut->eval();
 
-    if (r_hs) s_rvalid = false;
-    if (ar_hs && !s_rvalid) { s_rdata = mem_rd64(araddr); s_rvalid = true; }
+    if (r_hs) { if (r_left == 0) s_rvalid = false; else { r_left--; r_addr += 8; } }
+    if (ar_hs) { r_addr = araddr; r_left = arlen; s_rvalid = true; }
     if (b_hs) s_bvalid = false;
-    if (aw_hs && w_hs && !s_bvalid) { mem_wr64(awaddr, wdata, wstrb); s_bvalid = true; }
+    if (aw_hs) { w_act = true; w_addr = awaddr; w_left = awlen; }
+    if (w_hs) {
+        mem_wr64(w_addr, wdata, wstrb); w_addr += 8;
+        check(wlast == (w_left == 0), "a write burst's wlast is not on its last beat");
+        if (wlast) { w_act = false; s_bvalid = true; } else w_left--;
+    }
 
     if (card_in) card.clock_edge(dut->sd_sck, dut->sd_cs_n, dut->sd_mosi);
 }

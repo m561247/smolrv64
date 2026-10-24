@@ -49,7 +49,7 @@ cxx() {
 res=$( { ls tb_*.v | xargs -P 8 -I{} bash -c 'one {}';
          cxx sd_spi_host_tb sd_spi_host -GSLOW_HALF=3 -GFAST_HALF=4 -GINIT_BYTES=4 sd_spi_host.v sd_spi_host_tb.cpp;
          cxx virtio_blk_tb virtio_blk -GSD_SLOW_HALF=3 -GSD_FAST_HALF=4 -GSD_INIT_TICKS=20 \
-             virtio_blk.v sd_spi_host.v axi_single_beat_master.v virtio_blk_tb.cpp; } | sort)
+             virtio_blk.v sd_spi_host.v dma_master.v virtio_blk_tb.cpp; } | sort)
 echo "$res" | grep -v ' PASS$'
 echo "----"
 echo "tb pass=$(echo "$res" | grep -c ' PASS$') / $(echo "$res" | grep -c .)"

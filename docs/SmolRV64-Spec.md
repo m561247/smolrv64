@@ -1820,9 +1820,15 @@ flight; TX fetches the next frame word while the current one is byte-written int
 engine. Before this every RX byte was its own AXI transaction (1,518 round trips per
 1500-byte frame) and every TX word was fetched and then copied in series. `tb_virtio_net`
 at the DDR latencies measured on the board (reads 28, writes 15): RX 31,919 -> 3,953
-cycles per 1500-byte frame, TX 7,839 -> 6,534 (RX 4,018 with the flag re-read below). The
-AXI master is still single-beat; a burst master is the next step if the link, not the
-device, stops being the limit. **The RX engine holds eight 2 KiB slots** (2026-09-05): a
+cycles per 1500-byte frame, TX 7,839 -> 6,534 (RX 4,018 with the flag re-read below).
+**Each virtio device's DMA port is `dma_master`** (2026-10-24): one command at a time. A
+payload's words (blk's sectors, net's frames) are STREAM accesses through its 64-byte line
+buffer: a read fills it with one 8-beat burst, writes merge into it under their strobes and
+are answered at once, and its bytes go out as one masked 8-beat burst before any command that
+is not a stream write to the same line. Everything else (rings, descriptors, status) is one
+beat, after the buffer has gone out and with its read line dropped, so a payload is in memory
+before its used-ring write is answered. `tb_virtio_net` at the same latencies: TX 6,534 ->
+2,631 cycles per 1500-byte frame, RX 4,018 -> 2,469. **The RX engine holds eight 2 KiB slots** (2026-09-05): a
 frame is captured only if its first byte finds its slot free, the decision is never
 revisited, and every declined frame is counted (busy, FCS-bad, over-long). The single-buffered
 engine let the backend's ack land mid-frame and then committed the frame's TAIL as a good
@@ -2304,7 +2310,7 @@ from the checkpoint's first instruction.
 | lint | `src/lint.sh` | `lint: clean` |
 | riscv-tests | `core/run-vl.sh` | `pass=240 fail=0` |
 | directed tests, for what riscv-tests never does (a misaligned AMO; a counter overflow, Sscofpmf) | `core/run-directed.sh` (after `run-vl.sh`) | `PASS` for every test in `core/directed/` |
-| unit benches of the shared blocks and devices, under Verilator (the two C++-driven benches, the SD-SPI host and virtio_blk, included) | `src/run-tb.sh` | `tb pass=22 / 22` |
+| unit benches of the shared blocks and devices, under Verilator (the two C++-driven benches, the SD-SPI host and virtio_blk, included) | `src/run-tb.sh` | `tb pass=23 / 23` |
 | Linux lockstep vs simmerv | `CYC=300000000 core/run-cosim-linux.sh` | no assertion, no divergence; the retire count against `cosim-expected.txt`; every plain RAM store byte-exact (below) |
 | the D$ | `core/run-dcache-tb.sh` | `DCACHE-TB: 48 of 48 runs pass` (6 seeds × in-order/reordering memory × default, slow, fast-with-stores, remap-heavy; every outcome occurs; memory equals gold after every clean) |
 | `rv_cache`, both shapes (no longer instantiated) | `core/run-cache-tb.sh` | PASS at LAT=4/20/100/200 |

@@ -80,7 +80,7 @@ if stale || [ "${BUILD:-0}" = 1 ]; then
       rv_soc_top.v smolrv64_core.v smolrv64_pending.v smolrv64_bankq.v smolrv64_mwram.v smolrv64_frontend.v smolrv64_fring.v smolrv64_predictor.v smolrv64_exec.v smolrv64_lsu.v \
       $PROBE_SRCS ../src/alu.v ../src/smolrv64_sdpram.v ../src/smolrv64_plic_arbiter.v \
       -f ../src/cvfpu_sources.f \
-      ../src/virtio_blk.v ../src/virtio_mmio.v ../src/sd_spi_host.v ../src/axi_single_beat_master.v ../src/sd_dpi.cpp \
+      ../src/virtio_blk.v ../src/virtio_mmio.v ../src/sd_spi_host.v ../src/dma_master.v ../src/sd_dpi.cpp \
       ../src/ckpt_dpi.cpp tb_smolrv64_linux.v > $OBJ/build.log 2>&1
    if [ $? -ne 0 ]; then echo "BUILD FAILED:"; grep -E '%Error' $OBJ/build.log | head -20; exit 1; fi
    echo "$want" > "$STAMP"

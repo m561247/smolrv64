@@ -245,6 +245,7 @@ module virtio_net #(
    reg        dma_cmd_valid;
    wire       dma_cmd_ready;
    reg        dma_cmd_write;
+   reg        dma_cmd_stream;      // a frame's words: dma_master's line buffer
    reg [31:0] dma_cmd_addr;
    reg [63:0] dma_cmd_wdata;
    reg [ 7:0] dma_cmd_wstrb;
@@ -333,11 +334,13 @@ module virtio_net #(
    assign debug_last_ring_word_lo = last_ring_word[31:0];
    assign debug_last_ring_word_hi = last_ring_word[63:32];
 
+   // A buffer's words -- a TX frame's reads, an RX frame's writes -- stream through dma_master's line buffer.
    task start_read64;
       input [63:0] addr;
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b0;
+         dma_cmd_stream <= 1'b1;
          if (!dram_ok(addr)) $fatal(1, "virtio_net: DMA address %h is outside DRAM", addr);
          dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= 64'd0;
@@ -353,6 +356,7 @@ module virtio_net #(
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b0;
+         dma_cmd_stream <= 1'b0;
          if (!ok) $fatal(1, "virtio_net: a ring base is outside DRAM (AXI %h)", a);
          dma_cmd_addr <= a;
          dma_cmd_wdata <= 64'd0;
@@ -368,6 +372,7 @@ module virtio_net #(
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b1;
+         dma_cmd_stream <= 1'b0;
          if (!ok) $fatal(1, "virtio_net: a ring base is outside DRAM (AXI %h)", a);
          dma_cmd_addr <= a;
          dma_cmd_wdata <= data;
@@ -382,6 +387,7 @@ module virtio_net #(
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b1;
+         dma_cmd_stream <= 1'b1;
          if (!dram_ok(addr)) $fatal(1, "virtio_net: DMA address %h is outside DRAM", addr);
          dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= data;
@@ -866,12 +872,13 @@ module virtio_net #(
       end
    end
 
-   axi_single_beat_master dma_master(
+   dma_master u_dma(
       .clock          (clock),
       .reset          (reset),
       .cmd_valid      (dma_cmd_valid),
       .cmd_ready      (dma_cmd_ready),
       .cmd_write      (dma_cmd_write),
+      .cmd_stream     (dma_cmd_stream),
       .cmd_addr       (dma_cmd_addr),
       .cmd_wdata      (dma_cmd_wdata),
       .cmd_wstrb      (dma_cmd_wstrb),

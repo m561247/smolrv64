@@ -427,14 +427,16 @@ module tb;
       .m_axi_rid(ax_rid), .m_axi_rdata(ax_rdata), .m_axi_rresp(ax_rresp), .m_axi_rlast(ax_rlast),
       .m_axi_rvalid(ax_rvalid), .m_axi_rready(ax_rready));
 
-   // behavioral single-beat AXI slave into lram[], COHERENT: before a beat moves, its line is
-   // snooped through rv_soc_top's DMA port (the D$ cleans it for a read, flushes it for a write,
-   // as ddr4_port_axi has it done on the board); a write moves into lram, and into simmerv (cosim_dma_write,
-   // drained between the two retires it separates), at the answer, and its release follows a cycle
-   // later -- until then the D$ starts no fill of the line. ax_*addr is the DDR byte offset
-   // (src/dram_window.vh), so its line is the snoop's.
-   reg axi_rvalid, axi_bvalid;  reg [63:0] axi_rdata;  integer ka;
-   reg [63:0] ar_line, aw_line;  reg [9:0] ar_bp, aw_bp;  integer n_dma_rd = 0, n_dma_wr = 0, n_snoop = 0;
+   // behavioral AXI slave into lram[], a burst within one line at a time, COHERENT: before the
+   // burst moves, its line is snooped through rv_soc_top's DMA port (the D$ cleans it for a read,
+   // flushes it for a write, as ddr4_port_axi has it done on the board). A read takes the line
+   // whole as its address is taken; a write's beats move into lram, and into simmerv
+   // (cosim_dma_write, drained between the two retires it separates), as they come, and its release
+   // follows its last -- until then the D$ starts no fill of the line. ax_*addr is the DDR byte
+   // offset (src/dram_window.vh), so its line is the snoop's.
+   reg axi_bvalid, r_busy = 1'b0, w_act = 1'b0;  reg [511:0] r_ln;  reg [2:0] r_bt, r_left, w_bt, w_left;
+   reg [31:0] w_a;  integer ka;
+   reg [63:0] ar_line, aw_line;  integer n_dma_rd = 0, n_dma_wr = 0, n_snoop = 0;
    // idle, a read's, a write's, the agent's burst, the agent's look at its ack word
    localparam [2:0] SN_I = 3'd0, SN_R = 3'd1, SN_W = 3'd2, SN_A = 3'd3, SN_P = 3'd4;
    reg  [2:0]  sn_st = SN_I;
@@ -442,11 +444,11 @@ module tb;
    assign sn_p_valid = sn_req;  assign sn_p_line = sn_lq;  assign sn_p_keep = sn_kq;  assign sn_p_rel = sn_rel_q;
    wire        ag_due, ag_poll;                         // the DMA agent's burst is due, its ack's look (below)
    wire [25:0] ag_line, ag_ackl;
-   assign ax_arready = (sn_st == SN_R) && sn_got && !axi_rvalid;
-   assign ax_awready = (sn_st == SN_W) && sn_got && !axi_bvalid;
-   assign ax_wready  = ax_awready;
-   assign ax_rvalid = axi_rvalid; assign ax_rdata = axi_rdata; assign ax_rresp = 2'd0;
-   assign ax_rlast = 1'b1; assign ax_rid = 3'd1;
+   assign ax_arready = (sn_st == SN_R) && sn_got && !r_busy;
+   assign ax_awready = (sn_st == SN_W) && sn_got && !w_act && !axi_bvalid;
+   assign ax_wready  = w_act;
+   assign ax_rvalid = r_busy; assign ax_rdata = r_ln[{r_bt, 6'd0} +: 64]; assign ax_rresp = 2'd0;
+   assign ax_rlast = r_left == 3'd0; assign ax_rid = 3'd1;
    assign ax_bvalid = axi_bvalid; assign ax_bresp = 2'd0; assign ax_bid = 3'd1;
 `ifdef SMOLRV64_COSIM
    import "DPI-C" function void cosim_dma_write(input longint off, input longint data, input byte strb);
@@ -455,9 +457,9 @@ module tb;
       sn_rel_q <= 1'b0;
       if (reset) begin sn_st <= SN_I;  sn_req <= 1'b0;  sn_got <= 1'b0; end
       else case (sn_st)
-         SN_I: if (ax_arvalid && !axi_rvalid) begin
+         SN_I: if (ax_arvalid && !r_busy) begin
                   sn_st <= SN_R;  sn_req <= 1'b1;  sn_kq <= 1'b1;  sn_lq <= ax_araddr[31:6];
-               end else if (ax_awvalid && ax_wvalid && !axi_bvalid) begin
+               end else if (ax_awvalid && !axi_bvalid) begin
                   sn_st <= SN_W;  sn_req <= 1'b1;  sn_kq <= 1'b0;  sn_lq <= ax_awaddr[31:6];
                end else if (ag_due) begin
                   sn_st <= SN_A;  sn_req <= 1'b1;  sn_kq <= 1'b0;  sn_lq <= ag_line;
@@ -465,36 +467,48 @@ module tb;
                   sn_st <= SN_P;  sn_req <= 1'b1;  sn_kq <= 1'b1;  sn_lq <= ag_ackl;
                end
          default: if (sn_p_ack) begin sn_req <= 1'b0;  sn_got <= 1'b1;  n_snoop = n_snoop + 1; end
-                  else if (sn_got) begin                 // the line moves this cycle: done
+                  else if (sn_got && (sn_st != SN_W || (ax_wvalid && ax_wready && ax_wlast))) begin   // the line moved: done
                      sn_st <= SN_I;  sn_got <= 1'b0;  sn_rel_q <= !sn_kq;
                   end
       endcase
    end
    always @(posedge clk) begin
-      if (reset) begin axi_rvalid<=1'b0; axi_bvalid<=1'b0; end
+      if (reset) begin r_busy <= 1'b0;  w_act <= 1'b0;  axi_bvalid <= 1'b0; end
       else begin
          if (ax_arvalid && ax_arready) begin
             ar_line = ((ax_araddr & (DDR_BYTES-1)) >> 6) & (NLINES-1);
-            ar_bp   = (ax_araddr & 6'h3f) << 3;
-            axi_rdata <= lram[ar_line][ar_bp +: 64];
-            axi_rvalid <= 1'b1;  n_dma_rd = n_dma_rd + 1;
-         end else if (axi_rvalid && ax_rready) axi_rvalid <= 1'b0;
-         if (ax_awvalid && ax_awready && ax_wvalid && ax_wready) begin
+            r_ln <= lram[ar_line];  r_bt <= ax_araddr[5:3];  r_left <= ax_arlen[2:0];
+            r_busy <= 1'b1;  n_dma_rd = n_dma_rd + 1;
+         end else if (r_busy && ax_rready) begin
+            if (r_left == 3'd0) r_busy <= 1'b0;
+            r_bt <= r_bt + 3'd1;  r_left <= r_left - 3'd1;
+         end
+         if (ax_awvalid && ax_awready) begin
             aw_line = ((ax_awaddr & (DDR_BYTES-1)) >> 6) & (NLINES-1);
-            aw_bp   = (ax_awaddr & 6'h3f) << 3;
-            for (ka=0;ka<8;ka=ka+1) if (ax_wstrb[ka]) lram[aw_line][aw_bp + ka*8 +: 8] <= ax_wdata[ka*8 +: 8];
+            w_a <= ax_awaddr;  w_bt <= ax_awaddr[5:3];  w_left <= ax_awlen[2:0];  w_act <= 1'b1;
+         end
+         if (ax_wvalid && ax_wready) begin
+            for (ka=0;ka<8;ka=ka+1) if (ax_wstrb[ka]) lram[aw_line][{w_bt, 6'd0} + ka*8 +: 8] <= ax_wdata[ka*8 +: 8];
 `ifdef SMOLRV64_COSIM
-            cosim_dma_write({32'd0, ax_awaddr}, ax_wdata, ax_wstrb);   // mirror into simmerv
+            if (ax_wstrb != 8'd0)
+               cosim_dma_write({32'd0, w_a[31:3], 3'b000}, ax_wdata, ax_wstrb);   // mirror into simmerv
 `endif
-            axi_bvalid <= 1'b1;  n_dma_wr = n_dma_wr + 1;
+            w_a <= w_a + 32'd8;  w_bt <= w_bt + 3'd1;  w_left <= w_left - 3'd1;
+            if (ax_wlast) begin w_act <= 1'b0;  axi_bvalid <= 1'b1;  n_dma_wr = n_dma_wr + 1; end
          end else if (axi_bvalid && ax_bready) axi_bvalid <= 1'b0;
       end
    end
    always @(posedge clk) if (!reset) begin
       if (sn_st == SN_R && sn_got && !(ax_arvalid && ax_arready))
          $fatal(1, "tb: the DMA read's snoop answered, but its AR is gone");
-      if (sn_st == SN_W && sn_got && !(ax_awvalid && ax_wvalid))
-         $fatal(1, "tb: the DMA write's snoop answered, but its beat is gone");
+      if (sn_st == SN_W && sn_got && !w_act && !ax_awvalid)
+         $fatal(1, "tb: the DMA write's snoop answered, but its AW is gone");
+      if (ax_arvalid && ({1'b0, ax_araddr[5:3]} + ax_arlen[3:0] > 4'd7 || ax_arlen[7:3] != 5'd0))
+         $fatal(1, "tb: a DMA read burst (addr %h len %0d) that is not within one line", ax_araddr, ax_arlen);
+      if (ax_awvalid && ({1'b0, ax_awaddr[5:3]} + ax_awlen[3:0] > 4'd7 || ax_awlen[7:3] != 5'd0))
+         $fatal(1, "tb: a DMA write burst (addr %h len %0d) that is not within one line", ax_awaddr, ax_awlen);
+      if (ax_wvalid && ax_wready && ax_wlast != (w_left == 3'd0))
+         $fatal(1, "tb: a DMA write burst's wlast with %0d beats left", w_left);
    end
 
 

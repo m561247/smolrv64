@@ -61,35 +61,45 @@ module tb;
       .m_axi_arid(arid), .m_axi_araddr(araddr), .m_axi_arlen(arlen), .m_axi_arsize(arsize), .m_axi_arburst(arburst),
       .m_axi_arlock(arlock), .m_axi_arcache(arcache), .m_axi_arprot(arprot), .m_axi_arqos(arqos),
       .m_axi_arvalid(arvalid), .m_axi_arready(arready),
-      .m_axi_rid(3'd0), .m_axi_rdata(rdata), .m_axi_rresp(2'b00), .m_axi_rlast(1'b1), .m_axi_rvalid(rvalid), .m_axi_rready(rready));
+      .m_axi_rid(3'd0), .m_axi_rdata(rdata), .m_axi_rresp(2'b00), .m_axi_rlast(rlast), .m_axi_rvalid(rvalid), .m_axi_rready(rready));
 
-   // ---- AXI memory: 2 MiB of 64-bit words, one transaction at a time, DDR-like latency ----
+   // ---- AXI memory: 2 MiB of 64-bit words, one read and one write burst at a time, DDR-like latency ----
    reg [63:0] mem [0:(1<<18)-1];
    integer mi; initial for (mi = 0; mi < (1<<18); mi = mi + 1) mem[mi] = 64'hEEEE_EEEE_EEEE_EEEE;
    function [63:0] merge(input [63:0] old, input [63:0] d, input [7:0] s);
       integer b; begin merge = old; for (b = 0; b < 8; b = b + 1) if (s[b]) merge[b*8 +: 8] = d[b*8 +: 8]; end
    endfunction
-   reg [31:0] wa; reg [63:0] wd; reg [7:0] ws; reg aw_got = 0, w_got = 0; integer wcnt = 0, rcnt = 0;
+   reg [31:0] wa, ra; reg [7:0] wleft, rleft; reg aw_got = 0, w_end = 0, r_busy = 0, rlast = 0;
+   integer wcnt = 0, rcnt = 0;
    reg jit = 0;
    `TB_RAND(vrnd, vrs)
    function integer jitter(input integer base); begin jitter = jit ? base + ($urandom % 9) : base; end endfunction
+   function jok(input dummy); begin jok = !jit || ($urandom % 3) != 0; end endfunction
    integer n_wr = 0, n_rd = 0;
    always @(posedge clk) begin
-      awready <= 1'b0; wready <= 1'b0; bvalid <= 1'b0; arready <= 1'b0; rvalid <= 1'b0;
-      if (awvalid && !aw_got && !awready && (!jit || ($urandom % 3) != 0)) begin wa <= awaddr; aw_got <= 1'b1; awready <= 1'b1; end
-      if (wvalid && !w_got && !wready && (!jit || ($urandom % 3) != 0))    begin wd <= wdata; ws <= wstrb; w_got <= 1'b1; wready <= 1'b1; end
-      if (aw_got && w_got && wcnt == 0) wcnt <= jitter(WLAT);
-      if (wcnt > 1) wcnt <= wcnt - 1;
-      else if (wcnt == 1) begin
-         mem[wa[20:3]] <= merge(mem[wa[20:3]], wd, ws); n_wr <= n_wr + 1;
-         bvalid <= 1'b1; aw_got <= 1'b0; w_got <= 1'b0; wcnt <= 0;
+      awready <= 1'b0; wready <= 1'b0; bvalid <= 1'b0; arready <= 1'b0;
+      // write: the address, its beats as they come (each one into memory), B WLAT after the last
+      if (awvalid && !aw_got && !awready && jok(0)) begin wa <= awaddr; wleft <= awlen; aw_got <= 1'b1; awready <= 1'b1; end
+      if (wvalid && wready) begin
+         mem[wa[20:3]] <= merge(mem[wa[20:3]], wdata, wstrb); wa <= wa + 32'd8; wleft <= wleft - 8'd1;
+         if (wlast != (wleft == 8'd0)) $fatal(1, "a write burst's wlast at %0d beats left", wleft);
+         if (wlast) begin w_end <= 1'b1; wcnt <= jitter(WLAT); end
       end
-      if (arvalid && rcnt == 0 && !arready && (!jit || ($urandom % 3) != 0)) begin arready <= 1'b1; rcnt <= jitter(RLAT); rdata <= mem[araddr[20:3]]; end
+      if (aw_got && !w_end && !(wvalid && wready && wlast) && jok(0)) wready <= 1'b1;
+      if (wcnt > 1) wcnt <= wcnt - 1;
+      else if (wcnt == 1) begin bvalid <= 1'b1; aw_got <= 1'b0; w_end <= 1'b0; wcnt <= 0; n_wr <= n_wr + 1; end
+      // read: the address, RLAT, then the burst's beats, a gap now and then
+      if (arvalid && !r_busy && !arready && jok(0)) begin arready <= 1'b1; ra <= araddr; rleft <= arlen; rcnt <= jitter(RLAT); r_busy <= 1'b1; end
+      if (rvalid && rready) begin
+         rvalid <= 1'b0; ra <= ra + 32'd8; rleft <= rleft - 8'd1;
+         if (rleft == 8'd0) begin r_busy <= 1'b0; n_rd <= n_rd + 1; end
+         else rcnt <= jok(0) ? 1 : 2;
+      end
+      if (rcnt > 1) rcnt <= rcnt - 1;
+      else if (rcnt == 1) begin rvalid <= 1'b1; rdata <= mem[ra[20:3]]; rlast <= rleft == 8'd0; rcnt <= 0; end
       // the bench's DRAM is 2 MiB at physical 0x1_0000_0000, AXI 0x8000_0000 (src/dram_window.vh)
       if ((awvalid && awaddr[31:21] != 11'h400) || (arvalid && araddr[31:21] != 11'h400))
          $fatal(1, "DMA outside the bench's DRAM: AXI aw %h ar %h", awaddr, araddr);
-      if (rcnt > 1) rcnt <= rcnt - 1;
-      else if (rcnt == 1) begin rvalid <= 1'b1; rcnt <= 0; n_rd <= n_rd + 1; end
    end
    // byte access helpers for the tb
    task put8(input [31:0] a, input [7:0] v);  begin mem[a[20:3]][a[2:0]*8 +: 8] = v; end endtask

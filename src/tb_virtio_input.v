@@ -215,12 +215,12 @@ module tb_virtio_input;
       end
    endtask
 
-   // The motion stream that runs alongside the terminal vectors.
-   reg motion_go = 1'b0, motion_done = 1'b0;
+   // The motion stream that runs alongside the terminal vectors, until they are done.
+   reg motion_go = 1'b0, motion_done = 1'b0, term_done = 1'b0;
    initial begin : motion
       integer m;  reg [15:0] v;
       wait (motion_go);
-      for (m = 0; m < 300; m = m + 1) begin
+      for (m = 0; !term_done; m = m + 1) begin
          v = 16'd137 * m[15:0] - 16'd20000;
          hid_event(2'd2, m % 3 == 2 ? 10'd8 : {9'd0, m[0]}, v);
       end
@@ -290,17 +290,21 @@ module tb_virtio_input;
             end
             if (n_in > 0) begin
                for (k = 0; k < n_in; k = k + 1) send_byte(in_bytes[k]);
-               repeat (TMO + 200) @(negedge clk);   // one read() of simmerv's: let the ESC timeout settle it
+               // one read() of simmerv's: the device drains what it has, then the ESC timeout settles
+               // the rest (the timer runs from the byte's turn, not its arrival)
+               wait (n_got >= n_want);
+               repeat (TMO + 200) @(negedge clk);
                n_cases = n_cases + 1;
             end
          end
       end
       $fclose(fd);
-      wait (motion_done);
-      if (n_got_rel == 0 || n_got_rel == n_want_rel) begin
-         $display("FAIL: %0d of %0d HID events had arrived when the terminal finished: no interleaving", n_got_rel, n_want_rel);
+      term_done = 1'b1;
+      if (n_got_rel == 0) begin
+         $display("FAIL: no HID event had arrived when the terminal finished: no interleaving");
          errors = errors + 1;
       end
+      wait (motion_done);
 
       // ---- the HID line alone: keys and buttons, repeats, SYN, motion, framing errors ----
       hid_event(2'd1, 10'd183, 16'd1);   hid_event(2'd1, 10'd183, 16'd2);   hid_event(2'd1, 10'd183, 16'd0);

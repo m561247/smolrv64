@@ -2,8 +2,8 @@
 // ddr4_port_axi -- the DMA masters' AXI4 port (on ui_clk, after the device arbiters) as a requester
 // of ddr4_ctl, coherent with the D$ (docs/PLAN-2026-10-21-memory-system.md).
 //
-// Every transaction the masters make lies within one 64-byte line: axi_single_beat_master's one
-// 8-byte beat (virtio-blk, virtio-net, virtio-input) and vga_scanout's eight-beat line. So a
+// Every transaction the masters make lies within one 64-byte line: dma_master's one 8-byte beat or
+// eight-beat line (virtio-blk, virtio-net, virtio-input) and vga_scanout's eight-beat line. So a
 // transaction is one line request, and anything else asserts. A read engine and a write engine
 // each take one transaction at a time, each with its line buffer (tag 12: the read's, 14: the
 // write's): a read's line lands in its buffer and its beats go back on R; a write's beats gather

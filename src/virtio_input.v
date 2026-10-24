@@ -403,9 +403,9 @@ module virtio_input #(
    reg  [31:0] dma_cmd_addr;
    reg  [63:0] dma_cmd_wdata;
    reg  [ 7:0] dma_cmd_wstrb;
-   axi_single_beat_master dma_master (
+   dma_master u_dma (
       .clock(clock), .reset(reset),
-      .cmd_valid(dma_cmd_valid), .cmd_ready(dma_cmd_ready), .cmd_write(dma_cmd_write),
+      .cmd_valid(dma_cmd_valid), .cmd_ready(dma_cmd_ready), .cmd_write(dma_cmd_write), .cmd_stream(1'b0),
       .cmd_addr(dma_cmd_addr), .cmd_wdata(dma_cmd_wdata), .cmd_wstrb(dma_cmd_wstrb),
       .rsp_valid(dma_rsp_valid), .rsp_rdata(dma_rsp_rdata), .rsp_error(dma_rsp_error),
       .m_axi_awid(m_axi_awid), .m_axi_awaddr(m_axi_awaddr), .m_axi_awlen(m_axi_awlen),

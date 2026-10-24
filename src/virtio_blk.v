@@ -191,6 +191,7 @@ module virtio_blk #(
    reg        dma_cmd_valid;
    wire       dma_cmd_ready;
    reg        dma_cmd_write;
+   reg        dma_cmd_stream;
    reg [31:0] dma_cmd_addr;
    reg [63:0] dma_cmd_wdata;
    reg [ 7:0] dma_cmd_wstrb;
@@ -271,11 +272,14 @@ module virtio_blk #(
    wire queue_configured = queue_ready && queue_num != 32'd0 &&
                            dram_ok(queue_desc) && dram_ok(queue_driver) && dram_ok(queue_device);
 
+   // stream: a sector's words in guest memory (dma_master); 0 for the rings, descriptors and status
    task start_read64;
+      input        stream;
       input [63:0] addr;
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b0;
+         dma_cmd_stream <= stream;
          if (!dram_ok(addr)) $fatal(1, "virtio_blk: DMA address %h is outside DRAM", addr);
          dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= 64'd0;
@@ -284,12 +288,14 @@ module virtio_blk #(
    endtask
 
    task start_write;
+      input        stream;
       input [63:0] addr;
       input [63:0] data;
       input [7:0]  strobe;
       begin
          dma_cmd_valid <= 1'b1;
          dma_cmd_write <= 1'b1;
+         dma_cmd_stream <= stream;
          if (!dram_ok(addr)) $fatal(1, "virtio_blk: DMA address %h is outside DRAM", addr);
          dma_cmd_addr <= dram_axi(addr);
          dma_cmd_wdata <= data;
@@ -357,7 +363,7 @@ module virtio_blk #(
 
            S_READ_AVAIL: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_driver);
+                 start_read64(1'b0, queue_driver);
                  state <= S_WAIT_AVAIL;
               end
            end
@@ -375,7 +381,7 @@ module virtio_blk #(
 
            S_READ_RING: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_driver + 64'd4 + {47'd0, avail_slot, 1'b0});
+                 start_read64(1'b0, queue_driver + 64'd4 + {47'd0, avail_slot, 1'b0});
                  state <= S_WAIT_RING;
               end
            end
@@ -393,7 +399,7 @@ module virtio_blk #(
 
            S_READ_DESC0_ADDR: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_desc + {44'd0, head_desc, 4'd0});
+                 start_read64(1'b0, queue_desc + {44'd0, head_desc, 4'd0});
                  state <= S_WAIT_DESC0_ADDR;
               end
            end
@@ -405,7 +411,7 @@ module virtio_blk #(
            end
            S_READ_DESC0_INFO: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_desc + {44'd0, head_desc, 4'd8});
+                 start_read64(1'b0, queue_desc + {44'd0, head_desc, 4'd8});
                  state <= S_WAIT_DESC0_INFO;
               end
            end
@@ -432,7 +438,7 @@ module virtio_blk #(
 
            S_READ_DESC1_ADDR: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_desc + {44'd0, desc1_index, 4'd0});
+                 start_read64(1'b0, queue_desc + {44'd0, desc1_index, 4'd0});
                  state <= S_WAIT_DESC1_ADDR;
               end
            end
@@ -444,7 +450,7 @@ module virtio_blk #(
            end
            S_READ_DESC1_INFO: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_desc + {44'd0, desc1_index, 4'd8});
+                 start_read64(1'b0, queue_desc + {44'd0, desc1_index, 4'd8});
                  state <= S_WAIT_DESC1_INFO;
               end
            end
@@ -467,7 +473,7 @@ module virtio_blk #(
 
            S_READ_DESC2_ADDR: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_desc + {44'd0, desc2_index, 4'd0});
+                 start_read64(1'b0, queue_desc + {44'd0, desc2_index, 4'd0});
                  state <= S_WAIT_DESC2_ADDR;
               end
            end
@@ -479,7 +485,7 @@ module virtio_blk #(
            end
            S_READ_DESC2_INFO: begin
               if (dma_cmd_ready) begin
-                 start_read64(queue_desc + {44'd0, desc2_index, 4'd8});
+                 start_read64(1'b0, queue_desc + {44'd0, desc2_index, 4'd8});
                  state <= S_WAIT_DESC2_INFO;
               end
            end
@@ -496,7 +502,7 @@ module virtio_blk #(
 
            S_READ_HDR0: begin
               if (dma_cmd_ready) begin
-                 start_read64(desc0_addr);
+                 start_read64(1'b0, desc0_addr);
                  state <= S_WAIT_HDR0;
               end
            end
@@ -508,7 +514,7 @@ module virtio_blk #(
            end
            S_READ_HDR1: begin
               if (dma_cmd_ready) begin
-                 start_read64(desc0_addr + 64'd8);
+                 start_read64(1'b0, desc0_addr + 64'd8);
                  state <= S_WAIT_HDR1;
               end
            end
@@ -565,7 +571,7 @@ module virtio_blk #(
            end
            S_RD_WORD: begin
               if (dma_cmd_ready) begin
-                 start_write(guest_word_addr, sd_buf_rdata, 8'hff);
+                 start_write(1'b1, guest_word_addr, sd_buf_rdata, 8'hff);
                  state <= S_RD_WORD_W;
               end
            end
@@ -599,7 +605,7 @@ module virtio_blk #(
            end
            S_WR_WORD: begin
               if (dma_cmd_ready) begin
-                 start_read64(guest_word_addr);
+                 start_read64(1'b1, guest_word_addr);
                  state <= S_WR_WORD_W;
               end
            end
@@ -652,7 +658,7 @@ module virtio_blk #(
 
            S_WRITE_STATUS: begin
               if (dma_cmd_ready) begin
-                 start_write(desc2_addr,
+                 start_write(1'b0, desc2_addr,
                              write_shift({56'd0, status_byte}, desc2_addr[2:0]),
                              write_strobe(desc2_addr[2:0], 4'd1));
                  state <= S_WAIT_STATUS;
@@ -665,7 +671,7 @@ module virtio_blk #(
 
            S_WRITE_USED_ID: begin
               if (dma_cmd_ready) begin
-                 start_write(queue_device + 64'd4 + {45'd0, used_slot, 3'd0},
+                 start_write(1'b0, queue_device + 64'd4 + {45'd0, used_slot, 3'd0},
                              write_shift({48'd0, head_desc}, (queue_device[2:0] + 3'd4) & 3'h7),
                              write_strobe((queue_device[2:0] + 3'd4) & 3'h7, 4'd4));
                  state <= S_WAIT_USED_ID;
@@ -677,7 +683,7 @@ module virtio_blk #(
            end
            S_WRITE_USED_LEN: begin
               if (dma_cmd_ready) begin
-                 start_write(queue_device + 64'd8 + {45'd0, used_slot, 3'd0},
+                 start_write(1'b0, queue_device + 64'd8 + {45'd0, used_slot, 3'd0},
                              write_shift({32'd0, used_len}, queue_device[2:0]),
                              write_strobe(queue_device[2:0], 4'd4));
                  state <= S_WAIT_USED_LEN;
@@ -689,7 +695,7 @@ module virtio_blk #(
            end
            S_WRITE_USED_IDX: begin
               if (dma_cmd_ready) begin
-                 start_write(queue_device,
+                 start_write(1'b0, queue_device,
                              write_shift({32'd0, used_idx + 16'd1, 16'd0}, queue_device[2:0]),
                              write_strobe(queue_device[2:0], 4'd4));
                  state <= S_WAIT_USED_IDX;
@@ -720,12 +726,13 @@ module virtio_blk #(
       end
    end
 
-   axi_single_beat_master dma_master(
+   dma_master u_dma(
       .clock          (clock),
       .reset          (reset),
       .cmd_valid      (dma_cmd_valid),
       .cmd_ready      (dma_cmd_ready),
       .cmd_write      (dma_cmd_write),
+      .cmd_stream     (dma_cmd_stream),
       .cmd_addr       (dma_cmd_addr),
       .cmd_wdata      (dma_cmd_wdata),
       .cmd_wstrb      (dma_cmd_wstrb),
