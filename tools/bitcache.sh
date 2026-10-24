@@ -98,7 +98,8 @@ put)
     [ -f "$rpt" ] || rpt=$plat/$PROJ.runs/impl_1/${PROJ}_timing_summary_routed.rpt
     k=$(key "$plat")
     d=$BITCACHE/$k
-    [ -e "$d" ] && d=$d.$(date +%Y%m%d%H%M%S)          # a rebuild of the same key keeps both
+    prev=""
+    [ -e "$d" ] && { prev=$d; d=$d.$(date +%Y%m%d%H%M%S); }   # a rebuild of the same key keeps both
     mkdir -p "$d"
     cp "$bit" "$d/$PROJ.bit"
     [ -f "$rpt" ] && cp "$rpt" "$d/timing_summary.rpt"
@@ -117,7 +118,9 @@ put)
       echo "commit:  $commit"
       echo "tree:    $here"
       echo "built:   $(date '+%Y-%m-%d %H:%M:%S')"
-      echo "cid:     $(cat "$st/cid" 2>/dev/null || echo ?)"
+      # a re-bank of a key (make physopt's second pass) has no start record left: the key's first
+      # entry was built from the same sources
+      echo "cid:     $(cat "$st/cid" 2>/dev/null || sed -n 's/^cid: *//p' "$prev/meta.txt" 2>/dev/null | grep . || echo ?)"
       echo "wns:     ${wns:-?}"
       echo "met:     $(awk -v w="${wns:-x}" 'BEGIN{print (w ~ /^-?[0-9.]+$/ && w >= 0) ? "yes" : "NO"}')"
     } > "$d/meta.txt"
@@ -134,7 +137,8 @@ stampable)
     # Placed with the directive the gate's own build would use (PLACE_DIRECTIVE, as build.tcl reads
     # it): a directive moves placement, not the netlist, and a met build is met.
     cid=${1:?content id}
-    for d in $(ls -td "$BITCACHE"/*-iw3-div48-"${PLACE_DIRECTIVE:-AltSpreadLogic_medium}" 2>/dev/null); do
+    pl=${PLACE_DIRECTIVE:-AltSpreadLogic_medium}
+    for d in $(ls -td "$BITCACHE"/*-iw3-div48-"$pl" "$BITCACHE"/*-iw3-div48-"$pl".* 2>/dev/null); do
         grep -q "^cid: *$cid\$" "$d/meta.txt" 2>/dev/null || continue
         grep -q '^met: *yes' "$d/meta.txt" && [ -f "$d/routed.dcp" ] || continue
         extra=$(sed 's/=.*//' "$d/defines.txt" | grep -v -x -E 'MEM_BASEADDR|SOC_BOOT_HEX|PROBE_CLK_DIV8|SMOLRV64_HW|SMOLRV64_IW|SMOLRV64_GIT_COMMIT|SMOLRV64_GIT_DIRTY|SMOLRV64_BUILD_STAMP' || true)
