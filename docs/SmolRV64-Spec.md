@@ -1553,7 +1553,7 @@ Two independent `mmu` instances — **iTLB** in `smolrv64_core`, **dTLB** in `sm
 | PTW | reads through the D$ read port (§8); a miss fills through the D$ |
 | Superpages | 2 MiB / 1 GiB; misaligned superpage → fault |
 | Ssvnapot | level-0 NAPOT leaves recognised |
-| PA width | 56 bits produced (`AW`), 34 significant to the caches |
+| PA width | `PABITS` (`AW`): the bits of the DRAM's top, 33 at 4 GiB (`smolrv64_width.vh`). A TLB stores `PABITS - 12` bits of a page number (an installed page lies below the top); the walker decides the cap on the PTE's whole 44 |
 | Flush | `sfence.vma` and `satp` writes advance a 16-bit generation (`GB`); an entry hits only when it was installed in the current one (`tlb_g` = {installed, generation}, LUTRAM beside the entry). No entry is written on a flush; the arrays are cleared over `max(TLBN, L2N)` cycles at reset and when the generation wraps, and nothing hits or installs while they are |
 
 **No iTLB walk past a weak branch.** The core counts the conditionals dispatched on a weak
@@ -1868,11 +1868,11 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 274 | 10 412 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each; the immediate is stored as its low 32 bits, which it sign-extends (the queue's write asserts it), and a fetch fault's address as one bit, set for a straddler's pc+2 (`imm` and `fault_tval` are rebuilt from them) |
 | `ipend`, `fpend` | `smolrv64_pending` | 256, 128 | 1 | 384 | flops | readiness, a table per file indexed by {shard, index}: 23R, 16 that read both and let the number's file pick (the slots' rs1/rs2, 8; the lanes' operands, 8) and 7 of the FP table alone (the slots' rs3, 4; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 4 sets, 6 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
-| `u_pa` `wb[0..1].mem` | `smolrv64_mwram` (in `smolrv64_lq`) | 16 a bank | 56 | 1 792 | LUTRAM | the load queue's PA, a bank per writer (M's fill, the walker's answer), 3R (the start's entry, the landing's two candidates); `lvt` (a bit an entry, flops) names the writer |
+| `u_pa` `wb[0..1].mem` | `smolrv64_mwram` (in `smolrv64_lq`) | 16 a bank | 33 (`PABITS`) | 1 056 | LUTRAM | the load queue's PA, a bank per writer (M's fill, the walker's answer), 3R (the start's entry, the landing's two candidates); `lvt` (a bit an entry, flops) names the writer |
 | `pcm` | `smolrv64_lq` | 16 | 39 | 624 | LUTRAM | a load's PC: four banks by entry, 1W each at dispatch, 1R the fault pick; `pch` (16 × 8 flops) keeps its wait-table bits, which every entry reports |
 | `om` | `smolrv64_lq` | 16 | 16 | 256 | flops | the load queue's program order: an entry's row names the entries older than it, written at its allocation (the row the live entries, its column cleared); every "oldest of these" reads it |
 | `data` | `smolrv64_sq` | 32 | 64 | 2 048 | LUTRAM | the store queue's bytes: 1W (the landing, one entry a cycle), 2R (the handoff entry, a forward's store; the lockstep's record of the committing entry is a third, in simulation only) |
-| `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 56 | 3 584 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the handoff entry; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
+| `addr_m`, `addr_w` | `smolrv64_sq` | 32 each | 33 (`PABITS`) | 2 112 | LUTRAM | the store queue's PA: 1W each (M's fill, the walker's answer), 1R (the handoff entry; the lockstep's record a second, in simulation only); `addr_lv`, a bit per entry in flops, picks the copy |
 | `u_q` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_frontend`) | 8 x 2 | 179 | 2 864 | LUTRAM | a decoder a bank: the bundle register's slot landing in the bank is rotated to it raw and decoded there, so each bank writes its own decoder's record (`BYBANK`); the heads read it twice, in program order for the group rules and in lane order for the IR. The decoupling queue holds what decode cannot cheaply recompute (`QR_REC`, `QR_RECW = 2*PCW+PDW+SEQW+58`): the PC and the predicted next PC, the predict detail, the seq, the instruction expanded and its RVC bit, the fault, the illegal and static-mispredict verdicts, and the dispatch class `gc`; each lane's head decoder rebuilds the IR record from it, expanding nothing |
 
 Each PRF shard now has **its own write address** (`wa_ie`/`wa_ld`/`wa_fe`), which is §7 of
@@ -1911,7 +1911,7 @@ flops, 32 RAMB36, WNS +0.050 ns at 6 ns; `make ooc MODULE=rv_dcache GENERICS=RTW
 | array | shape | width | bits | storage |
 |---|---|---|---|---|
 | data | 32 × 512 | 64 | 1 048 576 | **BRAM** (`smolrv64_sdpram_be`, 1R1W, a write enable per byte), diagonal in groups of eight |
-| `ta` / `tb` | 32 × 64 | 24 | 98 304 | LUTRAM: each way's tags, read at the set -- the main lookup's copy and the store lookup's |
+| `ta` / `tb` | 32 × 64 | 21 (`PABITS - 12`) | 86 016 | LUTRAM: each way's tags, read at the set -- the main lookup's copy and the store lookup's |
 | `va` / `da` / `ua` | 32 × 64 | 1 | 6 144 | LUTRAM: valid, dirty, not recently used, each written by one statement |
 | merge buffers | 2 × 32 | 64 + 8 | 4 608 | LUTRAM, even and odd chunks, one write a cycle; a chunk-valid bit and a zero bit per MSHR in flops |
 | MSHRs | 8 | -- | ~800 | flops |
@@ -1951,9 +1951,9 @@ aligned 1.28, 2-byte-offset 0.98, compressed 1.95, mixed 1.40 -- the adapter MAT
 on straight-line throughput (0.98 at the 2-byte offset); its reduced run-ahead shows on
 taken-branch refetch (the mispredict table, §3), not straight-line fetch.
 
-**The D$'s physical tag is `PABITS - 12` = 24 bits, not the port width's 52.** The ports are 64
-wide because a PA rides in a 64-bit bus, but the architecture has `PABITS` = 36 physical-address
-bits (64 GiB; `rv_soc_top` passes it to the D$), and a write-back's address is rebuilt from the
+**The D$'s physical tag is `PABITS - 12` = 21 bits, not the port width's 52.** The ports are 64
+wide because a PA rides in a 64-bit bus, but a PA has `PABITS` = 33 significant bits (the bits
+of the DRAM's top, `smolrv64_width.vh`), and a write-back's address is rebuilt from the
 tag and the row.
 
 **The physical-address cap.** DRAM starts at `0x8000_0000` and is `2^DRAM_LG2` bytes, a
@@ -1963,7 +1963,7 @@ memory nodes against the cap with `tools/check-dts-memory.py`), the modeled DDR'
 cosim. A PA
 at or above `DRAM_TOP` = `0x8000_0000 + 2^DRAM_LG2` does not exist and takes an access fault
 (cause 1/5/7), so no access to it reaches a cache or the bus; every device lies below DRAM, and
-the SoC's decode owns that hole. `DRAM_TOP` may not exceed `2^PABITS`. Both MMUs enforce it
+the SoC's decode owns that hole. `PABITS` is the bits of `DRAM_TOP`. Both MMUs enforce it
 where a PA is created, never on the TLB hit path: Bare mode compares the address beside the
 non-canonical test; the walker faults a table pointer or a leaf access at or above the top, and
 installs a leaf only when its whole page lies below it, so no TLB entry names a PA that does
@@ -1973,9 +1973,9 @@ Address translation, two instances (iTLB in `smolrv64_core`, dTLB in `smolrv64_l
 
 | array | shape | width | bits |
 |---|---|---|---|
-| iTLB `tlb_g` ({installed, 16-bit generation})/`tag`/`ppn`/`lvl`/`perm`/`nc`/`n`/`dram` | 64 | 17+21+44+2+8+1+1+1 = 95 | 6 080 |
-| dTLB, the same fields | 64, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 95 | 6 080 per copy |
-| second level `tlb2`, block RAM: the fields but `dram` | iTLB 512, dTLB 2048 | 17+18+44+2+8+1+1 = 91, 17+16+44+2+8+1+1 = 89 | 46 592 + 182 272 |
+| iTLB `tlb_g` ({installed, 16-bit generation})/`tag`/`ppn`/`lvl`/`perm`/`nc`/`n`/`dram` | 64 | 17+21+21+2+8+1+1+1 = 72 | 4 608 |
+| dTLB, the same fields | 64, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 72 | 4 608 per copy |
+| second level `tlb2`, block RAM: the fields but `dram` | iTLB 512, dTLB 2048 | 17+18+21+2+8+1+1 = 68, 17+16+21+2+8+1+1 = 66 | 34 816 + 135 168 |
 
 A tag is the VPN above the entry's index (`VPN[26:TLBI]`, `VPN[26:L2I]`): the index bits are the
 entry's own.
@@ -1993,7 +1993,7 @@ Not present in synthesis (`ifndef SYNTHESIS`), listed so nobody counts them as a
 | `cs_insn` | 256 | 32 | retire instruction word |
 | `cs_val` | 256 | 64 | retire value — captured at the writeback event |
 | `cs_mkind` | 256 | 2 | memory-effect kind |
-| `cs_mpa` | 256 | 56 | memory-effect physical address |
+| `cs_mpa` | 256 | 33 (`PABITS`) | memory-effect physical address |
 
 ---
 

@@ -44,7 +44,8 @@ module tb;
    wire             dmem_ren, dmem_wen;
    wire             dmem_rfast;  wire [`SMOLRV64_LQB-1:0] dmem_rtag;
    wire [7:0]       dmem_wmask;
-   wire [55:0]      ptw_addr, dptw_addr;
+   localparam integer PABITS = `SMOLRV64_PABITS;
+   wire [PABITS-1:0] ptw_addr, dptw_addr;
    wire             ptw_read, dptw_read;
    reg  [63:0]      ptw_rdata, dptw_rdata;
    reg              ptw_rvalid, dptw_rvalid;
@@ -113,9 +114,9 @@ module tb;
    // page-table walkers (instruction side + data side): registered PTE reads
    always @(posedge clk) begin
       ptw_rvalid <= ptw_read;
-      if (ptw_read) ptw_rdata <= rd64({8'd0, ptw_addr});
+      if (ptw_read) ptw_rdata <= rd64({{(64-PABITS){1'b0}}, ptw_addr});
       dptw_rvalid <= dptw_read;
-      if (dptw_read) dptw_rdata <= rd64({8'd0, dptw_addr});
+      if (dptw_read) dptw_rdata <= rd64({{(64-PABITS){1'b0}}, dptw_addr});
    end
 
    // -------------------------------------------------------- exit monitor

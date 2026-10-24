@@ -28,7 +28,8 @@
 //     0x0F/0xF0/0xFF mask; `.W` selects its half with addr[2].
 module smolrv64_lsu
   #(parameter AW = 64,
-    parameter [63:0] DRAM_TOP  = 64'd1 << 56,   // the MMU's physical-address cap (smolrv64_core)
+    parameter        PAW       = 56,            // the physical-address width (smolrv64_core's PABITS)
+    parameter [63:0] DRAM_TOP  = 64'd1 << PAW,  // the MMU's physical-address cap (smolrv64_core)
     parameter [63:0] LRAM_BASE = 64'h7000_0000,  // the local SRAM: memory behind the D$, aligned like DRAM
     parameter        LRAM_LG2  = 18,
     parameter        LDTW      = 2)     // the load-queue index width: a fast read's tag; 1<<LDTW loads outstanding
@@ -62,7 +63,7 @@ module smolrv64_lsu
     // cycle. A translate-only req_* does not compete: it never takes the FSM (see xl_x).
     input  wire            pt_v,
     input  wire            pt_store,       // 1 = store draining from smolrv64_sq, 0 = load from smolrv64_lq
-    input  wire [55:0]     pt_pa,          // physical: translated when the op executed
+    input  wire [PAW-1:0]     pt_pa,          // physical: translated when the op executed
     input  wire [1:0]      pt_size,
     input  wire [63:0]     pt_data,        // store data
     input  wire            pt_signed,      // load formatting
@@ -73,7 +74,7 @@ module smolrv64_lsu
     // free for loads. It writes when the state machine does not and the D$'s store queue has room
     // (sp_done, when smolrv64_sq frees the entry: until then the store is still a live entry there).
     input  wire            sp_go,
-    input  wire [55:0]     sp_pa,
+    input  wire [PAW-1:0]     sp_pa,
     input  wire [1:0]      sp_size,
     input  wire [63:0]     sp_data,
     output wire            sp_busy,        // it holds a store
@@ -107,9 +108,9 @@ module smolrv64_lsu
     input  wire            req_early,
     input  wire            f_ok,           // the D$ takes a load presented this cycle (registers only)
     output wire            f_v,            // M's load presented to the D$ now: the index from M's address,
-    output wire [55:0]     f_pa,           // ...the page number from the dTLB, the doubleword
+    output wire [PAW-1:0]     f_pa,           // ...the page number from the dTLB, the doubleword
     input  wire [(1 << LDTW)-1:0] f_cancel, // per tag: last cycle's fast start is void, its lookup with it
-    output wire [55:0]     xo_pa,
+    output wire [PAW-1:0]     xo_pa,
     output wire            xo_unc,
     output wire            xo_mem,         // the translated PA is DRAM/LRAM (idempotent, speculatable)
     output wire            xo_v,           // translation landed THIS cycle -> fill the entry
@@ -124,7 +125,7 @@ module smolrv64_lsu
     input  wire            wk_st,          // a store's entry (else a load's): the access type
     input  wire [38:0]     wk_va,
     output wire            wk_done,        // the walker answers this cycle...
-    output wire [55:0]     wk_pa,
+    output wire [PAW-1:0]     wk_pa,
     output wire            wk_unc,
     output wire            wk_mem,
     output wire            wk_flt,         // ...or the fault the entry traps with at the ROB head
@@ -147,7 +148,7 @@ module smolrv64_lsu
     output wire            pt_fast_done,   // a queued load landed on the fast path
     input  wire            m_head,         // M's op is the ROB head (non-speculative) -- gates non-DRAM access
     input  wire            pt_nonspec,     // the port's request is non-speculative (a store, or the LQ's candidate at a live head)
-    output wire [55:0]     ptw_addr,
+    output wire [PAW-1:0]     ptw_addr,
     output wire            ptw_read,
     input  wire [63:0]     ptw_rdata,
     input  wire            ptw_rvalid,
@@ -198,7 +199,7 @@ module smolrv64_lsu
     // COSIM memory-effect capture: the EXACT (unaligned) PA of the access and its kind.
     // pa_q is not usable for this -- for DRAM it is the 8-byte-ALIGNED base, while the
     // reference model reports the exact address.  Unused outside cosim (DCE'd).
-    output reg  [55:0]     cos_pa,
+    output reg  [PAW-1:0]     cos_pa,
     output reg  [1:0]      cos_kind,      // 0 = none, 1 = load, 2 = store
     output reg  [63:0]     cos_data,      // a plain store's value (raw rs2) and log2 size; size 4'hF = not a
     output reg  [3:0]      cos_size,      //   plain store's write (load, AMO's RMW, SC, cbo): not data-checked
@@ -215,7 +216,7 @@ module smolrv64_lsu
               S_ARD  = 3'd3, S_AWR = 3'd4;
 
    reg [2:0]   st;
-   reg [55:0]  pa_q;                       // translated physical address (WORD-ALIGNED)
+   reg [PAW-1:0]  pa_q;                       // translated physical address (WORD-ALIGNED)
 
    // ---- word-aligned D$ access (see header) --------------------------------------
    wire [2:0]  boff   = eff_vaddr[2:0];              // byte offset in the aligned word
@@ -240,15 +241,18 @@ module smolrv64_lsu
    // docs/rtl-rules.md says must be an assertion, so it is one.
    // This SoC puts every device below 0x8000_0000 (CLINT 0x0200_0000,
    // PLIC 0x0C00_0000, UART 0x1000_0000, virtio 0x1000_2000/3000) and DRAM above it.
-   localparam [55:0] LSU_DRAM_BASE = 56'h8000_0000;
+   localparam [63:0]    DRAM_BASE     = 64'h8000_0000;
+   localparam [PAW-1:0] LSU_DRAM_BASE = DRAM_BASE[PAW-1:0];
+   localparam [PAW-1:0] PA_DWM        = {{(PAW-3){1'b1}}, 3'b000};   // a doubleword's base
+   localparam [PAW-1:0] PA_DW         = {{(PAW-4){1'b0}}, 4'd8};     // one doubleword
    // The effective physical address: the MMU's for an M request, smolrv64_sq's for a commit.
-   wire [55:0] eff_pa;  wire eff_unc;   // the port's fields when it starts or continues, else M's (below)
+   wire [PAW-1:0] eff_pa;  wire eff_unc;   // the port's fields when it starts or continues, else M's (below)
    wire        pa_dram = (eff_pa >= LSU_DRAM_BASE);
    // The local SRAM (the ROM monitor's home, 0x7000_0000 on the platform) is memory behind
    // the D$ too, and below DRAM: unaligned, its byte loads reached the D$ as spans and the
    // monitor could not be simulated at all until 2026-09-05 (it worked on the board on the
    // D$'s span path, the one this LSU exists to keep the cache from ever seeing).
-   wire        pa_lram = (eff_pa[55:LRAM_LG2] == LRAM_BASE[55:LRAM_LG2]);
+   wire        pa_lram = (eff_pa[PAW-1:LRAM_LG2] == LRAM_BASE[PAW-1:LRAM_LG2]);
    wire        pa_mem  = pa_dram | pa_lram;
    wire        xl_can = ~eff_amo & ~eff_cbo & pa_mem;  // AMO pre-aligned; CBO is line-wide
    wire        xword  = xl_can & (wend > 5'd8);      // operand straddles two words
@@ -256,7 +260,7 @@ module smolrv64_lsu
    reg  [2:0]  boff_q;
    reg  [3:0]  nb_q;      // load-format width/sign/NaN-box, latched with the request
    reg         sgn_q, fp_q;
-   reg  [55:0] pa2_q;                                // the next aligned word
+   reg  [PAW-1:0] pa2_q;                                // the next aligned word
    reg  [63:0] ld_lo_q;                              // first word's data
    // boff_q is 1..7 whenever xword_q, so sh_up is 8..56 -- never a 64-bit shift.
    wire [5:0]  sh_dn  = {boff_q, 3'b000};
@@ -362,10 +366,10 @@ module smolrv64_lsu
 
    // ------------------------------------------------------------ translation
    wire        t_ready, t_fault, t_uncached;
-   wire [55:0] t_paddr;
+   wire [PAW-1:0] t_paddr;
    wire        s_ok, s_flt, s_nc, s_dram;
    wire [3:0]  s_cause;
-   wire [55:0] s_paddr;
+   wire [PAW-1:0] s_paddr;
    wire [3:0]  t_cause;
    // An FSM-starting access asks only while it is actually waiting in S_IDLE and the port is
    // not taking the FSM this cycle: once started, the access owns pa_q. The translate-only
@@ -396,7 +400,7 @@ module smolrv64_lsu
    // needs, whose column walk touches a new page every one or two loads. A first-level miss that
    // the second level holds answers as a one-cycle walk; at 2048 entries in distributed RAM the
    // first level alone was 8.4 K LUTs.
-   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .DRAM_BASE({8'd0, LSU_DRAM_BASE}), .TLBN(64), .TLBI(6), .L2N(2048), .L2I(11)) u_mmu
+   mmu #(.AW(PAW), .DRAM_TOP(DRAM_TOP), .DRAM_BASE(DRAM_BASE), .TLBN(64), .TLBI(6), .L2N(2048), .L2I(11)) u_mmu
      (.clk(clk), .reset(reset),
       .req_valid(xl_req), .req_vaddr(mm_va), .req_access(mm_acc),
       .priv(xl_priv), .sum(xl_sum), .mxr(xl_mxr), .satp(xl_satp), .flush(xl_flush), .walk_ok(1'b1),
@@ -411,7 +415,7 @@ module smolrv64_lsu
    assign wk_unc  = t_uncached;
    assign wk_flt  = t_fault;
    assign wk_fc   = t_cause;
-   assign wk_mem  = (t_paddr >= LSU_DRAM_BASE) | (t_paddr[55:LRAM_LG2] == LRAM_BASE[55:LRAM_LG2]);
+   assign wk_mem  = (t_paddr >= LSU_DRAM_BASE) | (t_paddr[PAW-1:LRAM_LG2] == LRAM_BASE[PAW-1:LRAM_LG2]);
 
    // A misaligned access whose byte span leaves the page needs a second translation.
    // Raise address-misaligned instead (cause 4 load / 6 store-AMO) and let software
@@ -465,7 +469,7 @@ module smolrv64_lsu
    assign xo_tv    = xo_ok;
    assign xo_early = f_go;
    assign f_v      = f_go;
-   assign f_pa     = s_paddr & ~56'd7;
+   assign f_pa     = s_paddr & PA_DWM;
    assign xo_pa  = s_paddr;
    assign xo_unc = s_nc;
    // THE TRANSLATE'S OWN REGION, NEVER eff_pa's. eff_pa is the PORT's address whenever the port
@@ -474,7 +478,7 @@ module smolrv64_lsu
    // a device load recorded as idempotent, issued off the wrong path past smolrv64_lq's head gate,
    // reading a read-to-clear register on the way (2026-09-17: the board's dead NIC under NFS
    // root; the cosim never took a PLIC interrupt until the SMOLRV64_IRQ_STIM storm caught it).
-   wire t_mem = (s_paddr >= LSU_DRAM_BASE) | (s_paddr[55:LRAM_LG2] == LRAM_BASE[55:LRAM_LG2]);
+   wire t_mem = (s_paddr >= LSU_DRAM_BASE) | (s_paddr[PAW-1:LRAM_LG2] == LRAM_BASE[PAW-1:LRAM_LG2]);
    assign xo_mem = t_mem;
 
    // ------------------------------------------------------- AMO RMW datapath
@@ -544,7 +548,7 @@ module smolrv64_lsu
    // while this store is presented (the first version wrote an `sd` with a one-byte mask).
    wire [7:0] st_mask = (8'd1 << nb_q) - 8'd1;
    // the store register (see its ports): a store a cycle, one at a time behind the state machine's
-   reg         sp_v;  reg [55:0] sp_a;  reg [63:0] sp_wd;  reg [7:0] sp_wm;
+   reg         sp_v;  reg [PAW-1:0] sp_a;  reg [63:0] sp_wd;  reg [7:0] sp_wm;
    initial sp_v = 1'b0;
    wire        sp_on = sp_v & ~(st_go | amo_go);
    assign sp_busy = sp_v;
@@ -554,7 +558,7 @@ module smolrv64_lsu
       else if (sp_go) sp_v <= 1'b1;
       else if (sp_done) sp_v <= 1'b0;
       if (sp_go) begin
-         sp_a  <= sp_pa & ~56'd7;
+         sp_a  <= sp_pa & PA_DWM;
          sp_wd <= sp_data << {sp_pa[2:0], 3'b000};
          case (sp_size)
             2'd0: sp_wm <= 8'h01 << sp_pa[2:0];
@@ -567,14 +571,14 @@ module smolrv64_lsu
    always @(posedge clk) if (!reset) begin
       if (sp_go & sp_v & ~sp_done)
          $fatal(1, "smolrv64_lsu: a store handed to the store register while it still holds one (pa %h)", sp_a);
-      if (sp_go & ((({1'b0, sp_pa[2:0]} + (4'd1 << sp_size)) > 4'd8) | ~((sp_pa >= LSU_DRAM_BASE) | (sp_pa[55:LRAM_LG2] == LRAM_BASE[55:LRAM_LG2]))))
+      if (sp_go & ((({1'b0, sp_pa[2:0]} + (4'd1 << sp_size)) > 4'd8) | ~((sp_pa >= LSU_DRAM_BASE) | (sp_pa[PAW-1:LRAM_LG2] == LRAM_BASE[PAW-1:LRAM_LG2]))))
          $fatal(1, "smolrv64_lsu: the store register takes only a store to memory inside one doubleword (pa %h size %0d)", sp_pa, sp_size);
       if (sp_v & ((st == S_ARD) | amo_go | (st_go & run_cbo)))
          $fatal(1, "smolrv64_lsu: the store register holds a store under an atomic or a CBO (state %0d)", st);
    end
    assign mem_wen       = st_go | amo_go | sp_on;
    assign mem_wfsm      = st_go | amo_go;
-   assign mem_waddr     = {{(AW-56){1'b0}}, (sp_on ? sp_a : st2_go ? pa2_q : pa_q)};
+   assign mem_waddr     = {{(AW-PAW){1'b0}}, (sp_on ? sp_a : st2_go ? pa2_q : pa_q)};
    // The access BASE, distinct from mem_waddr's per-beat address. A straddling store's second
    // beat addresses pa2_q, but straddling requires xl_can, which requires pa_dram -- so a
    // DEVICE access is NEVER in S_ST2. soc_top decodes devices from this base, which keeps
@@ -582,7 +586,7 @@ module smolrv64_lsu
    // was the startpoint of the worst path in the design at 6 ns,
    //   FSM_onehot_st[3] -> st2_go -> is_uart_w -> dmem_wready -> lsu_done -> redirect
    //                    -> iMMU tag compare -> u_bp/ycorr_qv
-   assign mem_wabase    = {{(AW-56){1'b0}}, pa_q};   // the state machine's: only its writes reach a device
+   assign mem_wabase    = {{(AW-PAW){1'b0}}, pa_q};   // the state machine's: only its writes reach a device
    // Store data is placed at its byte offset inside the aligned word; the straddling
    // remainder starts at byte 0 of the next word.
    assign mem_wdata     = sp_on  ? sp_wd
@@ -780,15 +784,15 @@ module smolrv64_lsu
    // +dbg_line=<PA>: every start, landing, kill and write touching that 64-byte line (rule G6: aimed by plusarg)
    reg [63:0] dbg_line; initial if (!$value$plusargs("dbg_line=%h", dbg_line)) dbg_line = 64'hFFFF_FFFF_FFFF_FFFF;
    always @(posedge clk) if (!reset) begin
-      if (start_ok && (eff_pa[55:6] == dbg_line[55:6]))
+      if (start_ok && (eff_pa[PAW-1:6] == dbg_line[PAW-1:6]))
          $display("[lsu t=%0t START pa=%h fast=%b tag=%0d pt=%b st=%b nb=%0d boff=%0d unc=%b xword=%b fsm=%0d o_v=%b port_free=%b]",
                   $time, eff_pa, ld_fast_ok, ld_tag, pt_start, pt_start & pt_store, nb, boff, eff_unc, xword, st, o_v, port_free);
-      if (f_go && (f_pa[55:6] == dbg_line[55:6]))
+      if (f_go && (f_pa[PAW-1:6] == dbg_line[PAW-1:6]))
          $display("[lsu t=%0t MSTART pa=%h tag=%0d o_v=%b]", $time, s_paddr, req_tag, o_v);
       if (|f_cancel) $display("[lsu t=%0t CANCEL %b]", $time, f_cancel);
       if (mem_rvalid_c)
          $display("[lsu t=%0t FASTRESP tag=%0d o_v=%b kill=%b data=%h fmt=%h nb=%0d boff=%0d]", $time, mem_rtag_resp, o_v[mem_rtag_resp], o_kill[mem_rtag_resp], mem_rdata_c, ld_fast_val, f_nb, o_boff[mem_rtag_resp]);
-      if (mem_wen && (mem_wabase[55:6] == dbg_line[55:6]))
+      if (mem_wen && (mem_wabase[PAW-1:6] == dbg_line[PAW-1:6]))
          $display("[lsu t=%0t WRITE addr=%h data=%h mask=%b accept=%b]", $time, mem_waddr, mem_wdata, mem_wmask, mem_waccept);
       if (flush && |o_v) $display("[lsu t=%0t FLUSH o_v=%b]", $time, o_v);
    end
@@ -877,7 +881,7 @@ module smolrv64_lsu
    always @(posedge clk) begin
       if (reset) begin
          st <= S_IDLE; mem_ren <= 1'b0; rsv_v <= 1'b0; mem_runcached <= 1'b0;
-         cos_pa <= 56'd0; cos_kind <= 2'd0; cos_data <= 64'd0; cos_size <= 4'hF;
+         cos_pa <= {PAW{1'b0}}; cos_kind <= 2'd0; cos_data <= 64'd0; cos_size <= 4'hF;
       end else begin
          mem_ren <= 1'b0;                                  // one-cycle request pulse
          case (st)
@@ -908,10 +912,10 @@ module smolrv64_lsu
                 xword_q <= xword;
                 nb_q    <= nb;  sgn_q <= eff_signed;  fp_q <= eff_fp;
                 boff_q  <= xl_can ? boff : 3'd0;   // AMO/CBO keep their own addressing
-                pa2_q   <= (eff_pa & ~56'd7) + 56'd8;
+                pa2_q   <= (eff_pa & PA_DWM) + PA_DW;
                 if (pt_start) st_data_q <= pt_data;
                 if (pt_start ? pt_store : req_store) begin
-                   pa_q <= xl_can ? (eff_pa & ~56'd7) : eff_pa;
+                   pa_q <= xl_can ? (eff_pa & PA_DWM) : eff_pa;
                    st   <= S_ST;
                 end else if (eff_amo) begin
                    // An atomic reads, modifies and writes the CONTAINING 8-BYTE WORD:
@@ -919,14 +923,13 @@ module smolrv64_lsu
                    // picks the .W half). The memory port is byte-address-relative, so
                    // the write must use the ALIGNED address too -- using the raw PA
                    // shifts a .W half-word write 4 bytes past its target.
-                   pa_q      <= eff_pa & ~56'd7;
-                   mem_raddr <= {{(AW-56){1'b0}}, eff_pa} & ~{{(AW-3){1'b0}}, 3'b111};
+                   pa_q      <= eff_pa & PA_DWM;
+                   mem_raddr <= {{(AW-PAW){1'b0}}, eff_pa & PA_DWM};
                    mem_ren   <= 1'b1;  rfast_q <= 1'b0;
                    st        <= S_ARD;
                 end else begin
-                   pa_q <= xl_can ? (eff_pa & ~56'd7) : eff_pa;
-                   mem_raddr <= xl_can ? ({{(AW-56){1'b0}}, eff_pa} & ~{{(AW-3){1'b0}}, 3'b111})
-                                       :  {{(AW-56){1'b0}}, eff_pa};
+                   pa_q <= xl_can ? (eff_pa & PA_DWM) : eff_pa;
+                   mem_raddr <= {{(AW-PAW){1'b0}}, xl_can ? (eff_pa & PA_DWM) : eff_pa};
                    mem_ren   <= ~(pt_start & pt_fwd);   // a forward reads the store queue, not the D$
                    rfast_q   <= ld_fast_ok;  rtag_q <= ld_tag;
                    // a fast load leaves the FSM idle: everything it still needs is in o_*
@@ -936,7 +939,7 @@ module smolrv64_lsu
            S_LD:  if (slow_rv) begin
                      if (xword_q) begin
                         ld_lo_q   <= mem_rdata;
-                        mem_raddr <= {{(AW-56){1'b0}}, pa2_q};
+                        mem_raddr <= {{(AW-PAW){1'b0}}, pa2_q};
                         mem_ren   <= 1'b1;  rfast_q <= 1'b0;
                         st        <= S_LD2;
                      end else st <= S_IDLE;
@@ -951,8 +954,8 @@ module smolrv64_lsu
                         nc_q <= pt_unc; mem_runcached <= pt_unc; mem_q <= pa_mem;
                         cos_pa <= pt_pa; cos_kind <= 2'd2; cos_data <= pt_data; cos_size <= {2'b0, pt_size};
                         xword_q <= xword; nb_q <= nb; boff_q <= xl_can ? boff : 3'd0;
-                        pa2_q <= (pt_pa & ~56'd7) + 56'd8;
-                        pa_q  <= xl_can ? (pt_pa & ~56'd7) : pt_pa;
+                        pa2_q <= (pt_pa & PA_DWM) + PA_DW;
+                        pa_q  <= xl_can ? (pt_pa & PA_DWM) : pt_pa;
                         st_data_q <= pt_data;
                      end else st <= (xword_q ? S_ST2 : S_IDLE);
                   end

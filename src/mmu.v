@@ -101,6 +101,9 @@ module mmu
    // faults a table pointer or a leaf access at or above DRAM_TOP, and installs a leaf only
    // when its whole page lies below it, so no TLB entry can name a PA that does not exist.
    localparam [44:0] TOP_PPN = DRAM_TOP[56:12];   // one bit wider: the cap may be 2^AW
+   // An installed page lies below the cap, so a TLB holds AW-12 bits of PPN; the walker reads the
+   // PTE's whole 44 and decides the cap on them.
+   localparam integer PW = AW - 12;
    initial if (DRAM_TOP[11:0] != 12'd0 || DRAM_TOP > (64'd1 << AW))
       $fatal(1, "mmu: DRAM_TOP=%h must be page-aligned and within the %0d-bit PA space", DRAM_TOP, AW);
    wire        bare_oob = ({1'b0, req_vaddr} >= {1'b0, DRAM_TOP});
@@ -118,7 +121,7 @@ module mmu
    reg [SCI-1:0]    scan_i;
    (* ram_style = "distributed" *) reg [GB:0] tlb_g [0:TLBN-1];   // {installed, generation}
    reg [26-TLBI:0]  tlb_tag [0:TLBN-1];   // VPN[26:TLBI]: the entry's index is the VPN's low bits
-   reg [43:0]       tlb_ppn [0:TLBN-1];   // page PPN (leaf)
+   reg [PW-1:0]     tlb_ppn [0:TLBN-1];   // page PPN (leaf), below the cap
    reg [1:0]        tlb_lvl [0:TLBN-1];   // leaf level (0=4K,1=2M,2=1G)
    reg [7:0]        tlb_perm[0:TLBN-1];   // PTE perm bits V,R,W,X,U,G,A,D
    reg              tlb_nc  [0:TLBN-1];   // Svpbmt: leaf is NC/IO (PBMT pte[62:61] != 0)
@@ -141,7 +144,7 @@ module mmu
    // Ssvnapot (`n`): a level-0 leaf with pte.N=1 is a 64 KiB NAPOT page, so the low
    // 4 PPN bits are NOT the PTE's (they hold the size encoding 0b1000) -- they come
    // from the VA instead, making all 16 contiguous 4 KiB VAs share one PTE.
-   function [AW-1:0] leaf_pa;
+   function [55:0] leaf_pa;
       input [43:0] ppn; input [1:0] lvl; input [63:0] va; input n;
       begin
          case (lvl)
@@ -151,6 +154,10 @@ module mmu
                                 : {ppn, va[11:0]};   // 4 KiB
          endcase
       end
+   endfunction
+   function [43:0] ppn44;   // a stored PPN, as the PTE's
+      input [PW-1:0] p;
+      begin ppn44 = 44'd0; ppn44[PW-1:0] = p; end
    endfunction
 
    // permission check for a leaf PTE `p` (bits V,R,W,X,U,G,A,D)
@@ -185,7 +192,7 @@ module mmu
    // the leaf's page, as its last PPN: a page is installed only if that is below TOP_PPN
    wire [43:0] leaf_last = ptw_rdata[53:10] | ((lvl == 2'd2) ? 44'h3FFFF : (lvl == 2'd1) ? 44'h1FF
                                              : ptw_rdata[63] ? 44'hF : 44'h0);
-   wire [AW-1:0] leaf_acc = leaf_pa(ptw_rdata[53:10], lvl, va_q, ptw_rdata[63]);
+   wire [55:0] leaf_acc = leaf_pa(ptw_rdata[53:10], lvl, va_q, ptw_rdata[63]);
    // Ssvnapot: a recognized NAPOT leaf. Sv39 defines exactly one encoding -- a level-0
    // leaf whose ppn[3:0] (= pte[13:10]) is 0b1000, i.e. a 64 KiB page.
    wire       napot_ok = (lvl == 2'd0) && (ptw_rdata[13:10] == 4'b1000);
@@ -242,10 +249,10 @@ module mmu
    assign t_ok    = t_ok_w;
    assign t_ready = req_valid & t_ok_w;
    wire wdm = w_done & req_match;
+   wire [55:0] hit_pa = leaf_pa(ppn44(tlb_ppn[tlb_idx]), tlb_lvl[tlb_idx], req_vaddr, tlb_n[tlb_idx]);
    assign t_paddr = wdm      ? w_paddr :
                     !xlate    ? req_vaddr[AW-1:0] :
-                                leaf_pa(tlb_ppn[tlb_idx], tlb_lvl[tlb_idx], req_vaddr,
-                                        tlb_n[tlb_idx]);
+                                hit_pa[AW-1:0];
    // the fault: the finished walk's verdict, else non-canonical (Sv39, a page fault) or a PA
    // above the cap (Bare, an access fault). A TLB hit cannot fault on its PA (see above).
    wire        base_fault = wdm ? w_fault : (xlate ? noncanon : bare_oob);
@@ -264,7 +271,7 @@ module mmu
    wire [TLBI-1:0] s_idx  = s_vpn[TLBI-1:0];
    wire            s_v_e  = ~scan & (tlb_g[s_idx] == {1'b1, cg});
    wire [26-TLBI:0] s_tag = tlb_tag[s_idx];
-   wire [43:0]     s_ppn  = tlb_ppn[s_idx];
+   wire [43:0]     s_ppn  = ppn44(tlb_ppn[s_idx]);
    wire [1:0]      s_lvl  = tlb_lvl[s_idx];
    wire [7:0]      s_perm = tlb_perm[s_idx];
    wire            s_nc_e = tlb_nc[s_idx];
@@ -278,7 +285,8 @@ module mmu
    assign s_cause = xlate ? ((s_access == 2'd0) ? 4'd12 : (s_access == 2'd1) ? 4'd13 : 4'd15)
                           : ((s_access == 2'd0) ? 4'd1  : (s_access == 2'd1) ? 4'd5  : 4'd7);
    assign s_ok    = ~s_flt & (~xlate | s_hit);
-   assign s_paddr = xlate ? leaf_pa(s_ppn, s_lvl, s_vaddr, s_n) : s_vaddr[AW-1:0];
+   wire [55:0]     s_pa   = leaf_pa(s_ppn, s_lvl, s_vaddr, s_n);
+   assign s_paddr = xlate ? s_pa[AW-1:0] : s_vaddr[AW-1:0];
    assign s_nc    = xlate & s_nc_e;
    assign s_dram  = xlate ? s_dr_e : ({1'b0, s_vaddr} >= {1'b0, DRAM_BASE});   // Bare: s_ok holds the top
 
@@ -287,7 +295,7 @@ module mmu
 
    // PTE address = (table_ppn << 12) | (vpn[lvl] << 3)
    wire [8:0] vpn_lvl = (lvl==2'd2) ? va_q[38:30] : (lvl==2'd1) ? va_q[29:21] : va_q[20:12];
-   wire [AW-1:0] pte_addr = {walk_ppn, 12'd0} | {vpn_lvl, 3'd0};
+   wire [55:0] pte_addr = {walk_ppn, 12'd0} | {44'd0, vpn_lvl, 3'd0};   // issued below the cap (REQ)
 
    // ONE WRITE STATEMENT for tlb_g (rule I10): the scan's clear, else the fill. A fill during a
    // scan is not installed (it still answers its own access through w_paddr). A fill in a
@@ -302,7 +310,7 @@ module mmu
    // page fault rather than a guess.
    wire             leaf_nap = ptw_rdata[63] && !napot_ok;
    wire             leaf_prm = perm_fault(ptw_rdata, acc_q, prv_q, sum_q, mxr_q);
-   wire             leaf_oob = {{(64-AW){1'b0}}, leaf_acc} >= DRAM_TOP;                 // PA above the cap
+   wire             leaf_oob = {8'd0, leaf_acc} >= DRAM_TOP;                             // PA above the cap
    wire             fill     = (st==RCV) & ptw_rvalid & req_match & ~pte_inv & pte_leaf
                              & ~leaf_mis & ~leaf_nap & ~leaf_prm & ~leaf_oob;
    // The second level, read at the walker's VA in L2LK (one LUTRAM read each; a hit whose perms
@@ -312,6 +320,7 @@ module mmu
    wire [1:0]    l2_lvl;
    wire [7:0]    l2_perm;
    wire          l2_nc, l2_n;
+   wire [55:0]   l2_pa   = leaf_pa(l2_ppn, l2_lvl, va_q, l2_n);
    wire          l2_fill = (st == L2LK) & req_match & l2_hit;   // refills the first level
    // the first level's entry: the walk's leaf, or the second level's on its hit
    wire             f1      = fill | l2_fill;
@@ -335,13 +344,15 @@ module mmu
    // reaching past the cap is answered for its access only and never installed.
    always @(posedge clk) if (f1) begin
       tlb_tag[va_q[12+:TLBI]]  <= va_q[38:12+TLBI];
-      tlb_ppn[va_q[12+:TLBI]]  <= f1_ppn;
+      tlb_ppn[va_q[12+:TLBI]]  <= f1_ppn[PW-1:0];
       tlb_lvl[va_q[12+:TLBI]]  <= f1_lvl;
       tlb_perm[va_q[12+:TLBI]] <= f1_perm;
       tlb_nc[va_q[12+:TLBI]]   <= f1_nc;
       tlb_n[va_q[12+:TLBI]]    <= f1_n;
       tlb_dram[va_q[12+:TLBI]] <= f1_dram;
    end
+   always @(posedge clk) if (!reset && f1 && f1_in && (f1_ppn >> PW) != 44'd0)
+      $fatal(1, "[mmu] installs PPN %h, beyond the cap's %0d bits", f1_ppn, PW);
    generate if (L2N > 0) begin : l2
       // ONE BLOCK RAM, {installed, generation, tag, ppn, lvl, perm, nc, n} per entry, read port and
       // write port. It is read in IDLE at the request's VA, so the word of the walk that starts there
@@ -350,7 +361,7 @@ module mmu
       // cycle may have cleared the entry after it was read, so that word does not hit (l2q_ok).
       // The tag is VPN[26:L2I]: the low bits are the entry's index, va_q's (checked below).
       localparam integer L2T = 27 - L2I;
-      localparam integer O_PERM = 2, O_LVL = O_PERM + 8, O_PPN = O_LVL + 2, O_TAG = O_PPN + 44;
+      localparam integer O_PERM = 2, O_LVL = O_PERM + 8, O_PPN = O_LVL + 2, O_TAG = O_PPN + PW;
       localparam integer L2W = O_TAG + L2T + (GB + 1);
       (* ram_style = "block" *) reg [L2W-1:0] tlb2 [0:L2N-1];
       reg [L2W-1:0] l2q;
@@ -371,14 +382,14 @@ module mmu
       wire [7:0]   q_perm = l2q[O_PERM +: 8];
       assign l2_hit  = ~scan & l2q_ok & (q_g == {1'b1, cg}) & (q_tag == va_q[38:12+L2I])
                      & ~perm_fault({56'd0, q_perm}, acc_q, prv_q, sum_q, mxr_q);
-      assign l2_ppn  = l2q[O_PPN +: 44];  assign l2_lvl = l2q[O_LVL +: 2];  assign l2_perm = q_perm;
+      assign l2_ppn  = ppn44(l2q[O_PPN +: PW]);  assign l2_lvl = l2q[O_LVL +: 2];  assign l2_perm = q_perm;
       assign l2_nc   = l2q[1];         assign l2_n   = l2q[0];
       // the scan clears an entry, the walk's fill installs one: one write statement (rule I10). A
       // fill in a scan's cycle is dropped, as a fill that never happened: the next miss walks.
       wire           we2 = ~reset & (scan | fill);
       wire [L2I-1:0] wa2 = scan ? scan_i[L2I-1:0] : va_q[12+:L2I];
       wire [L2W-1:0] wd2 = scan ? {L2W{1'b0}}
-                         : {({1'b0, leaf_last} < TOP_PPN), cg, va_q[38:12+L2I], ptw_rdata[53:10], lvl,
+                         : {({1'b0, leaf_last} < TOP_PPN), cg, va_q[38:12+L2I], ptw_rdata[10 +: PW], lvl,
                             ptw_rdata[7:0], ptw_rdata[62] | ptw_rdata[61], ptw_rdata[63]};
       always @(posedge clk) if (we2) tlb2[wa2] <= wd2;
    end else begin : no_l2
@@ -413,7 +424,7 @@ module mmu
            L2LK: if (L2N == 0) $fatal(1, "[mmu] a second-level lookup with no second level");
                  else if (!req_match) st<=IDLE;
                  else if (l2_hit) begin
-                    w_paddr <= leaf_pa(l2_ppn, l2_lvl, va_q, l2_n);
+                    w_paddr <= l2_pa[AW-1:0];
                     w_lvl   <= l2_lvl;
                     w_nc    <= l2_nc;
                     w_fault <= 1'b0; w_done <= 1'b1; st <= IDLE;
@@ -421,7 +432,7 @@ module mmu
            REQ: if (!req_match) st<=IDLE;           // request changed -> abort stale walk
                 else if ({1'b0, walk_ppn} >= TOP_PPN) begin   // the table itself is above the cap
                    w_fault<=1'b1; w_cause<=af_cause_q; w_done<=1'b1; st<=IDLE;
-                end else begin ptw_addr<=pte_addr; ptw_read<=1'b1; st<=RCV; end
+                end else begin ptw_addr<=pte_addr[AW-1:0]; ptw_read<=1'b1; st<=RCV; end
            RCV: if (ptw_rvalid) begin
               // DRAIN the in-flight PTW read before honoring an abort: leaving RCV while a read
               // is still outstanding leaks its response into the NEXT walk's read (a stale wrong
@@ -437,7 +448,7 @@ module mmu
                  end else if (leaf_oob) begin
                     w_fault<=1'b1; w_cause<=af_cause_q; w_done<=1'b1; st<=IDLE;
                  end else begin   // the leaf: answered, and installed by `fill` (above)
-                    w_paddr <= leaf_acc;
+                    w_paddr <= leaf_acc[AW-1:0];
                     w_lvl  <= lvl;
                     w_fault<=1'b0; w_done<=1'b1; st<=IDLE;
                     w_nc   <= ptw_rdata[62] | ptw_rdata[61];   // Svpbmt PBMT != 0

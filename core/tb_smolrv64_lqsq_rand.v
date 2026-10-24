@@ -89,7 +89,7 @@ module tb;
 
    wire [NENT-1:0] lq_kmask_nc, sq_kmask_nc;   // the kill is not exercised here
    wire            sq_c_fast_nc;               // the core's store register is not modelled: every drain is a handoff and a free
-   smolrv64_lq #(.DRAM_BASE(56'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1),.NW(NW),.NB(2)) u_lq
+   smolrv64_lq #(.DRAM_BASE(64'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1),.NW(NW),.NB(2)) u_lq
      (.clk(clk),.reset(reset),
       .d_alloc(lq_d_alloc),.d_pc({NW{39'd0}}),.d_seq({NW{8'd0}}),.d_rob(lq_d_rob),.d_prd(lq_d_prd),.d_rd({NW{6'd0}}),.d_rd_v({NW{1'b1}}),
       .d_sqtag(lq_d_sqtag),.d_wt({NW{1'b1}}),.d_rank(lq_d_rank),.d_ready(lq_d_ready),.d_bfree(lq_bfree),.d_bp(lq_bp),.d_idx(lq_d_idx),

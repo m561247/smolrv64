@@ -14,6 +14,9 @@
   `define SMOLRV64_DRAM_LG2 32                    // the board's 4 GiB window (src/dram_window.vh)
  `endif
 `endif
+// The physical-address width: the bits of the DRAM's top (33 for the board's 4 GiB). Every PA the
+// core holds is this wide, as the MMUs fault any PA at or above the top (smolrv64_core).
+`define SMOLRV64_PABITS ($clog2(64'h8000_0000 + (64'd1 << `SMOLRV64_DRAM_LG2)))
 `ifndef SMOLRV64_QD
  `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif

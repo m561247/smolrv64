@@ -130,7 +130,7 @@ module rv_soc_top #(
    // bytes from 0x8000_0000, smolrv64_width.vh), as the core faults any PA beyond it (smolrv64_core,
    // THE PHYSICAL-ADDRESS CAP). The D$ and the I$ tag exactly these bits: 33 for today's 4 GiB board,
    // and a larger DRAM widens them.
-   localparam integer PABITS = $clog2(64'h8000_0000 + (64'd1 << `SMOLRV64_DRAM_LG2));
+   localparam integer PABITS = `SMOLRV64_PABITS;
    localparam integer LQ_IB  = `SMOLRV64_LQB;    // the core's load-queue index width: the D$ read tag carries it
    localparam LAW  = AW-6;                  // line address width = 58
 
@@ -158,14 +158,14 @@ module rv_soc_top #(
    wire                dmem_fv, dmem_fhint, dmem_fcancel, dmem_fok, dmem_fans;   // M's load in M's cycle, straight to the D$
    wire [63:0]         dmem_fpa;
    wire [LQ_IB-1:0]    dmem_ftag;
-   wire [55:0]         ptw_addr, dptw_addr;
+   wire [PABITS-1:0]   ptw_addr, dptw_addr;
    wire                ptw_read, dptw_read;
    wire [63:0]         ptw_rdata, dptw_rdata;
    wire                ptw_rvalid, dptw_rvalid;
    wire                redirect;  wire [PCW-1:0] redirect_target;
 
    smolrv64_core #(.HW(HW), .IW(IW), .PCW(PCW), .RESET_PC(RESET_PC), .LBASE(LBASE), .LRAM_LG2(LRAM_LG2),
-               .PABITS(PABITS), .LQ_IB(LQ_IB)) core
+               .LQ_IB(LQ_IB)) core
      (.clk(clk), .reset(reset),
       .imem_addr(imem_addr), .imem_ctx_chg(imem_ctx_chg), .imem_hold(imem_hold), .imem_cancel(imem_cancel), .hw_ip(hw_ip), .mtime(clint_mtime),
       .ic_busy(fi_stall | ic_inv_busy), .ic_req(ic_rd_req), .ic_va(ic_rd_addr), .ic_pa(ic_rd_pa),
@@ -861,11 +861,9 @@ module rv_soc_top #(
    // in flight, so one data walker suffices). Each *_read is held (stable *_addr) until *_rvalid.
    // A walk reads its 8-byte PTE through the D$ read port (shared with the LSU via the dcr_*
    // arbiter below), so it always observes dirty PTEs -- no sfence.vma flush needed. pw_busy[g]
-   // marks an outstanding read; the response is matched by exact byte address (the cache echoes
-   // rd_resp_addr = the requested address). Same-address responses safely share data, so no
-   // owner tag is needed.
+   // marks an outstanding read; the response is matched by its tag, TAG_PTW + g.
    wire [1:0]   pw_read   = {dptw_read, ptw_read};
-   wire [2*56-1:0] pw_addr = {dptw_addr, ptw_addr};
+   wire [2*PABITS-1:0] pw_addr = {dptw_addr, ptw_addr};
    reg  [1:0]   pw_busy;
    reg  [1:0]   pw_sent;      // ...and this walk's request has been accepted (see the read door)
    reg  [1:0]   pw_rvalid;
@@ -911,8 +909,8 @@ module rv_soc_top #(
    assign lsu_rd_ack = dc_rd_ack & c_rd_req;
    assign dcr_req  = c_rd_req | (|pw_rq);
    assign dcr_addr = c_rd_req  ? c_rd_addr
-                   : pw_rq[0]  ? {8'd0, pw_addr[0*56 +: 56]}
-                   :             {8'd0, pw_addr[1*56 +: 56]};
+                   : pw_rq[0]  ? {{(64-PABITS){1'b0}}, pw_addr[0*PABITS +: PABITS]}
+                   :             {{(64-PABITS){1'b0}}, pw_addr[1*PABITS +: PABITS]};
    // ...and the tag that names the requester, selected by the SAME priority.
    wire [DRTW-1:0] dcr_tag = c_rd_req ? c_rd_tag
                            : pw_rq[0] ? TAG_PTW

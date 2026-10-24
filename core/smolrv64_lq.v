@@ -59,7 +59,7 @@ module smolrv64_lq
     parameter BRB   = IDXB - BL,                   // derived: the row bits
     // The memory map, for the D12 cross-check below only (smolrv64_lsu's LSU_DRAM_BASE / LRAM_*).
     // A unit bench with synthetic addresses declares everything memory: DRAM_BASE = 0.
-    parameter [55:0] DRAM_BASE = 56'h8000_0000,
+    parameter [63:0] DRAM_BASE = 64'h8000_0000,
     parameter [63:0] LRAM_BASE = 64'h7000_0000,
     parameter        LRAM_LG2  = 18)
    (input  wire                  clk,
@@ -562,9 +562,9 @@ module smolrv64_lq
    // the board's NIC died) dies at the fill, in every cosim, on the first device load of a
    // boot -- not on the board hours later.
    // (a_pa >= DRAM_BASE as a borrow, so a bench's DRAM_BASE = 0 is not a constant compare)
-   wire [PAW:0] a_dram_off = {1'b0, a_pa} - {1'b0, DRAM_BASE};
+   wire [PAW:0] a_dram_off = {1'b0, a_pa} - {1'b0, DRAM_BASE[PAW-1:0]};
    wire a_mem_chk = ~a_dram_off[PAW] | (a_pa[PAW-1:LRAM_LG2] == LRAM_BASE[PAW-1:LRAM_LG2]);
-   wire [PAW:0] w_dram_off = {1'b0, w_pa} - {1'b0, DRAM_BASE};
+   wire [PAW:0] w_dram_off = {1'b0, w_pa} - {1'b0, DRAM_BASE[PAW-1:0]};
    wire w_mem_chk = ~w_dram_off[PAW] | (w_pa[PAW-1:LRAM_LG2] == LRAM_BASE[PAW-1:LRAM_LG2]);
    always @(posedge clk) if (!reset && w_v && ~w_flt && (w_mem != w_mem_chk))
       $fatal(1, "smolrv64_lq: the walker classifies pa=%h for entry %0d as %0s, its region says %0s (rule D12)",

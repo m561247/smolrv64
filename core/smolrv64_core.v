@@ -82,7 +82,7 @@ module smolrv64_core
     parameter [63:0] RESET_PC = 0,
     parameter [63:0] LBASE    = 64'h7000_0000,   // the local SRAM, for the LSU's alignment rule
     parameter        LRAM_LG2 = 18,
-    parameter        PABITS   = 36,              // the architectural physical-address width
+    parameter        PABITS   = `SMOLRV64_PABITS,  // the physical-address width (smolrv64_width.vh)
     parameter        LQ_IB    = `SMOLRV64_LQB)   // the load queue's index width: 1<<LQ_IB entries
    (input  wire                    clk,
     input  wire                    reset,
@@ -141,11 +141,11 @@ module smolrv64_core
     output wire                    dmem_idle,          // no memory op in flight and no store queued (fence.i drain)
     output wire                    ifence,             // FENCE.I this cycle -> flush D$/I$
     // ---- page-table-walker ports (instruction side, data side) ----
-    output wire [55:0]             ptw_addr,
+    output wire [PABITS-1:0]       ptw_addr,
     output wire                    ptw_read,
     input  wire [63:0]             ptw_rdata,
     input  wire                    ptw_rvalid,
-    output wire [55:0]             dptw_addr,
+    output wire [PABITS-1:0]       dptw_addr,
     output wire                    dptw_read,
     input  wire [63:0]             dptw_rdata,
     input  wire                    dptw_rvalid,
@@ -213,7 +213,7 @@ module smolrv64_core
    wire                     irq_inject;
    wire                     fe_dq_valid;   // fetch assembled an instruction (bubble sub-attribution)
    wire [PCW-1:0]           imem_va;
-   wire [55:0]              immu_pa;
+   wire [PABITS-1:0]        immu_pa;
    wire                     immu_ready, immu_fault;
    wire [3:0]               immu_cause;
    wire [1:0]               immu_lvl;    // iMMU leaf level (0=4K,1=2M,2=1G) -- VHPR I$ page cap (Stage 2)
@@ -370,11 +370,10 @@ module smolrv64_core
    // access to it reaches a cache or the bus. DRAM_LG2 is the instance's configuration: the
    // board's 4 GiB window (src/dram_window.vh; a DTS memory node lies inside it, checked by
    // src/lint.sh, and describes 2 GiB on a board with 8 Gb parts), or the cosim's modeled DDR,
-   // which Simmerv faults beyond in the same way. PABITS bounds every instance.
+   // which Simmerv faults beyond in the same way. PABITS is the top's bits: every PA the core
+   // holds -- the TLBs' pages, the queues' addresses, the LSU's -- is that wide.
    localparam integer DRAM_LG2 = `SMOLRV64_DRAM_LG2;   // smolrv64_width.vh
    localparam [63:0] DRAM_TOP = 64'h8000_0000 + (64'd1 << DRAM_LG2);
-   initial if (DRAM_TOP > (64'd1 << PABITS))
-      $fatal(1, "smolrv64_core: DRAM_TOP=%h lies beyond the %0d-bit physical address space", DRAM_TOP, PABITS);
 
    // instruction-side translation. M-mode fetches are physical (satp forced Bare).
    wire [63:0] mmu_satp;
@@ -394,7 +393,7 @@ module smolrv64_core
    // forwarding, which needs the regime as well as the VA to name the same memory
    wire        m_bare     = (satp_data[63:60] != 4'd8);
 
-   mmu #(.AW(56), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6), .L2N(512), .L2I(9)) u_immu
+   mmu #(.AW(PABITS), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6), .L2N(512), .L2I(9)) u_immu
      (.clk(clk), .reset(reset),
       .req_valid(1'b1), .req_vaddr(pc64(imem_va)), .req_access(2'd0),
       .priv(mmu_priv), .sum(mmu_sum), .mxr(mmu_mxr), .satp(satp_fetch), .flush(mmu_flush_q),
@@ -405,8 +404,9 @@ module smolrv64_core
       .walk_ok(~walk_hold),
       .s_vaddr(64'd0), .s_access(2'd1), .s_ok(), .s_flt(), .s_cause(), .s_paddr(), .s_nc(), .s_dram());   // the second lookup is the dTLB's
    // a PA the iMMU delivers is below DRAM_TOP (Bare faults one above it), so it is a PC
-   assign imem_addr = immu_pa[PCW-1:0];
-   always @(posedge clk) if (!reset & immu_ready & ~immu_fault & (immu_pa[55:PCW-1] != 0))
+   wire [63:0] immu_pa64 = {{(64-PABITS){1'b0}}, immu_pa};
+   assign imem_addr = immu_pa64[PCW-1:0];
+   always @(posedge clk) if (!reset & immu_ready & ~immu_fault & (immu_pa64[63:PCW-1] != 0))
       $fatal(1, "smolrv64_core: the iMMU delivers PA %h, wider than a PC", immu_pa);
 
    // ---- a mapping change ------------------------------------------------------------
@@ -1764,12 +1764,12 @@ module smolrv64_core
    wire [SQ_IB-1:0]    sq_d_idx;
    wire [SQ_TB-1:0]    sq_d_tag;
    wire [ROB_IDXB-1:0] sq_c_rob;
-   wire [55:0]         sq_c_addr;
+   wire [PABITS-1:0]   sq_c_addr;
    wire [63:0]         sq_c_data;
    wire [1:0]          sq_c_size;
    wire                lsu_pt_done, lsu_pt_ack, lsu_pt_is_store, lsu_pt_ld_done, lsu_pt_ld_kill, lsu_xo_v, lsu_xo_unc, lsu_xo_mem;
    wire                lsu_pt_fast_done;  wire [LQ_IB-1:0] lsu_pt_rtag;   // the fast path's landing, by tag
-   wire [55:0]         lsu_xo_pa;
+   wire [PABITS-1:0]   lsu_xo_pa;
    // A ROW OF EACH: every slot's load (store) goes to its queue in the group's cycle, ranked by its
    // program position among the group's loads (stores), from the IR's flops. A load's LQ entry is
    // the queue's pick for its rank (one bank each), a store's SQ entry the tail plus its rank, and
@@ -1818,7 +1818,7 @@ module smolrv64_core
    // the store register is empty, so stores reach memory in program order.
    wire sq_go     = sq_c_v & ~sq_c_fast & ~lsu_sp_busy;
    wire sq_sp_go  = sq_c_v &  sq_c_fast & (~lsu_sp_busy | lsu_sp_done);
-   wire                sq_kc_v;   wire [ROB_IDXB-1:0] sq_kc_rob;  wire [55:0] sq_kc_addr;
+   wire                sq_kc_v;   wire [ROB_IDXB-1:0] sq_kc_rob;  wire [PABITS-1:0] sq_kc_addr;
    wire [63:0]         sq_kc_data; wire [1:0] sq_kc_size;   // the cosim's store-data check
    wire [ROB_IDXB-1:0] rob_irr_idx;  wire rob_irr_v;
    wire sq_k_take = sq_kc_v & rob_irr_v & (sq_kc_rob == rob_irr_idx);
@@ -1845,7 +1845,7 @@ module smolrv64_core
    wire [3:0]          sq_f_fc, lq_f_fc;
    wire [SEQW-1:0]     sq_f_seq, lq_f_seq;
    wire                lsu_wk_done, lsu_wk_unc, lsu_wk_mem, lsu_wk_flt, lsu_xo_tv;
-   wire [55:0]         lsu_wk_pa;
+   wire [PABITS-1:0]   lsu_wk_pa;
    wire                lsu_xo_flt;           // the fill's address alone faults: the entry carries it
    wire [3:0]          lsu_xo_fc;
    wire [3:0]          lsu_wk_fc;
@@ -1874,7 +1874,7 @@ module smolrv64_core
          $fatal(1, "smolrv64_core: the walker's store is no longer the untranslated one");
    end
 
-   smolrv64_sq #(.NENT(SQ_N), .IDXB(SQ_IB), .PAW(56), .PBITS(RN_PBITS),
+   smolrv64_sq #(.NENT(SQ_N), .IDXB(SQ_IB), .PAW(PABITS), .PBITS(RN_PBITS),
              .ROBB(ROB_IDXB), .NWB(NWB_C), .LQN(LQ_N), .LQIB(LQ_IB), .SEQW(SEQW), .NW(IW)) u_sq
      (.clk(clk), .reset(reset),
       .d_alloc(g_st), .d_rank(q_strk), .d_rob(q_rob), .d_dpreg(q_prs2), .d_rdy(s_r2rdy),
@@ -1917,7 +1917,7 @@ module smolrv64_core
    wire [QNB*(LQ_IB-$clog2(QNB)+1)-1:0] lq_bfree;   // the LQ's free entries by bank, and its bank pointer
    wire [$clog2(QNB)-1:0] lq_bp;
    wire [SQ_IB:0]      sq_free;
-   wire [55:0]         lq_x_pa;
+   wire [PABITS-1:0]   lq_x_pa;
    wire [1:0]          lq_x_size;
    wire [LQ_N*12-1:0]  lq_e_off;
    wire [LQ_N*2-1:0]   lq_e_size;
@@ -1929,7 +1929,7 @@ module smolrv64_core
    wire [RN_PBITS-1:0] lq_l_prd;
    wire [5:0]          lq_l_rd;
    wire [ROB_IDXB-1:0] lq_l_rob;
-   wire [55:0]         lq_l_pa;      // the landing load's own PA (cosim memory effect)
+   wire [PABITS-1:0]   lq_l_pa;      // the landing load's own PA (cosim memory effect)
    wire [LQ_IB:0]      lq_occ;  wire lq_av_any, lq_uf_any;
    wire [LQ_N*RN_PBITS-1:0] lq_e_dprd;   // the live loads' destinations (the stall counters)
    wire                lq_pk_v;  wire [LQ_IB-1:0] lq_pk_idx;  wire [SEQW-1:0] lq_pk_seq;   // M's pick
@@ -1989,7 +1989,7 @@ module smolrv64_core
    always @(posedge clk) mdw_age <= reset ? {(MDW_B+14){1'b0}} : mdw_age + 1'b1;
    always @(posedge clk) if (mw_we) mdw[mw_a] <= mw_d;
 
-   smolrv64_lq #(.NENT(LQ_N), .IDXB(LQ_IB), .PAW(56), .PBITS(RN_PBITS),
+   smolrv64_lq #(.NENT(LQ_N), .IDXB(LQ_IB), .PAW(PABITS), .PBITS(RN_PBITS),
              .ROBB(ROB_IDXB), .SQIB(SQ_TB), .SEQW(SEQW), .NW(IW), .NB(QNB), .LRAM_BASE(LBASE), .LRAM_LG2(LRAM_LG2)) u_lq
      (.clk(clk), .reset(reset),
       .d_alloc(g_ld), .d_rank(q_ldrk), .d_rob(q_rob), .d_prd(s_prd_gv),
@@ -2399,7 +2399,7 @@ module smolrv64_core
    wire        lsu_started;
    wire        lsu_done, lsu_done_acc, lsu_fault, lsu_idle, lsu_xo_early, lsu_ld_sent, lsu_ld_fkill;
    wire [5:0]  lsu_ld_infl;
-   wire [55:0] lsu_cos_pa;  wire [1:0] lsu_cos_kind;   // cosim memory-effect capture
+   wire [PABITS-1:0] lsu_cos_pa;  wire [1:0] lsu_cos_kind;   // cosim memory-effect capture
    wire [63:0] lsu_cos_data; wire [3:0] lsu_cos_size;
    wire [63:0] lsu_rd_val, lsu_fault_tval;
    wire        lsu_dtlb_walking, lsu_dtlb_walk_beg;   // HPM: DT_WALK / DTLB_MISS
@@ -2420,7 +2420,7 @@ module smolrv64_core
    always @(posedge clk)
       if (!reset && m_mem_op && m_is_cbo && m_at_head && lq_av_any)
          $fatal(1, "smolrv64_core: a load with an address is live under a CBO at the ROB head (pc %h)", m_pc);
-   smolrv64_lsu #(.AW(AW), .DRAM_TOP(DRAM_TOP), .LRAM_BASE(LBASE), .LRAM_LG2(LRAM_LG2), .LDTW(LQ_IB)) u_lsu
+   smolrv64_lsu #(.AW(AW), .PAW(PABITS), .DRAM_TOP(DRAM_TOP), .LRAM_BASE(LBASE), .LRAM_LG2(LRAM_LG2), .LDTW(LQ_IB)) u_lsu
      (.clk(clk), .reset(reset),
       .dtlb_walking(lsu_dtlb_walking), .dtlb_walk_beg(lsu_dtlb_walk_beg),
       // NOT m_mem_op alone. While M holds a COMPLETED op (its done pulse latched, waiting on
@@ -2477,8 +2477,8 @@ module smolrv64_core
    // retirement, so at the fire a committed store may still wait in it; after the redirect it holds
    // only older stores, so the wait ends.
    assign dmem_idle = lsu_idle & (sq_occ == 0);
-   wire [55:0] lsu_f_pa;
-   assign dmem_fpa     = {{(AW-56){1'b0}}, lsu_f_pa};
+   wire [PABITS-1:0] lsu_f_pa;
+   assign dmem_fpa     = {{(AW-PABITS){1'b0}}, lsu_f_pa};
    assign dmem_ftag    = m_lq_idx;
    assign dmem_fhint   = m_valid & m_ld_nb;
    assign dmem_fcancel = |sq_l_cancel;
@@ -4274,7 +4274,7 @@ module smolrv64_core
    // on, this trigger is the one thing here that has to follow it to the writeback event.
    reg [63:0] cs_val   [0:ROB_DEPTH-1];
    reg [1:0]  cs_mkind [0:ROB_DEPTH-1];
-   reg [55:0] cs_mpa   [0:ROB_DEPTH-1];
+   reg [PABITS-1:0] cs_mpa [0:ROB_DEPTH-1];
    reg [63:0] cs_mdata [0:ROB_DEPTH-1];   // a store's value and log2 size (4'hF: not data-checked),
    reg [3:0]  cs_msz   [0:ROB_DEPTH-1];   // for the cosim's byte-exact store check (B5, 2026-09-17)
    // Captured at the WRITEBACK event, which for a load is no longer M's cycle.
@@ -4299,7 +4299,7 @@ module smolrv64_core
          // false abort"), so the mistake would be invisible rather than loud: every
          // buffered store would go unchecked. Captured at commit instead, below.
          cs_mkind[rsi(m_rob_idx)] <= (m_mem_op & ~m_st_nb) ? lsu_cos_kind : 2'd0;
-         cs_mpa[rsi(m_rob_idx)]   <= m_st_nb ? 56'd0 : lsu_cos_pa;
+         cs_mpa[rsi(m_rob_idx)]   <= m_st_nb ? {PABITS{1'b0}} : lsu_cos_pa;
          cs_mdata[rsi(m_rob_idx)] <= m_st_nb ? 64'd0 : lsu_cos_data;
          cs_msz[rsi(m_rob_idx)]   <= m_st_nb ? 4'hF  : lsu_cos_size;
       end
@@ -4333,13 +4333,13 @@ module smolrv64_core
       if (fp_land) begin
          cs_val[rsi(ft_rob)]   <= fp_wval;
          cs_mkind[rsi(ft_rob)] <= 2'd0;      // an FP op has no memory effect
-         cs_mpa[rsi(ft_rob)]   <= 56'd0;
+         cs_mpa[rsi(ft_rob)]   <= {PABITS{1'b0}};
       end
       for (csk = 0; csk < NL; csk = csk + 1) begin
          // a lane's multiply in its reserved slot, and an op completed at issue (never saw M)
-         if (l_m2[csk]) begin cs_val[rsi(l_mrob2[csk])] <= l_mres[csk]; cs_mkind[rsi(l_mrob2[csk])] <= 2'd0; cs_mpa[rsi(l_mrob2[csk])] <= 56'd0; end
+         if (l_m2[csk]) begin cs_val[rsi(l_mrob2[csk])] <= l_mres[csk]; cs_mkind[rsi(l_mrob2[csk])] <= 2'd0; cs_mpa[rsi(l_mrob2[csk])] <= {PABITS{1'b0}}; end
          if (l_iss[csk] & ~l_late[csk]) begin
-            cs_val[rsi(l_rob[csk])] <= l_res[csk];  cs_mkind[rsi(l_rob[csk])] <= 2'd0;  cs_mpa[rsi(l_rob[csk])] <= 56'd0;
+            cs_val[rsi(l_rob[csk])] <= l_res[csk];  cs_mkind[rsi(l_rob[csk])] <= 2'd0;  cs_mpa[rsi(l_rob[csk])] <= {PABITS{1'b0}};
          end
       end
    end
@@ -4359,7 +4359,7 @@ module smolrv64_core
    end
    wire [63:0] cs_val_h   [0:IW-1];
    wire [1:0]  cs_mkind_h [0:IW-1];
-   wire [55:0] cs_mpa_h   [0:IW-1];
+   wire [PABITS-1:0] cs_mpa_h [0:IW-1];
    wire [63:0] cs_mdata_h [0:IW-1];
    wire [3:0]  cs_msz_h   [0:IW-1];
    generate for (gs = 0; gs < IW; gs = gs + 1) begin: ch
@@ -4383,7 +4383,7 @@ module smolrv64_core
                             : (cs_hl[gs] | hit_md | hit_fp) ? 2'd0
                             : hit_m  ? (m_mem_op ? lsu_cos_kind : 2'd0) : cs_mkind[rsi(ix)];
       assign cs_mpa_h[gs]   = hit_sq ? sq_kc_addr : hit_ld ? lq_l_pa
-                            : (cs_hl[gs] | hit_md | hit_fp) ? 56'd0
+                            : (cs_hl[gs] | hit_md | hit_fp) ? {PABITS{1'b0}}
                             : hit_m  ? lsu_cos_pa : cs_mpa[rsi(ix)];
       assign cs_mdata_h[gs] = hit_sq ? sq_kc_data : hit_m ? lsu_cos_data : cs_mdata[rsi(ix)];
       assign cs_msz_h[gs]   = hit_sq ? {2'b0, sq_kc_size} : hit_m ? lsu_cos_size : cs_msz[rsi(ix)];
@@ -4492,7 +4492,7 @@ module smolrv64_core
    // retire -- e.g. after an mret, or after a trap has captured it). Everything that
    // a trap changes at that same edge -- privilege above all -- must therefore be
    // REGISTERED at retire time, not read live.
-   reg [1:0]  e_mkind [0:IW-1];   reg [55:0] e_mpa [0:IW-1];      // cosim memory-effect capture
+   reg [1:0]  e_mkind [0:IW-1];   reg [PABITS-1:0] e_mpa [0:IW-1];      // cosim memory-effect capture
    reg [63:0] e_mdata [0:IW-1];   reg [3:0]  e_msz [0:IW-1];
    import "DPI-C" function void probe_retire(
       input longint unsigned pc,
@@ -4553,7 +4553,7 @@ module smolrv64_core
             e_rk[0] <= 2'd0;  e_ri[0] <= 5'd0;  e_val[0] <= 64'd0;
             e_cause <= cot_cause;  e_tval <= cot_tval;
             e_prv <= u_csr.priv;                  // privilege BEFORE the trap
-            e_mkind[0] <= 2'd0;  e_mpa[0] <= 56'd0;     // a trap performed no data access
+            e_mkind[0] <= 2'd0;  e_mpa[0] <= {PABITS{1'b0}};     // a trap performed no data access
             e_mdata[0] <= 64'd0; e_msz[0] <= 4'hF;
          end else if (|retire) begin
             e_trap <= 1'b0;  e_cause <= 64'd0;  e_tval <= 64'd0;
@@ -4579,7 +4579,7 @@ module smolrv64_core
                          (e_rk[ek] == 2'd0) ? 8'd0 : {3'd0, e_ri[ek]},
                          {6'd0, e_prv}, {7'd0, e_trap}, e_val[ek], e_cause, e_tval,
                          64'd0, {64{1'b1}}, `VA_UNPACK40(u_csr.mepc), 8'd0,
-                         {6'd0, e_mkind[ek]}, {8'd0, e_mpa[ek]}, e_mdata[ek], {4'd0, e_msz[ek]});
+                         {6'd0, e_mkind[ek]}, {{(64-PABITS){1'b0}}, e_mpa[ek]}, e_mdata[ek], {4'd0, e_msz[ek]});
    end
 `endif
 
