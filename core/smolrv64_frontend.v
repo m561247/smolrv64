@@ -340,7 +340,7 @@ module smolrv64_frontend
       smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_ds
         (.pdet(pdet), .pc(pc), .inst(inst), .seq_in(seq), .pk(pk), .tgt(pb_tgt), .fault_op(fault_op),
          .cause(pb_cause), .fault_hi(pb_fhi), .fs_off(fs_off),
-         .q_v(1'b0), .q_pnpc({PCW{1'b0}}), .q_illegal(1'b0), .q_mis_taken(1'b0), .q_mis_nt(1'b0), .q_gc(16'd0),
+         .q_rvc(1'b0), .q_pnpc({PCW{1'b0}}), .q_illegal(1'b0), .q_mis_taken(1'b0), .q_mis_nt(1'b0), .q_gc(16'd0),
          .qrec(q_wd[gk*QRW +: QRW]), .rec(q_fwd[gk*IRW +: IRW]), .imm_wide(imm_wide));
       assign q_bv[gk] = q_push & pb_svq[j];
       assign q_wpos[gk*QAW +: QAW] = q_wp + {{(QAW-QLB){1'b0}}, j};
@@ -382,10 +382,10 @@ module smolrv64_frontend
       assign g[gk] = q_rd2[gk*QRW +: 16];
       `QR_DECL(r_)
       assign `QR_REC(r_) = q_rd2[(IW + gk)*QRW +: QRW];
-      smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_hd
+      smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK), .QHEAD(1)) u_hd
         (.pdet(r_pdet), .pc(r_pc), .inst(r_inst), .seq_in(r_seq), .pk(2'd0), .tgt({PCW{1'b0}}),
          .fault_op(r_fault), .cause(r_fault_cause), .fault_hi(r_fault_hi), .fs_off(1'b0),
-         .q_v(1'b1), .q_pnpc(r_pred_npc), .q_illegal(r_illegal), .q_mis_taken(r_mis_taken),
+         .q_rvc(r_rvc), .q_pnpc(r_pred_npc), .q_illegal(r_illegal), .q_mis_taken(r_mis_taken),
          .q_mis_nt(r_mis_nt), .q_gc(r_gc), .qrec(), .rec(ql[gk]), .imm_wide());
    end endgenerate
    // THE QUEUE'S SHADOW: each record whole, as its slot decoded it before the queue, read only by
@@ -397,10 +397,10 @@ module smolrv64_frontend
    `QR_DECL(hq_)
    assign `QR_REC(hq_) = q_rd2[0 +: QRW];
    wire [IRW-1:0] h_rec;
-   smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_hh
+   smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK), .QHEAD(1)) u_hh
      (.pdet(hq_pdet), .pc(hq_pc), .inst(hq_inst), .seq_in(hq_seq), .pk(2'd0), .tgt({PCW{1'b0}}),
       .fault_op(hq_fault), .cause(hq_fault_cause), .fault_hi(hq_fault_hi), .fs_off(1'b0),
-      .q_v(1'b1), .q_pnpc(hq_pred_npc), .q_illegal(hq_illegal), .q_mis_taken(hq_mis_taken),
+      .q_rvc(hq_rvc), .q_pnpc(hq_pred_npc), .q_illegal(hq_illegal), .q_mis_taken(hq_mis_taken),
       .q_mis_nt(hq_mis_nt), .q_gc(hq_gc), .qrec(), .rec(h_rec), .imm_wide());
    `IR_DECL(h_)
    assign `IR_REC(h_) = h_rec;

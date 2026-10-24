@@ -7,15 +7,17 @@
 // decode, and ride as two bits.
 //
 // Twice: before the decoupling queue, a slot of the bundle register decodes into what the queue
-// holds (qrec: the raw bits and what needs the fetch state -- fetch's choice and target, mstatus.FS);
-// at the queue head (q_v), a queued record decodes into the whole record dispatch takes (rec), the
-// fetch-state fields taken from the queue. The rest is decoded from the same bits by the same logic.
+// holds (qrec: the expanded instruction, its RVC flag and what needs the fetch state -- fetch's choice
+// and target, mstatus.FS); at the queue head (QHEAD), a queued record decodes into the whole record
+// dispatch takes (rec), the fetch-state fields taken from the queue. The rest is decoded from the same
+// expanded bits by the same logic, so the head's decoders expand nothing.
 module smolrv64_dslot
   #(parameter PCW  = 64,
     parameter SEQW = 8,
     parameter PDW  = 32,
     parameter integer DCR_HIT  = 2,
-    parameter integer DCR_BACK = 1)
+    parameter integer DCR_BACK = 1,
+    parameter integer QHEAD    = 0)   // 1: at the queue head, inst is the queued expanded instruction
    (input  wire [PDW-1:0]     pdet,       // the bundle's predict details
     input  wire [PCW-1:0]     pc,
     input  wire [31:0]        inst,
@@ -26,7 +28,7 @@ module smolrv64_dslot
     input  wire [3:0]         cause,
     input  wire               fault_hi,   // the fault is the straddler's high halfword's (its VA is pc+2)
     input  wire               fs_off,     // mstatus.FS is Off: an FP op decodes illegal
-    input  wire               q_v,        // a queued record: the four below are its
+    input  wire               q_rvc,      // a queued record (QHEAD): its RVC flag and the four below
     input  wire [PCW-1:0]     q_pnpc,
     input  wire               q_illegal, q_mis_taken, q_mis_nt,
     input  wire [15:0]        q_gc,
@@ -35,7 +37,7 @@ module smolrv64_dslot
     output wire               imm_wide);  // the immediate is not its low 32 bits sign-extended (smolrv64_frontend asserts)
 `include "smolrv64_pc.vh"
 
-   wire        s_rvc, s_rd_v, s_rs1_v, s_rs2_v, s_rs3_v, s_legal, s_has_imm;
+   wire        d_rvc, s_rd_v, s_rs1_v, s_rs2_v, s_rs3_v, s_legal, s_has_imm;
    wire [31:0] s_exp;
    wire [5:0]  s_rd, s_rs1, s_rs2, s_rs3, s_alu_op;
    wire [63:0] s_imm;
@@ -46,9 +48,10 @@ module smolrv64_dslot
    wire        s_is_mul, s_is_csr, s_is_serialize, s_is_amo, s_is_fencei;
    wire [4:0]  s_amo_func;
    wire        s_is_cbo, s_cbo_zero, s_cbo_keep, s_illegal;
-   decode_slot #(.SEQW(SEQW)) u_dec
+   wire q_v = (QHEAD != 0);
+   decode_slot #(.SEQW(SEQW), .EXPANDED(QHEAD)) u_dec
      (.inst(inst), .in_valid(1'b1), .seq_in(seq_in),
-      .valid(), .seq(), .is_rvc(s_rvc), .expanded(s_exp),
+      .valid(), .seq(), .is_rvc(d_rvc), .expanded(s_exp),
       .rd(s_rd), .rd_v(s_rd_v), .rs1(s_rs1), .rs1_v(s_rs1_v),
       .rs2(s_rs2), .rs2_v(s_rs2_v), .rs3(s_rs3), .rs3_v(s_rs3_v),
       .imm(s_imm), .has_imm(s_has_imm), .legal(s_legal),
@@ -64,6 +67,7 @@ module smolrv64_dslot
    // JALR is told from JAL here: its target is rs1+imm, not pc+imm.
    wire           s_is_jalr  = (s_exp[6:2] == 5'b11001);
    wire [PCW-1:0] s_taken_pc = pc + s_imm[PCW-1:0];   // pc-relative: exact at PCW (smolrv64_pc.vh)
+   wire           s_rvc      = q_v ? q_rvc : d_rvc;
    wire [PCW-1:0] s_ft_pc    = pc + (s_rvc ? PC2 : PC4);
    // fetch's pred_npc, rebuilt from the queued choice and the length decoded here
    wire [PCW-1:0] pnpc       = (pk == 2'd2) ? pc : (pk == 2'd1) ? tgt : s_ft_pc;
@@ -125,7 +129,7 @@ module smolrv64_dslot
       .is_csr(m_is_csr), .is_serialize(m_is_serialize), .is_fencei(m_is_fencei), .is_cbo(m_is_cbo),
       .is_branch(m_is_branch), .is_jump(m_is_jump), .is_jalr(m_is_jalr), .illegal(m_illegal),
       .fault(m_fault), .mis_taken(m_mis_taken), .imm_neg(m_imm[63]), .btb_hit(m_pdet[DCR_HIT]), .gc(d_gc));
-   wire [31:0]     m_inst = inst;
+   wire [31:0]     m_inst = s_exp;   // the queue holds it expanded (see the header)
    assign qrec = `QR_REC(m_);
    assign rec = `IR_REC(m_);
 endmodule

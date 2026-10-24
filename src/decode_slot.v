@@ -6,7 +6,8 @@
 // rename-facing operands (decode_operands) and the execute control (decode_exec)
 // from the resulting 32-bit form. Per-operand valids are gated by in_valid so an
 // invalid slot contributes no dependencies.
-module decode_slot #(parameter SEQW = 8)
+module decode_slot #(parameter SEQW = 8,
+                     parameter EXPANDED = 0)     // inst is already expanded (is_rvc then reads 0)
    (input  wire [31:0]      inst,
     input  wire             in_valid,
     input  wire [SEQW-1:0]  seq_in,
@@ -51,7 +52,7 @@ module decode_slot #(parameter SEQW = 8)
     output wire             cbo_keep,
     output wire             illegal);
 
-   wire        is_c = (inst[1:0] != 2'b11);
+   wire        is_c = (EXPANDED == 0) & (inst[1:0] != 2'b11);
    wire [31:0] exp_rvc;
    rvc_expand u_rvc (.c(inst[15:0]), .insn(exp_rvc));
    wire [31:0] full = is_c ? exp_rvc : inst;

@@ -17,12 +17,12 @@
    wire [2:0] P``br_func, P``csr_func; wire P``is_mul, P``is_csr, P``is_serialize, P``is_amo; \
    wire [4:0] P``amo_func; wire P``is_fencei, P``is_cbo, P``cbo_zero, P``cbo_keep, P``illegal; \
    wire P``mis_taken, P``mis_nt; wire [15:0] P``gc;
-// What the decoupling queue holds of an instruction (QR_REC): its raw bits, and what decode computed
+// What the decoupling queue holds of an instruction (QR_REC): its expanded bits and RVC flag, and what decode computed
 // from the fetch state beside them -- the predicted next PC (from fetch's choice and target), the
 // illegal bit (mstatus.FS at decode), the branch compares and the dispatch class, the class last
 // (the queue head reads its low 16 bits). smolrv64_dslot rebuilds the rest from the bits at the head.
-`define QR_REC(P) {P``pdet, P``pc, P``fault_hi, P``seq, P``pred_npc, P``fault, P``fault_cause, P``inst, P``illegal, P``mis_taken, P``mis_nt, P``gc}
-`define QR_RECW (2*PCW + PDW + SEQW + 1 + 1 + 4 + 32 + 1 + 1 + 1 + 16)
+`define QR_REC(P) {P``pdet, P``pc, P``fault_hi, P``seq, P``pred_npc, P``fault, P``fault_cause, P``inst, P``rvc, P``illegal, P``mis_taken, P``mis_nt, P``gc}
+`define QR_RECW (2*PCW + PDW + SEQW + 1 + 1 + 4 + 32 + 1 + 1 + 1 + 1 + 16)
 `define QR_DECL(P) wire [PDW-1:0] P``pdet; wire [PCW-1:0] P``pc, P``pred_npc; wire P``fault_hi, P``fault, P``illegal; \
-   wire P``mis_taken, P``mis_nt; wire [SEQW-1:0] P``seq; wire [3:0] P``fault_cause; wire [31:0] P``inst; wire [15:0] P``gc;
+   wire P``mis_taken, P``mis_nt, P``rvc; wire [SEQW-1:0] P``seq; wire [3:0] P``fault_cause; wire [31:0] P``inst; wire [15:0] P``gc;
 `endif
