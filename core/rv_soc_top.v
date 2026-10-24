@@ -126,10 +126,11 @@ module rv_soc_top #(
 );
    localparam SIZE = 1<<RAM_LG2;
    localparam AW   = 64;
-   // The physical-address width: DRAM lies in [0x8000_0000, 0x1_8000_0000) at most (the board's
-   // 4 GiB window) and the core faults any PA beyond its instance's DRAM (smolrv64_core, THE
-   // PHYSICAL-ADDRESS CAP, which also asserts DRAM_TOP fits), so the D$ and the I$ tag 33 bits.
-   localparam integer PABITS = 33;
+   // The physical-address width: the bits of the instance's DRAM top (DRAM is 2^SMOLRV64_DRAM_LG2
+   // bytes from 0x8000_0000, smolrv64_width.vh), as the core faults any PA beyond it (smolrv64_core,
+   // THE PHYSICAL-ADDRESS CAP). The D$ and the I$ tag exactly these bits: 33 for today's 4 GiB board,
+   // and a larger DRAM widens them.
+   localparam integer PABITS = $clog2(64'h8000_0000 + (64'd1 << `SMOLRV64_DRAM_LG2));
    localparam integer LQ_IB  = `SMOLRV64_LQB;    // the core's load-queue index width: the D$ read tag carries it
    localparam LAW  = AW-6;                  // line address width = 58
 

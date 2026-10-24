@@ -7,6 +7,13 @@
 `ifndef SMOLRV64_FW
  `define SMOLRV64_FW (2*`SMOLRV64_IW)  // fetch width: instructions into the decoupling queue per cycle (IW..8)
 `endif
+`ifndef SMOLRV64_DRAM_LG2                // DRAM: 2^this bytes from 0x8000_0000 (the instance's; PABITS follows)
+ `ifdef COSIM_MEM_SIZE_LG2
+  `define SMOLRV64_DRAM_LG2 `COSIM_MEM_SIZE_LG2   // the cosim's modeled DDR
+ `else
+  `define SMOLRV64_DRAM_LG2 32                    // the board's 4 GiB window (src/dram_window.vh)
+ `endif
+`endif
 `ifndef SMOLRV64_QD
  `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif

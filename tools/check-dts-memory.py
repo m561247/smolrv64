@@ -4,19 +4,19 @@
 smolrv64_core faults every physical address at or above its DRAM top, 0x8000_0000 + 2^DRAM_LG2
 (THE PHYSICAL-ADDRESS CAP). A memory node reaching past that top hands Linux pages the core
 refuses, so each node must lie inside [0x8000_0000, top). DRAM_LG2 is read from the RTL's
-board branch, so the cap has one home.
+board branch (core/smolrv64_width.vh: SMOLRV64_DRAM_LG2), so the cap has one home.
 
     tools/check-dts-memory.py workloads/ubuntu/ubuntu-nfs.dts workloads/gb5/gb5-fpga.dts
 """
 import pathlib, re, sys
 
-CORE = pathlib.Path(__file__).resolve().parent.parent / 'core' / 'smolrv64_core.v'
+CORE = pathlib.Path(__file__).resolve().parent.parent / 'core' / 'smolrv64_width.vh'
 BASE = 0x8000_0000
 
 
 def board_dram_lg2():
     # the `else` arm of the COSIM_MEM_SIZE_LG2 conditional is the board's configuration
-    m = re.search(r'`else\s*\n\s*localparam integer DRAM_LG2 = (\d+);', CORE.read_text())
+    m = re.search(r'`else\s*\n\s*`define SMOLRV64_DRAM_LG2 (\d+)', CORE.read_text())
     if not m:
         sys.exit(f'{CORE}: no board DRAM_LG2 found')
     return int(m.group(1))

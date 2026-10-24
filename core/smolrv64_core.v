@@ -371,11 +371,7 @@ module smolrv64_core
    // board's 4 GiB window (src/dram_window.vh; a DTS memory node lies inside it, checked by
    // src/lint.sh, and describes 2 GiB on a board with 8 Gb parts), or the cosim's modeled DDR,
    // which Simmerv faults beyond in the same way. PABITS bounds every instance.
-`ifdef COSIM_MEM_SIZE_LG2
-   localparam integer DRAM_LG2 = `COSIM_MEM_SIZE_LG2;
-`else
-   localparam integer DRAM_LG2 = 32;
-`endif
+   localparam integer DRAM_LG2 = `SMOLRV64_DRAM_LG2;   // smolrv64_width.vh
    localparam [63:0] DRAM_TOP = 64'h8000_0000 + (64'd1 << DRAM_LG2);
    initial if (DRAM_TOP > (64'd1 << PABITS))
       $fatal(1, "smolrv64_core: DRAM_TOP=%h lies beyond the %0d-bit physical address space", DRAM_TOP, PABITS);
