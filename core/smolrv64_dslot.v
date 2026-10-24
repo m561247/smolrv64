@@ -1,10 +1,15 @@
 `default_nettype none
 `include "smolrv64_irec.vh"
 
-// One slot of the frontend's bundle register, decoded into the record the decoupling queue
-// holds (smolrv64_irec.vh). A fetch-fault pseudo-op decodes to a serialising op that carries
-// the fault and nothing else. The branch compares are payload-static (pc, imm and the
-// prediction are known here), so they are computed once, at decode, and ride as two bits.
+// One slot decoded into an instruction's record (smolrv64_irec.vh). A fetch-fault pseudo-op decodes
+// to a serialising op that carries the fault and nothing else. The branch compares are
+// payload-static (pc, imm and the prediction are known here), so they are computed once, at
+// decode, and ride as two bits.
+//
+// Twice: before the decoupling queue, a slot of the bundle register decodes into what the queue
+// holds (qrec: the raw bits and what needs the fetch state -- fetch's choice and target, mstatus.FS);
+// at the queue head (q_v), a queued record decodes into the whole record dispatch takes (rec), the
+// fetch-state fields taken from the queue. The rest is decoded from the same bits by the same logic.
 module smolrv64_dslot
   #(parameter PCW  = 64,
     parameter SEQW = 8,
@@ -21,6 +26,11 @@ module smolrv64_dslot
     input  wire [3:0]         cause,
     input  wire               fault_hi,   // the fault is the straddler's high halfword's (its VA is pc+2)
     input  wire               fs_off,     // mstatus.FS is Off: an FP op decodes illegal
+    input  wire               q_v,        // a queued record: the four below are its
+    input  wire [PCW-1:0]     q_pnpc,
+    input  wire               q_illegal, q_mis_taken, q_mis_nt,
+    input  wire [15:0]        q_gc,
+    output wire [`QR_RECW-1:0] qrec,
     output wire [`IR_RECW-1:0] rec,
     output wire               imm_wide);  // the immediate is not its low 32 bits sign-extended (smolrv64_frontend asserts)
 `include "smolrv64_pc.vh"
@@ -64,7 +74,7 @@ module smolrv64_dslot
    wire            m_fault_hi = fault_hi;
    wire            m_is_fp = fault_op ? 1'b0 : ((s_exp[6:2] == 5'b10100) | (s_exp[6:2] == 5'b10000) | (s_exp[6:2] == 5'b10001) | (s_exp[6:2] == 5'b10010) | (s_exp[6:2] == 5'b10011) | (s_exp[6:2] == 5'b00001) | (s_exp[6:2] == 5'b01001));
    wire [SEQW-1:0] m_seq = seq_in;
-   wire [PCW-1:0]  m_pred_npc = pnpc;
+   wire [PCW-1:0]  m_pred_npc = q_v ? q_pnpc : pnpc;
    wire            m_fault = fault_op;
    wire [3:0]      m_fault_cause = cause;
    wire [31:0]     m_insn = fault_op ? 32'd0 : s_exp;
@@ -104,16 +114,19 @@ module smolrv64_dslot
    wire            m_is_cbo = fault_op ? 1'b0 : s_is_cbo;
    wire            m_cbo_zero = s_cbo_zero;
    wire            m_cbo_keep = s_cbo_keep;
-   wire            m_illegal = fault_op ? 1'b0 : s_illegal | (m_is_fp & fs_off);
-   wire            m_mis_taken = (s_taken_pc != pnpc);
-   wire            m_mis_nt = (s_ft_pc != pnpc);
+   wire            m_illegal = q_v ? q_illegal : fault_op ? 1'b0 : s_illegal | (m_is_fp & fs_off);
+   wire            m_mis_taken = q_v ? q_mis_taken : (s_taken_pc != pnpc);
+   wire            m_mis_nt = q_v ? q_mis_nt : (s_ft_pc != pnpc);
    // the dispatch class, once, at decode (the queue head and dispatch both read it)
-   wire [15:0]     m_gc;
+   wire [15:0]     d_gc;
+   wire [15:0]     m_gc = q_v ? q_gc : d_gc;
    smolrv64_gclass #(.DCR_BACK(DCR_BACK)) u_gc
      (.insn(m_insn), .is_mem(m_is_mem), .is_store(m_is_store), .is_amo(m_is_amo), .is_mul(m_is_mul), .is_fp(m_is_fp),
       .is_csr(m_is_csr), .is_serialize(m_is_serialize), .is_fencei(m_is_fencei), .is_cbo(m_is_cbo),
       .is_branch(m_is_branch), .is_jump(m_is_jump), .is_jalr(m_is_jalr), .illegal(m_illegal),
-      .fault(m_fault), .mis_taken(m_mis_taken), .imm_neg(m_imm[63]), .btb_hit(m_pdet[DCR_HIT]), .gc(m_gc));
+      .fault(m_fault), .mis_taken(m_mis_taken), .imm_neg(m_imm[63]), .btb_hit(m_pdet[DCR_HIT]), .gc(d_gc));
+   wire [31:0]     m_inst = inst;
+   assign qrec = `QR_REC(m_);
    assign rec = `IR_REC(m_);
 endmodule
 

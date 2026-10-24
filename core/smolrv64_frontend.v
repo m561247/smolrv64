@@ -251,7 +251,8 @@ module smolrv64_frontend
    localparam QW = PDW + PCW + 32 + SEQW + 2 + 1;
    // One PACKED record per slot (smolrv64_irec.vh) keeps the compaction a handful of muxes
    // instead of ~46 per field, with one field list for pack and unpack.
-   localparam integer IRW = `IR_RECW;
+   localparam integer IRW = `IR_RECW;              // the record dispatch takes (d_rec)
+   localparam integer QRW = `QR_RECW;              // ...and what the queue holds of it
    wire           dq_fault = imem_fault & ~dq_valid;    // fetch-fault pseudo-op, pushed like a bundle
    wire           pb_load  = pb_ready & (dq_valid | dq_fault);   // the register takes a bundle or the fault op
    // UP TO FW ENTRIES PER CYCLE INTO A LUTRAM: QNB = next_pow2(FW) banks (smolrv64_bankq), so a
@@ -322,9 +323,10 @@ module smolrv64_frontend
    // ---- the storage: QNB banks, a slot's record at q_wp + its slot, the heads read from q_rp ----
    // The bundle register's slots are rotated to the banks they land in (slot j at q_wp + j, in bank
    // (q_wp + j) % QNB) and decoded THERE, a decoder a bank: the rotation is of the raw slot (QW
-   // bits), not of the record it decodes to (IRW), and each bank writes its own decoder's record.
+   // bits), not of the record it decodes to, and each bank writes its own decoder's queued record.
    wire [QNB*QAW-1:0] q_wpos;
-   wire [QNB*IRW-1:0] q_wd;
+   wire [QNB*QRW-1:0] q_wd;
+   wire [QNB*IRW-1:0] q_fwd;                            // ...and the whole record (the shadow's, below)
    wire [QNB-1:0]     q_bv;                             // the bank takes a record this cycle
    wire [QNB-1:0]     pb_svq = {{(QNB-FW){1'b0}}, pb_sv};
    generate for (gk = 0; gk < QNB; gk = gk + 1) begin: sl
@@ -335,7 +337,9 @@ module smolrv64_frontend
       assign {pdet, pc, inst, seq, pk, fault_op} = pb_in[j];
       smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_ds
         (.pdet(pdet), .pc(pc), .inst(inst), .seq_in(seq), .pk(pk), .tgt(pb_tgt), .fault_op(fault_op),
-         .cause(pb_cause), .fault_hi(pb_fhi), .fs_off(fs_off), .rec(q_wd[gk*IRW +: IRW]), .imm_wide(imm_wide));
+         .cause(pb_cause), .fault_hi(pb_fhi), .fs_off(fs_off),
+         .q_v(1'b0), .q_pnpc({PCW{1'b0}}), .q_illegal(1'b0), .q_mis_taken(1'b0), .q_mis_nt(1'b0), .q_gc(16'd0),
+         .qrec(q_wd[gk*QRW +: QRW]), .rec(q_fwd[gk*IRW +: IRW]), .imm_wide(imm_wide));
       assign q_bv[gk] = q_push & pb_svq[j];
       assign q_wpos[gk*QAW +: QAW] = q_wp + {{(QAW-QLB){1'b0}}, j};
       always @(posedge clk) if (!reset & q_bv[gk] & imm_wide)
@@ -360,23 +364,44 @@ module smolrv64_frontend
    reg  [LB-1:0]     lc;
    initial lc = {LB{1'b0}};
    wire [2*IW*QLB-1:0] q_ro;
-   wire [2*IW*IRW-1:0] q_rd2;
+   wire [2*IW*QRW-1:0] q_rd2;
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: ro
       localparam [LB-1:0] K = gk;
       assign q_ro[gk*QLB +: QLB]        = gk[QLB-1:0];                                // program order
       assign q_ro[(IW + gk)*QLB +: QLB] = {{(QLB-LB){1'b0}}, rsub(K, lc)};            // lane k's
    end endgenerate
-   smolrv64_bankq #(.W(IRW), .DEPTH(QDEPTH), .NW(QNB), .NR(2*IW), .NB(QNB), .BYBANK(1)) u_q
+   smolrv64_bankq #(.W(QRW), .DEPTH(QDEPTH), .NW(QNB), .NR(2*IW), .NB(QNB), .BYBANK(1)) u_q
      (.clk(clk), .reset(reset), .wv(q_bv), .wp(q_wpos), .wd(q_wd), .rp(q_rp), .ro(q_ro), .rd(q_rd2));
-   // the heads' dispatch classes in program order (the record's last field), and lane k's record
+   // the heads' dispatch classes in program order (the queued record's last field), and lane k's
+   // record, decoded from what the queue holds of it into the record dispatch takes
    wire [15:0]    g  [0:IW-1];
    wire [IRW-1:0] ql [0:IW-1];
-   `IR_DECL(h_)                                   // the head's record by name (the stall accounting's)
-   assign `IR_REC(h_) = q_rd2[0 +: IRW];
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: hd
-      assign g[gk]  = q_rd2[gk*IRW +: 16];
-      assign ql[gk] = q_rd2[(IW + gk)*IRW +: IRW];
+      assign g[gk] = q_rd2[gk*QRW +: 16];
+      `QR_DECL(r_)
+      assign `QR_REC(r_) = q_rd2[(IW + gk)*QRW +: QRW];
+      smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_hd
+        (.pdet(r_pdet), .pc(r_pc), .inst(r_inst), .seq_in(r_seq), .pk(2'd0), .tgt({PCW{1'b0}}),
+         .fault_op(r_fault), .cause(r_fault_cause), .fault_hi(r_fault_hi), .fs_off(1'b0),
+         .q_v(1'b1), .q_pnpc(r_pred_npc), .q_illegal(r_illegal), .q_mis_taken(r_mis_taken),
+         .q_mis_nt(r_mis_nt), .q_gc(r_gc), .qrec(), .rec(ql[gk]), .imm_wide());
    end endgenerate
+   // THE QUEUE'S SHADOW: each record whole, as its slot decoded it before the queue, read only by
+   // the check below that the head rebuilds it bit for bit (synthesis removes it)
+   wire [2*IW*IRW-1:0] q_frd;
+   smolrv64_bankq #(.W(IRW), .DEPTH(QDEPTH), .NW(QNB), .NR(2*IW), .NB(QNB), .BYBANK(1)) u_qsh
+     (.clk(clk), .reset(reset), .wv(q_bv), .wp(q_wpos), .wd(q_fwd), .rp(q_rp), .ro(q_ro), .rd(q_frd));
+   // the head's record by name, for the bench's stall accounting (nothing here reads it)
+   `QR_DECL(hq_)
+   assign `QR_REC(hq_) = q_rd2[0 +: QRW];
+   wire [IRW-1:0] h_rec;
+   smolrv64_dslot #(.PCW(PCW), .SEQW(SEQW), .PDW(PDW), .DCR_HIT(DCR_HIT), .DCR_BACK(DCR_BACK)) u_hh
+     (.pdet(hq_pdet), .pc(hq_pc), .inst(hq_inst), .seq_in(hq_seq), .pk(2'd0), .tgt({PCW{1'b0}}),
+      .fault_op(hq_fault), .cause(hq_fault_cause), .fault_hi(hq_fault_hi), .fs_off(1'b0),
+      .q_v(1'b1), .q_pnpc(hq_pred_npc), .q_illegal(hq_illegal), .q_mis_taken(hq_mis_taken),
+      .q_mis_nt(hq_mis_nt), .q_gc(hq_gc), .qrec(), .rec(h_rec), .imm_wide());
+   `IR_DECL(h_)
+   assign `IR_REC(h_) = h_rec;
    wire [CW-1:0]  q_pop;                          // entries leaving this cycle (the group's take)
    wire [CW-1:0]  q_pushn = cnt(q_wr);            // entries pushed
    always @(posedge clk) begin
@@ -466,6 +491,10 @@ module smolrv64_frontend
          for (k = 0; k < IW; k = k + 1) d_rec[k*IRW +: IRW] <= ql[k];
       end
    end
+   always @(posedge clk) if (!reset & !redirect)
+      for (k = 0; k < IW; k = k + 1)
+         if (take_l[k] & (ql[k] != q_frd[(IW + k)*IRW +: IRW]))
+            $fatal(1, "smolrv64_frontend: lane %0d's record rebuilt at the head differs from its decode before the queue (pc %h)", k, q_frd[(IW + k)*IRW + IRW - PDW - PCW +: PCW]);
 endmodule
 
 `default_nettype wire
