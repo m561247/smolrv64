@@ -1513,7 +1513,9 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
 - **Outside requests: the I$'s coherent fill and coherent DMA.** One port asks the D$ to clean
   or flush a line by PA (`ox_req`, `ox_keep`: a CBO queued in the store queue behind every store
   taken before it, answered by `ox_ack`); `rv_soc_top` gives it to the I$ and the DMA masters in
-  turn, each owning it from its first cycle to its answer.
+  turn, each owning it from its first cycle to its answer. It takes a store-queue slot in any
+  cycle no store is taken; refused four times with room in the queue, it holds the store port's
+  room (`wr_room`) off until it is in, so a store stream delays it at most four cycles.
   - The I$: every I$ line read goes to memory at once, and beside it the I$ asks for that line
     cleaned (`ox_dty` with the answer unless the clean found the line clean on its first look).
     `rv_soc_top` uses the memory's data only if the D$ has answered clean by then; otherwise it

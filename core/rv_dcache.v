@@ -188,6 +188,7 @@ module rv_dcache #(
    localparam SD    = 3;                          // store-queue entries
    localparam [2:0] ST_WAIT = 3'd3;               // a queued store goes ahead of loads after this long
    localparam [2:0] FP_WAIT = 3'd3;               // the store lookup shuts the load door after this long
+   localparam [2:0] OX_WAIT = 3'd4;               // an outside request refused this long takes the store port's room
    initial begin
       if (WAYS < 8 || (WAYS & (WAYS - 1)) != 0) $fatal(1, "rv_dcache: %0d ways: a power of two, at least eight (a line's chunks in distinct arrays)", WAYS);
       if (NMSHR + NWB > (1 << SW)) $fatal(1, "rv_dcache: %0d MSHRs and %0d write-backs need more than %0d slot bits", NMSHR, NWB, SW);
@@ -360,10 +361,16 @@ module rv_dcache #(
       sq_cn = 1'b0;
       for (i = 0; i < SD; i = i + 1) if ((i < sc) & (sf_cbo[sq_hp + i[1:0]] | sf_nc[sq_hp + i[1:0]]) & ~sf_ox[sq_hp + i[1:0]]) sq_cn = 1'b1;
    end
-   wire           wr_take = wr_req & (sc != SD) & ~((cbo_req | wr_nc) & sq_cn);
-   // an outside request takes a slot the store port leaves: never in a cycle it presents, so the room
-   // the store port was promised stays its own
-   wire           ox_take = ox_req & ~oxq & ~ox_ack & ~wr_req & (sc != SD);
+   // a store is taken when the store port was promised room (wr_room: sc != SD, unless an outside
+   // request has it)
+   wire           wr_take = wr_req & wr_room & ~((cbo_req | wr_nc) & sq_cn);
+   // AN OUTSIDE REQUEST takes a slot no store takes: the store port's promised room stays its own,
+   // and a CBO or NC store held for its completion keeps nothing out. One refused OX_WAIT cycles
+   // takes the room from the store port until it is in (ox_pri): a store stream never starves it.
+   wire           ox_pend = ox_req & ~oxq & ~ox_ack;
+   wire           ox_take = ox_pend & (sc != SD) & ~wr_take;
+   reg  [2:0]     ox_w;                           // the cycles it has been refused
+   wire           ox_pri  = ox_pend & ~ox_take & (ox_w >= OX_WAIT - 3'd1);
    wire           sq_take = wr_take | ox_take;
 
    // ---------------------------------------------------------------- the store lookup's input
@@ -682,7 +689,7 @@ module rv_dcache #(
    always @(posedge clk) begin
       if (reset) begin
          door <= 1'b0;  sdoor <= 1'b0;  s1_v <= 1'b0;  s1_f <= 1'b0;  sb_v <= 1'b0;  rd_valid <= 1'b0;  rd_f <= 1'b0;  wr_acc <= 1'b0;  wr_cpl <= 1'b0;
-         sc <= 2'd0;  sq_hp <= 2'd0;  wr_room <= 1'b0;  oxq <= 1'b0;  xb_v <= 1'b0;  ox_ack <= 1'b0;  ox_dty <= 1'b0;  ox_slow <= 1'b0;
+         sc <= 2'd0;  sq_hp <= 2'd0;  wr_room <= 1'b0;  ox_w <= 3'd0;  oxq <= 1'b0;  xb_v <= 1'b0;  ox_ack <= 1'b0;  ox_dty <= 1'b0;  ox_slow <= 1'b0;
          nc_v <= 1'b0;  nc_rdy <= 1'b0;  cl_pend <= 1'b0;  cl_on <= 1'b0;  cl_wait <= 1'b0;
          scan_on <= 1'b1;  scan <= 6'd0;  fl_v <= 1'b0;  ra_m <= {NW{1'b0}};  w1_v <= 1'b0;
          st_age <= 3'd0;  fp_age <= 3'd0;
@@ -729,7 +736,8 @@ module rv_dcache #(
          end
          if (sq_bk) sf_iss[sq_h1] <= 1'b0;
          sc      <= sc + {1'b0, sq_take} - {1'b0, st_done};
-         wr_room <= (sc + {1'b0, sq_take} - {1'b0, st_done}) != SD;
+         wr_room <= ((sc + {1'b0, sq_take} - {1'b0, st_done}) != SD) & ~ox_pri;
+         ox_w    <= (ox_pend & ~ox_take) ? ((ox_w == 3'd7) ? ox_w : ox_w + 3'd1) : 3'd0;
          // a load's answer: from the lookup, else the NC slot's
          rd_valid <= ans | nc_rdy;
          rd_f     <= ans & s1_f;
@@ -901,6 +909,14 @@ module rv_dcache #(
    reg  [15:0] e_q;
    always @(posedge clk) e_q <= reset ? 16'd0 : e_now;
    assign err = e_q;
+   // an outside request is refused with room in the store queue at most OX_WAIT times (a simulation
+   // check: ox_pri bounds it)
+   reg  [7:0]  ox_rr;
+   always @(posedge clk) begin
+      ox_rr <= (reset | ~ox_pend | ox_take) ? 8'd0 : ox_rr + {7'd0, sc != SD};
+      if (!reset && ox_pend && (sc != SD) && !ox_take && (ox_rr >= {5'd0, OX_WAIT}))
+         $fatal(1, "rv_dcache: an outside request refused %0d times with room in the store queue", ox_rr + 8'd1);
+   end
    // the match flops agree with the sets and lines (a simulation check: the compares are what they save)
    reg e_sm;
    always @* begin
