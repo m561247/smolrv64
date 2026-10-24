@@ -25,6 +25,7 @@
 // the next row when the row's last valid position commits.
 module smolrv64_rob
   #(parameter ROWS  = 32,
+    parameter CAP   = ROWS,           // the rows it fills (at most ROWS)
     parameter IDXB  = 8,              // a tag: $clog2(ROWS) + 1 + CB, {row, wrap, column}
     parameter PBITS = 9,
     parameter IW    = 2,              // the group width: IW allocations and IW commits a cycle
@@ -133,9 +134,10 @@ module smolrv64_rob
    localparam RB    = IDXB - 1 - CB;              // row bits
    localparam SB    = RB + CB;                    // a storage index: {row, column}
    localparam DEPTH = ROWS * NCOL;                // the storage
-   localparam [RB:0] ROWS_S = ROWS[RB:0];         // sized, so the occupancy check cannot truncate
+   localparam [RB:0] CAP_S = CAP[RB:0];           // sized, so the occupancy check cannot truncate
    localparam [SB:0] ROW1 = NCOL[SB:0];           // one row, as a position step
    initial if ((1 << RB) != ROWS) $fatal(1, "smolrv64_rob: IDXB=%0d is not $clog2(ROWS=%0d) + 1 + CB=%0d", IDXB, ROWS, CB);
+   initial if (CAP > ROWS || CAP < 1) $fatal(1, "smolrv64_rob: CAP=%0d rows of %0d", CAP, ROWS);
    reg [DEPTH-1:0] v, done;                     // bulk-cleared on flush, so flops by necessity
    reg [SB:0]      head, tail, irr;             // positions {ring wrap, row, p}; head <= irr <= tail
    reg [CB-1:0]    fc [0:ROWS-1];               // each row's first column
@@ -177,7 +179,7 @@ module smolrv64_rob
    assign empty    = (head == tail);
    assign occ_n    = occ;
    assign head_idx = tag_of(hrow, hfc, hp);
-   wire ready = (occ < ROWS_S);
+   wire ready = (occ < CAP_S);
    // port p reads port p-1: per-bit variables, so the chains are not loops to the simulator
    wire [IW-1:0]   cv /*verilator split_var*/;
    wire [IW-1:0]   do_alloc = d_valid & {IW{ready}};
@@ -467,8 +469,8 @@ module smolrv64_rob
          $fatal(1, "smolrv64_rob: the tail is not at a row's first position (%0d)", tail);
       // Occupancy can never exceed the array. Catches a lost commit or a double allocate at
       // the moment it happens rather than as a wedge thousands of cycles later.
-      if (occ > ROWS_S)
-         $fatal(1, "smolrv64_rob: occupancy %0d rows exceeds %0d", occ, ROWS);
+      if (occ > CAP_S)
+         $fatal(1, "smolrv64_rob: occupancy %0d rows exceeds %0d", occ, CAP);
    end
 endmodule
 

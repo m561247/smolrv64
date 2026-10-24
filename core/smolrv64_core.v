@@ -77,6 +77,9 @@
  `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif
 `include "smolrv64_tags.vh"             // SMOLRV64_ROB_ROWS
+`ifndef SMOLRV64_SEQW
+ `define SMOLRV64_SEQW 9                 // a seqno's bits; the ROB fills the rows they allow (below)
+`endif
 module smolrv64_core
   #(parameter PCW  = 40,                 // a PC's bits (smolrv64_pc.vh): Sv39's 39 and the non-canonical flag
     parameter HW   = `SMOLRV64_HW,
@@ -175,10 +178,16 @@ module smolrv64_core
    // THE SEQNO WIDTH. older() orders two seqnos by the sign of their difference, which is right
    // while no two live ones are 2^(SEQW-1) or more apart. An op is live from the bundle register
    // to its retirement: the bundle (FW), the decoupling queue (QD), the IR's group (IW) and the
-   // ROB (ROB_ROWS rows of IW), so SEQW is sized from them.
+   // ROB (ROB_CAP rows of IW). SEQW is fixed (9) and the ROB fills the rows it allows: all 64 at
+   // IW=3, 57 at IW=4 -- the 28 entries cost GB5 0.04% of its cycles, a 10-bit seqno costs every
+   // age compare a bit (measured 2026-10-24).
    localparam integer ROB_ROWS = `SMOLRV64_ROB_ROWS;
-   localparam integer SEQ_LIVE = `SMOLRV64_FW + `SMOLRV64_QD + IW + ROB_ROWS * IW;
-   localparam integer SEQW     = $clog2(SEQ_LIVE) + 1;
+   localparam integer SEQW     = `SMOLRV64_SEQW;
+   localparam integer ROB_FIT  = ((1 << (SEQW - 1)) - `SMOLRV64_FW - `SMOLRV64_QD - IW) / IW;
+   localparam integer ROB_CAP  = (ROB_FIT < ROB_ROWS) ? ROB_FIT : ROB_ROWS;
+   localparam integer SEQ_LIVE = `SMOLRV64_FW + `SMOLRV64_QD + IW + ROB_CAP * IW;
+   initial if (SEQ_LIVE > (1 << (SEQW - 1)) || ROB_CAP < 1)
+      $fatal(1, "smolrv64_core: %0d live seqnos (ROB %0d rows) do not fit SEQW=%0d", SEQ_LIVE, ROB_CAP, SEQW);
 
    // =========================================================== stage F
    wire                     d_valid, d_rvc, d_rd_v, d_rs1_v, d_rs2_v, d_rs3_v;
@@ -2083,7 +2092,7 @@ module smolrv64_core
       assign rc_kill[gs] = (rc_head[gs] ? rc_tkill : m_valid & (m_rob_idx == rc_idx[gs]))
                          | (lq_f_v & lq_f_rp & (lq_f_rob == rc_idx[gs]));   // a load flagged for replay never retires
    end endgenerate
-   smolrv64_rob #(.ROWS(ROB_ROWS), .IDXB(ROB_IDXB), .PBITS(RN_PBITS), .IW(IW), .NW(ROB_NW), .IRR_FWD({{(ROB_NW-4){1'b0}}, 4'b1000})) u_rob   // w_v[3]: sq_k_take
+   smolrv64_rob #(.ROWS(ROB_ROWS), .CAP(ROB_CAP), .IDXB(ROB_IDXB), .PBITS(RN_PBITS), .IW(IW), .NW(ROB_NW), .IRR_FWD({{(ROB_NW-4){1'b0}}, 4'b1000})) u_rob   // w_v[3]: sq_k_take
      (.clk(clk), .reset(reset),
       // prd is ZERO when nothing is written: rename drives r_prd unconditionally, and
       // `d_prd != 0` is what replaces the stored rd_v bit.
@@ -4732,7 +4741,7 @@ module smolrv64_core
    end
    wire cr_cbo = ~lq_uf_any & ~sq_uf_any & (ir_ld == 4'd0) & (ir_st == 4'd0);
    reg  [IW-1:0] cr_rob;                              // a ROB row for the group (every bit)
-   always @* for (crk = 0; crk < IW; crk = crk + 1) cr_rob[crk] = rob_inflt < ROB_ROWS;   // a row for the group
+   always @* for (crk = 0; crk < IW; crk = crk + 1) cr_rob[crk] = rob_inflt < ROB_CAP;    // a row for the group, within the rows the ROB fills
    // the head pops nothing while dispatch is frozen (what the IR holds then is the wrong path and
    // is dropped), while a rename shard is low, or while a serialising op is in flight or in the IR
    wire cr_pop = ~redirect_q & ~fr_v & ~dec_red_q & ~rn_stall & ~ser_inflight & ~(d_valid & d_ser);

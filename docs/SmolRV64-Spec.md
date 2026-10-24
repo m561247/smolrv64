@@ -589,12 +589,17 @@ Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard belo
   the plain one. The storage index is `{row, column}`, the tag without its wrap bit (`rsi`), and
   indexes every per-entry array. A row has 2^⌈log2 `IW`⌉ columns (at IW=3 the fourth is never
   valid); the dispatch credit is a free row.
-- **Sized by one knob**, `SMOLRV64_ROB_ROWS` (a power of two; 64 in the shipping build). The
-  fetch sequence number that orders the restarts (`older()`, the sign of a difference) is
-  sized from the window it spans: `SEQW` = ⌈log2 `SEQ_LIVE`⌉ + 1, `SEQ_LIVE` = FW + QD + IW +
-  `ROB_ROWS` × IW, every op from the bundle register to the ROB head (217 at IW=3: 9 bits). An
-  always-on check fatals when the seqno order of the mispredicts and the pending restart
-  disagrees with their order in the ROB. The size is measured below (*Answered: how big a ROB*).
+- **Sized by one knob**, `SMOLRV64_ROB_ROWS` (a power of two; 64 in the shipping build), **and
+  capped by the seqno.** The fetch sequence number that orders the restarts (`older()`, the sign
+  of a difference) is `SEQW` = 9 bits (`SMOLRV64_SEQW`), so it orders a window of 2^(SEQW−1) = 256
+  ops, and `SEQ_LIVE` = FW + QD + IW + `ROB_CAP` × IW, every op from the bundle register to the ROB
+  head, must fit it. The ROB holds `ROB_CAP` = min(`ROB_ROWS`, ⌊(256 − FW − QD − IW) / IW⌋) rows
+  at once -- all 64 at IW=3 (`SEQ_LIVE` 217), 57 at IW=4 (256) -- and its `ready` and dispatch's
+  ROB credit both take the cap. Measured at IW=4 (2026-10-24): the 28 entries the cap leaves out
+  cost GB5's 77 SimPoints 0.04% of their cycles (SQLite +0.61% the most) and the 60 M boot
+  0.004%, where a 10-bit seqno costs every age compare a bit. An always-on check fatals when the
+  seqno order of the mispredicts and the pending restart disagrees with their order in the ROB.
+  The size is measured below (*Answered: how big a ROB*).
 - Column k is one array, written only by lane k. Inside, the pointers are positions `{ring
   wrap, row, p}`. Commit port p is the head row's position p: the ports read every column of
   the head's row and rotate the records into program order by `hfc`, the head row's first column
