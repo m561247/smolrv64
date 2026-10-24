@@ -121,11 +121,11 @@ module smolrv64_prf
       localparam integer IQ = (gp < NRI) ? gp : 0;                     // its integer port, if it has one
       wire [2:0] sh = ra[gp*PBITS + IDXB +: 3];
       reg  [63:0] x;
-      integer k;
+      // an integer port reads lane sh[1:0]'s shard (any other is fatal, below); physical register 0 is
+      // shard 0's entry 0, zero from configuration and never written (asserted), so it reads 0 as it is
       always @* begin
          x = 64'd0;
-         for (k = 0; k < NL; k = k + 1)
-            if ((gp < NRI) && (sh == k[2:0])) x = iv[k*NRI + IQ];
+         if ((gp < NRI) && ({1'b0, sh[1:0]} < NL[2:0])) x = iv[sh[1:0]*NRI + IQ];
          if ((gp >= NR - NF) && (sh == SH_FL)) x = fv[FQ];
          if ((gp >= NR - NF) && (sh == SH_FF)) x = fv[NF + FQ];
       end
@@ -136,7 +136,7 @@ module smolrv64_prf
              & ~((gp < NRI) & (sh < NL[2:0])) & ~((gp >= NR - NF) & ((sh == SH_FL) | (sh == SH_FF))))
             $fatal(1, "smolrv64_prf: read port %0d (the lanes' 0..%0d, the store queue's %0d, the FP port's %0d..%0d) names pr=%h, of a shard it does not read",
                    gp, 2*NL - 1, 2*NL, 2*NL + 1, 2*NL + 3, ra[gp*PBITS +: PBITS]);
-      assign rd[gp] = (ra[gp*PBITS +: PBITS] == {PBITS{1'b0}}) ? 64'd0 : x;
+      assign rd[gp] = x;
    end endgenerate
    generate for (gp = 0; gp < 2*NL; gp = gp + 1) begin: rl
       assign rd_l[gp*64 +: 64] = rd[gp];
