@@ -126,9 +126,10 @@ module rv_soc_top #(
 );
    localparam SIZE = 1<<RAM_LG2;
    localparam AW   = 64;
-   // The architectural physical-address width (64 GiB): the core faults any PA beyond its
-   // instance's DRAM, so the D$ tags exactly PABITS bits (smolrv64_core, THE PHYSICAL-ADDRESS CAP).
-   localparam integer PABITS = 36;
+   // The physical-address width: DRAM lies in [0x8000_0000, 0x1_8000_0000) at most (the board's
+   // 4 GiB window) and the core faults any PA beyond its instance's DRAM (smolrv64_core, THE
+   // PHYSICAL-ADDRESS CAP, which also asserts DRAM_TOP fits), so the D$ and the I$ tag 33 bits.
+   localparam integer PABITS = 33;
    localparam integer LQ_IB  = `SMOLRV64_LQB;    // the core's load-queue index width: the D$ read tag carries it
    localparam LAW  = AW-6;                  // line address width = 58
 
@@ -843,7 +844,7 @@ module rv_soc_top #(
    wire ic_inv_req = fi_inv;   // fence.i AND mapping changes go through fi (after the D$ clean-flush)
 
    // The read-only VHPR I$ (core/rv_icache.v): a pair per cycle, hit on the virtual tag alone.
-   rv_icache #(.SIZE_KB(SIZE_KB), .HW(8), .RTW(`SMOLRV64_ICTAG_W)) u_icache
+   rv_icache #(.SIZE_KB(SIZE_KB), .HW(8), .RTW(`SMOLRV64_ICTAG_W), .PGW(PABITS)) u_icache
      (.clk(clk), .reset(reset),
       .rd_req(ic_rd_req), .rd_addr(ic_rd_addr), .rd_pa(ic_rd_pa), .rd_tag(ic_tag),
       .rd_ack(ic_rd_ack), .rd_data(ic_rd_data), .rd_valid(ic_rd_valid),
