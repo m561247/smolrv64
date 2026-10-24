@@ -846,6 +846,7 @@ module smolrv64_core
    wire [RN_PBITS-1:0]    s_prd_g [0:IW-1], s_prs2 [0:IW-1];
    wire [3*RN_PBITS-1:0]  s_ps_in [0:IW-1];
    wire [PLW-1:0]         s_pl_in [0:IW-1];
+   wire [SRW-1:0]         s_mrec  [0:IW-1];   // a plain load's or store's record for M (SRW, below)
    wire [ROB_IDXB-1:0]    s_rob [0:IW-1];
    wire [PCW-1:0]         s_pc [0:IW-1], s_tgt [0:IW-1], s_fault_tval [0:IW-1];
    wire [SEQW-1:0]        s_seq [0:IW-1];
@@ -891,6 +892,7 @@ module smolrv64_core
                             q_br_func, (dcr ? 1'b0 : q_mis_taken), (dcr ? 1'b1 : q_mis_nt),
                             q_rs1_v, q_rs2_v, s_sqi[gs], s_lqi[gs]};
       assign s_v[gs] = fe_dv[gs];
+      assign s_mrec[gs] = {q_rd_v, prd_g, q_mem_size, q_mem_signed, q_is_fp};
       assign s_takev[gs] = fe_dv[gs] & d_take;       // a group dispatches whole
       assign s_cls_i[gs] = q_gc[GC_I];  assign s_cls_l[gs] = q_gc[GC_L];  assign s_cls_fc[gs] = q_gc[GC_FC];
       assign s_cls_m[gs] = q_gc[GC_M];
@@ -2181,15 +2183,19 @@ module smolrv64_core
    // in program order: it takes the oldest load or store whose address has not arrived, once it
    // has, so an op M holds (a fault waits for the ROB head) never has an older one behind it. The
    // queues keep the oldest unfilled entry as a pointer that steps when M takes it (uf_take), so M
-   // takes the next one in the cycle it fills the last. The rest of the op rides in a record written at dispatch.
-   localparam integer SPW = ROB_IDXB + PLW;        // {ROB slot, payload}
+   // takes the next one in the cycle it fills the last. The rest of the op rides in a record written
+   // at dispatch: what M needs that its queue entry does not hold -- the destination (a 64-bit load's
+   // speculative wake), the access's size, sign and FP-ness. Its PC, seq and instruction are for a
+   // trap or a redirect, which a plain load or store never takes in M (its faults ride in its entry).
+   localparam integer SRW = 1 + RN_PBITS + 2 + 1 + 1;   // {rd_v, prd, mem_size, mem_signed, is_fp}
+   localparam integer SPW = ROB_IDXB + SRW;             // {ROB slot, record}
    // A row's records land together: the LQ's in one bank each (its bank pointer), the SQ's at
    // consecutive entries (the tail on), so each array is banked by the entry's low bits, one write
    // a bank (smolrv64_bankq); M reads the one it takes.
    wire [IW*SPW-1:0] spl_wd;
    wire [SPW-1:0]    spl_ld_rd, spl_st_rd;
    generate for (gq = 0; gq < IW; gq = gq + 1) begin: splw
-      assign spl_wd[gq*SPW +: SPW] = {s_rob[gq], s_pl_in[gq]};
+      assign spl_wd[gq*SPW +: SPW] = {s_rob[gq], s_mrec[gq]};
    end endgenerate
    initial begin la_v = {LQ_N{1'b0}}; sa_v = {SQ_N{1'b0}}; end
    // the arrived addresses: each lane writes its op's own entry, M reads the one it takes (a bank
@@ -2237,13 +2243,26 @@ module smolrv64_core
    smolrv64_bankq #(.W(SPW), .DEPTH(SQ_N), .NW(IW), .NR(1), .NB(QNB), .PICK(1), .AB(SQ_IB)) u_spl_st
      (.clk(clk), .reset(reset), .wv(g_st), .wp(q_sqiv), .wd(spl_wd), .rp(s_si), .ro({$clog2(QNB){1'b0}}), .rd(spl_st_rd));
    wire [SPW-1:0]    s_rec = s_st ? spl_st_rd : spl_ld_rd;
+   // THE RECORD'S SHADOW: the whole payload per entry, read only by the identity check below
+   reg  [ROB_IDXB+PLW-1:0] spl_ld_sh [0:LQ_N-1];
+   reg  [ROB_IDXB+PLW-1:0] spl_st_sh [0:SQ_N-1];
+   integer           shk;
+   always @(posedge clk)
+      for (shk = 0; shk < IW; shk = shk + 1) begin
+         if (g_ld[shk]) spl_ld_sh[lq_d_idxv[shk*LQ_IB +: LQ_IB]] <= {s_rob[shk], s_pl_in[shk]};
+         if (g_st[shk]) spl_st_sh[q_sqiv[shk*SQ_IB +: SQ_IB]]   <= {s_rob[shk], s_pl_in[shk]};
+      end
+   wire [ROB_IDXB+PLW-1:0] s_sh = s_st ? spl_st_sh[s_si] : spl_ld_sh[s_li];
+   wire [ROB_IDXB-1:0] sh_rob = s_sh[PLW +: ROB_IDXB];
+   `PL_DECL(sh_)
+   assign `PL_REC(sh_) = s_sh[PLW-1:0];
    // THE HEAD-OP REGISTER. An AMO, LR/SC or CBO goes alone, so in slot A and lane A; the lane
    // generates its address and reads rs2 (an AMO's or SC's data), and the op waits here, its
    // record written at dispatch, for M, which runs it at the ROB head. One is in flight at a
    // time (the credit), and none while a load or store is unfilled (cbo_any, the serialising).
    reg               ho_v;
    reg  [63:0]       ho_va, ho_dat;
-   reg  [SPW-1:0]    ho_rec;
+   reg  [ROB_IDXB+PLW-1:0] ho_rec;                     // {ROB slot, payload}
    initial ho_v = 1'b0;
    wire              hA = l_v[0] & ~ln[0].sys & is_hop(ln[0].q_insn);   // a head op goes alone: slot A, lane A
    wire              h_go = ho_v & ~s_win & m_advance & ~redirect;
@@ -2254,8 +2273,21 @@ module smolrv64_core
       if (dead(ho_rec[PLW +: ROB_IDXB])) ho_v <= 1'b0;   // the kill
       if (reset | redirect) ho_v <= 1'b0;                 // flush last (rule I11)
    end
-   wire [PLW-1:0]    pl_m  = s_win ? s_rec[PLW-1:0] : ho_rec[PLW-1:0];   // the op M takes
-   wire [ROB_IDXB-1:0] m_go_rob = s_win ? s_rec[PLW +: ROB_IDXB] : ho_rec[PLW +: ROB_IDXB];
+   // a plain load or store as M sees it: its record, its queue entry, and a plain op's constants
+   `PL_DECL(sx_)
+   assign {sx_rd_v, sx_prd, sx_mem_size, sx_mem_signed, sx_is_fp} = s_rec[SRW-1:0];
+   assign sx_pc = {PCW{1'b0}};  assign sx_insn = 32'd0;  assign sx_rvc = 1'b0;  assign sx_seq = {SEQW{1'b0}};
+   assign sx_pdet = {PDW{1'b0}};  assign sx_pred_npc = {PCW{1'b0}};  assign sx_rd = 6'd0;  assign sx_rs1 = 6'd0;
+   assign sx_imm32 = 32'd0;  assign sx_is_mem = 1'b1;  assign sx_is_store = s_st;  assign sx_is_amo = 1'b0;
+   assign sx_amo_func = 5'd0;  assign sx_is_branch = 1'b0;  assign sx_is_jump = 1'b0;  assign sx_is_jalr = 1'b0;
+   assign sx_is_csr = 1'b0;  assign sx_csr_func = 3'd0;  assign sx_is_serialize = 1'b0;  assign sx_is_cbo = 1'b0;
+   assign sx_cbo_zero = 1'b0;  assign sx_cbo_keep = 1'b0;  assign sx_illegal = 1'b0;  assign sx_fault = 1'b0;
+   assign sx_fault_cause = 4'd0;  assign sx_fault_hi = 1'b0;  assign sx_alu_op = 6'd0;  assign sx_alu_w = 1'b0;
+   assign sx_alu_uw = 1'b0;  assign sx_op1_sel = 2'd0;  assign sx_op2_imm = 1'b0;  assign sx_res_link = 1'b0;
+   assign sx_br_func = 3'd0;  assign sx_mis_taken = 1'b0;  assign sx_mis_nt = 1'b0;  assign sx_rs1_v = 1'b0;
+   assign sx_rs2_v = 1'b0;  assign sx_sq_tag = s_si;  assign sx_lq_idx = s_li;
+   wire [PLW-1:0]    pl_m  = s_win ? `PL_REC(sx_) : ho_rec[PLW-1:0];   // the op M takes
+   wire [ROB_IDXB-1:0] m_go_rob = s_win ? s_rec[SRW +: ROB_IDXB] : ho_rec[PLW +: ROB_IDXB];
    wire              m_go = s_go | h_go;               // M takes an op (the pipe view's M stage)
    wire [63:0]       s_va  = s_byp ? by_va : u_ld ? la_rd : sa_rd;
    integer           ak, aj;
@@ -2282,8 +2314,11 @@ module smolrv64_core
       // a plain load or store never faults in M: its address-only fault rides in its entry
       if (lsu_fault & (m_ld_nb | m_st_nb))
          $fatal(1, "smolrv64_core: M holds a faulting plain load or store (pc %h)", m_pc);
-      if (s_go & ~(is_lmem(qm_insn) & (qm_is_store == s_st) & (s_st ? (qm_sq_tag == s_si) : (qm_lq_idx == s_li))))
-         $fatal(1, "smolrv64_core: M takes a queue entry's arrival whose record is another op's (pc %h)", qm_pc);
+      if (s_go & ~(is_lmem(sh_insn) & (sh_is_store == s_st) & (s_st ? (sh_sq_tag == s_si) : (sh_lq_idx == s_li))))
+         $fatal(1, "smolrv64_core: M takes a queue entry's arrival whose record is another op's (pc %h)", sh_pc);
+      if (s_go & ((s_rec != {sh_rob, sh_rd_v, sh_prd, sh_mem_size, sh_mem_signed, sh_is_fp})
+                  | ~sh_is_mem | sh_is_amo | sh_is_cbo | sh_is_serialize))
+         $fatal(1, "smolrv64_core: M's record of a plain load or store differs from its payload (pc %h)", sh_pc);
       // a head op goes alone, so in slot A; one is in flight at a time; it waits with no load
       // or store unfilled
       if (|(s_takev & s_cls_l & ~{{(IW-1){1'b0}}, 1'b1}))
@@ -2519,7 +2554,7 @@ module smolrv64_core
    // Everything the OoO core needs for squash recovery -- the zombie/drain latch, the
    // abort-by-seqno, the FS-dirty commit gate -- is absent here: M is the commit point,
    // so an FP op in flight can never be squashed, and its decode/operands are stable for
-   // its whole (multi-cycle) stay. `decode_fp` runs off the registered m_insn.
+   // its whole (multi-cycle) stay.
 
    // ---- the SYSQ (C3 step 3, 2026-09-18): system ops fire at the ROB head from flops ------------
    // A CSR/system op (SYSTEM opcode: csr*, ecall/ebreak/xret/wfi/sfence.vma, the irqop pseudo-op)
