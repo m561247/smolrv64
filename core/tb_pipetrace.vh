@@ -169,7 +169,7 @@
    end
 
    // ---- each lane's state, flattened for the per-cycle loop (a generate index must be constant) ----
-   localparam integer PT_NI = 10;                    // a lane scheduler's entries (smolrv64_core NI)
+   localparam integer PT_NI = NI;                    // a lane scheduler's entries (smolrv64_geom.vh)
    wire [IW-1:0]           pl_stg_v, pl_iss_v, pl_x, pl_m1, pl_m2;
    wire [7:0]              pl_stg_rob [0:IW-1], pl_iss_ent [0:IW-1], pl_rob [0:IW-1];
    wire [7:0]              pl_mrob1 [0:IW-1], pl_mrob2 [0:IW-1];
@@ -191,7 +191,6 @@
          assign pl_iq_rob[gpl*PT_NI + gpe] = ptx(16'(dut.core.ln[gpl].u_iq.e_rob[gpe]));
       end
    end endgenerate
-   initial if (dut.core.NI != PT_NI) $fatal(1, "tb: the pipe trace assumes %0d entries a lane scheduler, the core has %0d", PT_NI, dut.core.NI);
 
    // ---- the backend's codes, by ROB index: the latest source that names an entry wins ----
    reg [7:0] nc [0:255];

@@ -794,6 +794,7 @@ module tb;
       else                   td_dn  <= td_dn  + 64'($countones(dut.core.s_takev));
    end
 
+`include "smolrv64_geom.vh"
 `include "tb_pipetrace.vh"
 
    // A REFILL CYCLE TAKES THE CAUSE OF THE CYCLE BEFORE IT (smolrv64_core td_rf, §11.2). Each split
@@ -873,10 +874,9 @@ module tb;
    //   11 on the LSU's slow path (a device, uncached or chunk-crossing load)
    // and the rest are 12 landed, in its lane's landing buffer (waiting for the write port),
    // 13 a CSR read in the SYSQ, 14 an AMO in M.
-   localparam integer DL_N = 15, DL_PB = 10, DL_LQ = 1 << `SMOLRV64_LQB;   // DL_PB: smolrv64_core's RN_PBITS
-   initial if (dut.core.RN_PBITS != DL_PB || dut.core.LQ_N != DL_LQ)
-      $fatal(1, "tb: DEPLD-SIM reads %0d-bit registers and %0d load-queue entries, the core has %0d and %0d",
-             DL_PB, DL_LQ, dut.core.RN_PBITS, dut.core.LQ_N);
+   localparam integer DL_N = 15, DL_PB = RN_PBITS, DL_LQ = 1 << `SMOLRV64_LQB;
+   initial if (dut.core.LQ_N != DL_LQ)
+      $fatal(1, "tb: DEPLD-SIM reads %0d load-queue entries, the core has %0d", DL_LQ, dut.core.LQ_N);
    reg [63:0] dl_c [0:DL_N-1];
    reg [3:0]  dl_kp;
    integer    dli;
@@ -1113,14 +1113,12 @@ module tb;
    // in the next cycle, wrong when it is cancelled, misses or waits. The schedulers' entries waiting
    // on its register at that moment are the ops a right wake issues a cycle sooner -- those waiting on
    // it alone, indeed sooner -- and a wrong wake would have to replay. Integer lanes and the FP queue.
-   localparam integer HS_NL = `SMOLRV64_IW, HS_NI = 10, HS_NF = 8, HS_PB = 9;
-   initial if (dut.core.NL != HS_NL || dut.core.NI != HS_NI || dut.core.NF != HS_NF || dut.core.RN_PBITS != HS_PB)
-      $fatal(1, "HITSPEC-SIM: the core's lanes/queues/register width moved (NL %0d NI %0d NF %0d PB %0d)",
-             dut.core.NL, dut.core.NI, dut.core.NF, dut.core.RN_PBITS);
-   wire [3:0]       hs_ix  = dut.u_dcache.s1_tag[3:0];
+   localparam integer HS_NL = `SMOLRV64_IW, HS_NI = NI, HS_NF = NF, HS_PB = RN_PBITS, HS_LQB = `SMOLRV64_LQB;
+   // a load queue entry's request: its tag, the D$ waiter entry, is the entry's index (rv_soc_top)
+   wire [HS_LQB-1:0] hs_ix = dut.u_dcache.s1_tag[HS_LQB-1:0];
    wire [HS_PB-1:0] hs_prd = dut.core.u_lq.prd[hs_ix];
    wire             hs_ld  = dut.u_dcache.s1_v & ~dut.u_dcache.s1_st & ~dut.u_dcache.s1_nc
-                           & (dut.u_dcache.s1_tag[5:4] == 2'b00) & dut.core.u_lq.rdv[hs_ix];
+                           & ~dut.u_dcache.s1_tag[HS_LQB] & dut.core.u_lq.rdv[hs_ix];
    wire [7:0]       hs_wl [0:HS_NL], hs_ol [0:HS_NL];   // per lane, and the FP queue last: waiting, alone
    wire [7:0]       hs_al [0:HS_NL-1], hs_aol [0:HS_NL-1];   // ...of them address generators (a load or store)
    // an entry's instruction sits under its PC at the top of the lane's payload

@@ -440,12 +440,10 @@ module smolrv64_core
 
    // ---- renaming and the sharded PRF ----------------------------------------------
    // the shards' sizes, one place for rename's free lists and the PRF's arrays: each lane's, and
-   // the FP file's SH_FL (FP loads) and SH_FF (the F stage)
-   localparam integer RN_NINT = 64, RN_NFL = 64, RN_NFF = 64;
-   // a physical register is {shard, index}: the index as wide as a shard's registers need, and 3
-   // shard bits (lanes 0..3, SH_FL, SH_FF)
-   localparam integer RN_IDXB  = $clog2(RN_NINT);
-   localparam integer RN_PBITS = RN_IDXB + 3;
+   // the FP file's SH_FL (FP loads) and SH_FF (the F stage); a physical register is {shard, index}:
+   // the index as wide as a shard's registers need, and 3 shard bits (lanes 0..3, SH_FL, SH_FF)
+   // (RN_NINT, RN_NFL, RN_NFF, RN_IDXB, RN_PBITS; the schedulers' NI, IBI, NF, IBF below)
+`include "smolrv64_geom.vh"
 `include "smolrv64_shards.vh"
    localparam integer NL = IW;                     // the lanes: slot k's ALU-class ops go to lane k
    function automatic [3:0] ones_nl(input [NL-1:0] v);   // how many of the lanes' bits are set
@@ -774,8 +772,7 @@ module smolrv64_core
    // The rule this is here to record: a microbenchmark can VALIDATE a change the real
    // workload REJECTS. Size the schedulers on the suite, and treat a microbenchmark win as
    // provisional until a suite run confirms it. The 95 ps has to be found somewhere else.
-   localparam integer NI = 10, IBI = 4;    // integer: pure ALU, reorders freely
-                                           // branches, FP -- one in-order stream
+   // NI = 10 (smolrv64_geom.vh): integer, pure ALU, reorders freely
    // NF=8, the policy minimum, since 2026-08-28 (47e1d26a); every gated build since has
    // closed 166.67 MHz with it, at +0.001-0.002 ns. Before that NF=5 was the largest FP
    // scheduler that closed. FREQUENCY IS NOT A KNOB -- it is never traded away except for a
@@ -799,8 +796,7 @@ module smolrv64_core
    // the search stopped, not a measurement that 5 is faster than 6 -- and the standing
    // policy remains a minimum of 8, recoverable by fixing the families above rather than
    // by a better scheduler.
-   localparam integer NF = 8,  IBF = 3;   // 8 since C1: mul/div share it (was 5)    // FP arith, three sources, its OWN unit. 5 since gate V4 (2026-09-05):
-                                           // the two-wide core closed at exactly 0.000 ns and did not boot; FP gives first
+   // NF = 8 (smolrv64_geom.vh): FP arith, three sources, its OWN unit
    localparam integer RS_IDXB = 4;         // widest per-class entry index (IBI)
    localparam integer NWB_C   = NL + 2;    // writeback broadcasts: the lanes' ports and the two streams'
    localparam integer SQ_N = 1 << `SMOLRV64_SQB, SQ_IB = `SMOLRV64_SQB;   // store buffer: entries, index width
