@@ -672,6 +672,12 @@ module rv_dcache #(
    wire            cl_adv = cl_on & ~(|cl_dv) & ~s1_v;
    assign t_wa = ms_set[im];
    assign t_wd = ms_pl[im][6 +: PTB];
+   // The valid and used arrays' writers besides the scan and an install are the lookup's, and the
+   // lookup is empty while a line installs (hold at its last beat) and while the scan runs: one
+   // address serves every way.
+   wire [5:0] vu_wa = scan_on ? scan : fl_v ? ms_set[im] : s1_set;
+   always @(posedge clk) if (!reset && s1_v && (fl_v || scan_on))
+      $fatal(1, "rv_dcache: the lookup holds a request while a line installs or the scan runs");
    generate for (gw = 0; gw < WAYS; gw = gw + 1) begin : wst
       wire inst_w = fl_v & (ms_way[im] == gw[WYB-1:0]);
       wire fp_w   = fp_wr & bhitv[gw];
@@ -679,7 +685,7 @@ module rv_dcache #(
       assign t_we[gw] = inst_w;
       // valid: an install sets it; the scan, a victim's reservation and a drop clear it
       assign v_we[gw] = scan_on | inst_w | (m_alloc & vic_oh[gw]) | (m_drop & hit_w);
-      assign v_wa[gw*6 +: 6] = scan_on ? scan : inst_w ? ms_set[im] : s1_set;
+      assign v_wa[gw*6 +: 6] = vu_wa;
       assign v_wd[gw] = inst_w & ~scan_on;
       // dirty: an install (if a store merged), a store's write and the store lookup's set it; a clean
       // of a copy, the clean walk's read-out and the scan clear it
@@ -689,7 +695,7 @@ module rv_dcache #(
       // used: an install and a hit set it; a hit that would leave the set's bits all set, and an
       // allocation that found no unused way, clear the others
       assign u_we[gw] = scan_on | inst_w | (ans & hit_w) | age_hit | (m_alloc & vic_age);
-      assign u_wa[gw*6 +: 6] = scan_on ? scan : inst_w ? ms_set[im] : s1_set;
+      assign u_wa[gw*6 +: 6] = vu_wa;
       assign u_wd[gw] = ~scan_on & (inst_w | (ans & hit_w));
    end endgenerate
 
