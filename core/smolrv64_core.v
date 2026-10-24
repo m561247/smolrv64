@@ -64,15 +64,9 @@
 `ifndef SMOLRV64_HW
  `define SMOLRV64_HW 8                 // fetch window halfwords: 16 bytes, the shipping build since 2026-09-05 (4 before)
 `endif
-`include "smolrv64_width.vh"            // SMOLRV64_IW: the pipeline width (instructions/cycle)
-`ifndef SMOLRV64_FW
- `define SMOLRV64_FW (2*`SMOLRV64_IW)  // fetch width: instructions into the decoupling queue per cycle (IW..8)
-`endif
+`include "smolrv64_width.vh"            // SMOLRV64_IW, _FW, _QD: the pipeline's widths
 `ifndef SMOLRV64_MDSPEC
  `define SMOLRV64_MDSPEC 1             // memory-dependence speculation: 0 never, 1 predicted by the wait table, 2 always
-`endif
-`ifndef SMOLRV64_QD
- `define SMOLRV64_QD 16                // the decoupling queue's depth (a power of two, at least 2*FW)
 `endif
 `include "smolrv64_tags.vh"             // SMOLRV64_ROB_ROWS
 `ifndef SMOLRV64_SEQW

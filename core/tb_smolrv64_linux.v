@@ -16,12 +16,6 @@
 `include "tb_rand.vh"
 `include "smolrv64_tags.vh"           // the queue sizes FWD-SIM and DEPLD-SIM walk (SMOLRV64_LQB, SMOLRV64_SQB)
 `include "smolrv64_width.vh"
-`ifndef SMOLRV64_FW
- `define SMOLRV64_FW (2*`SMOLRV64_IW)
-`endif
-`ifndef SMOLRV64_QD
- `define SMOLRV64_QD 16
-`endif
 module tb;
    localparam integer IW = `SMOLRV64_IW;     // the core's width (the same define sets its IW)
 `include "smolrv64_credits.vh"               // the dispatch credits' indices (CR_*), at this width
