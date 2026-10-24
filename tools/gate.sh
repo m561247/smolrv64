@@ -55,7 +55,8 @@ tail -1 "$RES/lint.log"
 # because no gate ran them and the runners sent their build errors to /dev/null. A test that
 # does not compile is a test that cannot fail, which is the same defect as a test that passes
 # vacuously. A build failure here is a GATE failure, and a new run-*-tb.sh is picked up
-# without editing this file.
+# without editing this file. src/run-tb.sh runs every src/ bench (the SoC devices -- the scanout,
+# virtio, the DDR bridge -- and the blocks the core shares) the same way.
 # The benches are simulations, and simulations run on the simulation host (Tommy, 2026-10-15:
 # none on coffee). GATE_TB_LOGS=<dir> names their results, produced there from these sources:
 # content.txt (tools/bitcache.sh content: every input the benches read) and each bench's <name>.log
@@ -63,7 +64,7 @@ tail -1 "$RES/lint.log"
 if [ -n "${GATE_TB_LOGS:-}" ] && [ "$(cat "$GATE_TB_LOGS/content.txt" 2>/dev/null)" != "$("$REPO"/tools/bitcache.sh content)" ]; then
    echo "GATE: FAIL (GATE_TB_LOGS holds other sources' benches)"; exit 1
 fi
-for tb in "$REPO"/core/run-*-tb.sh; do
+for tb in "$REPO"/core/run-*-tb.sh "$REPO"/src/run-tb.sh; do
    [ -x "$tb" ] || continue
    n=$(basename "$tb" .sh)
    if [ -n "${GATE_TB_LOGS:-}" ]; then

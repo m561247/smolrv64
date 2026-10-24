@@ -53,3 +53,4 @@ res=$( { ls tb_*.v | xargs -P 8 -I{} bash -c 'one {}';
 echo "$res" | grep -v ' PASS$'
 echo "----"
 echo "tb pass=$(echo "$res" | grep -c ' PASS$') / $(echo "$res" | grep -c .)"
+[ "$(echo "$res" | grep -c ' PASS$')" = "$(echo "$res" | grep -c .)" ]   # the status: every bench passed
