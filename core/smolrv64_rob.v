@@ -184,7 +184,12 @@ module smolrv64_rob
    genvar gk;
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: sl
       localparam [CB-1:0] K = gk;
-      assign d_idx[gk*IDXB +: IDXB] = {trow, K < d_fc, K};
+      // the wrap bit: the slot's column lies before the group's first (the last column never does)
+      if (gk == IW - 1) begin: last
+         assign d_idx[gk*IDXB +: IDXB] = {trow, 1'b0, K};
+      end else begin: mid
+         assign d_idx[gk*IDXB +: IDXB] = {trow, K < d_fc, K};
+      end
       assign d_ready[gk] = ready;
    end endgenerate
 

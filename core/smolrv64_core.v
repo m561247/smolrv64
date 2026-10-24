@@ -884,7 +884,11 @@ module smolrv64_core
       assign `IR_REC(q_) = fe_rec[gs*IRW +: IRW];
       localparam [2:0] LANE = gs;
       localparam [ROB_CB-1:0] K = gs;
-      assign s_pos[gs] = (K >= fe_fc) ? K - fe_fc : K + IW[ROB_CB-1:0] - fe_fc;
+      if (gs == IW - 1) begin: last   // the last column is never before the group's first
+         assign s_pos[gs] = K - fe_fc;
+      end else begin: mid
+         assign s_pos[gs] = (K >= fe_fc) ? K - fe_fc : K + IW[ROB_CB-1:0] - fe_fc;
+      end
       wire st_nb = q_gc[GC_ST], ld_nb = q_gc[GC_LD];
       wire [2:0] shard = shard_of(q_rd[5], q_is_mem, LANE);
       wire [RN_PBITS-1:0] prs1 = rn_prs1v[gs*RN_PBITS +: RN_PBITS], prs2 = rn_prs2v[gs*RN_PBITS +: RN_PBITS],

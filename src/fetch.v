@@ -260,8 +260,9 @@ module fetch
    end
    // the last slot's mark is the bundle's nm-th: entry nm-1 (0 when there is none: unused then)
    wire [$clog2(IW+1)-1:0] jm = (nm == 0) ? 0 : nm - 1'b1;
-   wire           tk_l  = at_mark & pq_tk[jm];
-   wire [PCW-1:0] tgt_l = pq_tgt[jm*PCW +: PCW];
+   wire [$clog2(IW)-1:0]   ji = jm[$clog2(IW)-1:0];   // jm < IW: the mark's index
+   wire           tk_l  = at_mark & pq_tk[ji];
+   wire [PCW-1:0] tgt_l = pq_tgt[ji*PCW +: PCW];
    assign at_mark   = |(sm & lst);
    assign slot_mk   = sm;
    wire   pred_v    = tk_l & |(al_sbr & lst) & ~strad & ~irq_go;   // the LAST slot is a branch or jump

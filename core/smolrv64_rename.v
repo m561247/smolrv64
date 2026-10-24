@@ -176,6 +176,25 @@ module smolrv64_rename
       wire [5:0]       wa = sw ? r_rd[gc*6 +: 6] : w_v[gc] ? w_rd[gc*6 +: 6] : x_a[gc];
       wire [PBITS-1:0] wd = sw ? r_prd[gc*PBITS +: PBITS] : w_v[gc] ? w_pold[gc*PBITS +: PBITS] : x_d[gc];
       always @(posedge clk) if (!reset & (sw | w_v[gc] | x_v[gc])) smap[wa] <= wd;
+      // Vivado builds a LUTRAM of at most 15 reads and turns a wider one into flops: past that
+      // (IW >= 4), a second copy written alike serves the destinations' and the commits' reads.
+      wire [PBITS-1:0] dv [0:2*IW-1];
+      if (NR + IW > 15) begin: dmap
+         (* ram_style = "distributed" *) reg [PBITS-1:0] smap_d [0:63];
+         initial for (j = 0; j < 32; j = j + 1) begin
+            smap_d[j] = {SH_IE, j[IDXB-1:0]};  smap_d[32 + j] = {SH_FL, j[IDXB-1:0]};
+         end
+         always @(posedge clk) if (!reset & (sw | w_v[gc] | x_v[gc])) smap_d[wa] <= wd;
+         for (gp = 0; gp < IW; gp = gp + 1) begin: r
+            assign dv[gp]      = smap_d[sa[NS + gp]];
+            assign dv[IW + gp] = smap_d[cc_rd[gp]];
+         end
+      end else begin: dmap
+         for (gp = 0; gp < IW; gp = gp + 1) begin: r
+            assign dv[gp]      = smap[sa[NS + gp]];
+            assign dv[IW + gp] = smap[cc_rd[gp]];
+         end
+      end
       always @(posedge clk) if (!reset & cw) rmap[c_rd[gc*6 +: 6]] <= c_prd[gc*PBITS +: PBITS];
       always @(posedge clk) if (!reset & ((sw & w_v[gc]) | ((sw | w_v[gc]) & x_v[gc])))
          $fatal(1, "smolrv64_rename: map copy %0d is written twice (rename %b, walk %b, sweep %b)", gc, sw, w_v[gc], x_v[gc]);
@@ -202,13 +221,14 @@ module smolrv64_rename
       integer    sk;
       always @* for (sk = 0; sk < 64; sk = sk + 1) sw_neq[sk] = (newer[sk] == gc) && (smap[sk] != cm_after[sk]);
 `endif
-      for (gp = 0; gp < NR; gp = gp + 1) begin: rd
+      for (gp = 0; gp < NS; gp = gp + 1) begin: rd
          assign sv[gc*NR + gp] = smap[sa[gp]];
       end
       for (gp = 0; gp < IW; gp = gp + 1) begin: pd
+         assign sv[gc*NR + NS + gp] = dv[gp];
          assign pv[gc*IW + gp] = rmap[c_rd[gp*6 +: 6]];
          assign xv[gc*IW + gp] = rmap[x_a[gp]];
-         assign cv[gc*IW + gp] = smap[cc_rd[gp]];
+         assign cv[gc*IW + gp] = dv[IW + gp];
       end
    end endgenerate
    // each source's mapping: the copy newer names (a wire per read: rule F4)
