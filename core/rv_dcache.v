@@ -107,6 +107,7 @@
 module rv_dcache #(
    parameter SIZE_KB = 128,
    parameter RTW     = 4,              // the requester's opaque tag (the LQ index, the slow tag, the walkers)
+   parameter NRQ     = 1 << RTW,       // the tags the requesters use: 0..NRQ-1, one waiter entry each
    parameter PABITS  = 36,             // significant physical address bits
    parameter NMSHR   = 8,
    parameter NWB     = 2,              // write-back buffer lines
@@ -181,10 +182,17 @@ module rv_dcache #(
    localparam LB    = PABITS - 6;                 // significant line-address bits
    localparam MB    = $clog2(NMSHR);
    localparam WBB   = (NWB > 1) ? $clog2(NWB) : 1;
-   localparam NTAG  = 1 << RTW;
-   localparam NW    = NTAG + 1;                   // waiter entries: the tags, then the store
-   localparam TB    = RTW + 1;
-   localparam [TB-1:0] ST = NTAG;                 // the store's waiter entry (only the queue's head waits)
+   localparam NW    = NRQ + 1;                    // waiter entries: the tags, then the store
+   localparam TB    = $clog2(NW);                 // a request's waiter entry: its tag, or ST
+   localparam [TB-1:0] ST = NRQ[TB-1:0];          // the store's waiter entry (only the queue's head waits)
+   function automatic [TB-1:0] wi(input [RTW-1:0] t);    // a requester's entry: its tag (< NRQ, asserted)
+      integer b;
+      begin wi = {TB{1'b0}}; for (b = 0; b < RTW && b < TB; b = b + 1) wi[b] = t[b]; end
+   endfunction
+   function automatic [RTW-1:0] tg(input [TB-1:0] w);    // ...and the tag of a requester's entry
+      integer b;
+      begin tg = {RTW{1'b0}}; for (b = 0; b < RTW && b < TB; b = b + 1) tg[b] = w[b]; end
+   endfunction
    localparam SD    = 3;                          // store-queue entries
    localparam [2:0] ST_WAIT = 3'd3;               // a queued store goes ahead of loads after this long
    localparam [2:0] FP_WAIT = 3'd3;               // the store lookup shuts the load door after this long
@@ -331,7 +339,7 @@ module rv_dcache #(
    wire [TB-1:0]  rp_t   = rm_v ? rm_t : ra_t;
    // the queue issues its head to the main lookup, or the entry behind it in the cycle the head is
    // in the compare -- each only if it is the main lookup's
-   wire           s1_hd  = s1_v & s1_tag[RTW] & s1_head;
+   wire           s1_hd  = s1_v & (s1_tag == ST) & s1_head;
    wire           sq_i0  = (sc != 2'd0) & ~sf_iss[sq_hp] & ~fast_hp;
    wire           sq_i1  = (sc > 2'd1) & sf_iss[sq_hp] & ~sf_iss[sq_h1] & s1_hd & ~fast_h1;
    // LOADS FIRST (the header): an urgent store goes ahead of a load presented now
@@ -351,7 +359,7 @@ module rv_dcache #(
    assign f_ok   = ~(rm_v | ra_v) & ~hold & door & ~fp_hold & ~(sdoor & (sq_i0 | sq_i1) & st_urgent) & rd_quiet;
    wire           a_take = rp_v | st_go | new_go | f_req;
    wire           a_cap  = rp_v | st_go | new_go | f_ok;   // a_take on the state alone: the lookup's fields
-   wire [TB-1:0]  a_tag = rp_v ? rp_t        : st_go ? ST    : f_ok ? {1'b0, f_tag} : {1'b0, rd_tag};
+   wire [TB-1:0]  a_tag = rp_v ? rp_t        : st_go ? ST    : f_ok ? wi(f_tag) : wi(rd_tag);
    wire           a_nc  = rp_v ? wt_nc[rp_t] : st_go ? (sf_nc[sq_ps] & ~sf_cbo[sq_ps]) : f_ok ? 1'b0 : rd_nc;
    wire [63:0]    a_pa  = rp_v ? wt_pa[rp_t] : st_go ? sf_pa[sq_ps] : f_ok ? f_pa : rd_pa;
    wire [5:0]     n1_set = a_cap ? a_pa[11:6] : s1_pa[11:6];   // the lookup's set after this edge
@@ -441,7 +449,7 @@ module rv_dcache #(
    wire            sb_mgok = ~ms_bl[sb_hk] & ~(cr_f & (cr_m == sb_hk));   // no beat has landed
 
    // ---------------------------------------------------------------- the main lookup (T+1)
-   wire           s1_st  = s1_tag[RTW];
+   wire           s1_st  = s1_tag == ST;
    wire           k_cbo = s1_st & st_cbo;
    wire           k_z   = k_cbo & st_zero;
    wire           k_cln = k_cbo & ~st_zero & st_keep;
@@ -743,7 +751,7 @@ module rv_dcache #(
          rd_f     <= ans & s1_f;
          if (ans) begin
             rd_data      <= ans_chunk >> (8 * s1_pa[2:0]);
-            rd_resp_tag  <= s1_tag[RTW-1:0];  rd_resp_addr <= s1_pa;
+            rd_resp_tag  <= tg(s1_tag);  rd_resp_addr <= s1_pa;
          end else if (nc_rdy) begin
             rd_data      <= nc_data >> (8 * nc_pa[2:0]);
             rd_resp_tag  <= nc_tag;  rd_resp_addr <= nc_pa;
@@ -820,7 +828,7 @@ module rv_dcache #(
          // the NC slot: taken, sent, answered or completed
          if (m_nc) begin
             nc_v <= 1'b1;  nc_we <= s1_st;  nc_sent <= 1'b0;  nc_pl <= s1_pl;  nc_pa <= s1_pa;
-            nc_tag <= s1_tag[RTW-1:0];  nc_wd <= st_wd;  nc_wm <= st_wm;
+            nc_tag <= tg(s1_tag);  nc_wd <= st_wd;  nc_wm <= st_wm;
          end
          if (nq_go) nc_sent <= 1'b1;
          if (cr_valid & (cr_slot == NCS) & (cr_beat == nc_pa[5:4])) nc_data <= nc_pa[3] ? cr_data[127:64] : cr_data[63:0];
@@ -889,7 +897,10 @@ module rv_dcache #(
    wire e_beat    = cr_f & ms_v[cr_m] & (cr_beat != ms_bt[cr_m]);
    wire e_two     = l1_v & ((hitv & (hitv - 1'b1)) != 0);
    wire e_btwo    = sb_hd & ((bhitv & (bhitv - 1'b1)) != 0);
-   wire e_wtbusy  = new_go & (wt_v[{1'b0, rd_tag}] | (s1_v & (s1_tag == {1'b0, rd_tag})));
+   wire [TB-1:0] rd_wi = wi(rd_tag), f_wi = wi(f_tag);   // the requests' waiter entries
+   wire e_wtbusy  = new_go & (wt_v[rd_wi] | (s1_v & (s1_tag == rd_wi)));
+   always @(posedge clk) if (!reset && ((rd_req && ({1'b0, rd_tag} >= NRQ[RTW:0])) || (f_req && ({1'b0, f_tag} >= NRQ[RTW:0]))))
+      $fatal(1, "rv_dcache: a request tag %0d / %0d past the %0d the table holds", rd_tag, f_tag, NRQ);
    reg  e_wdead;
    always @* begin
       e_wdead = 1'b0;
@@ -900,7 +911,7 @@ module rv_dcache #(
    wire e_vic     = m_alloc & ((|(rsv & vic_oh)) | ~(|cand) | (fp_wr & sb_set1 & (|(bhitv & vic_oh))));
    wire e_sqord   = (sq_bk & st_done) | (st_go & ~si & st_done) | ((fp_wr | fp_mg) & fin_now);
    wire e_stcl    = wr_take & (inv_req | cl_pend | cl_on | cl_wait);
-   wire e_fast    = (f_req & (~f_ok | ~f_hint | rd_req | wt_v[{1'b0, f_tag}] | (s1_v & (s1_tag == {1'b0, f_tag}))))
+   wire e_fast    = (f_req & (~f_ok | ~f_hint | rd_req | wt_v[f_wi] | (s1_v & (s1_tag == f_wi))))
                   | (f_cancel & ~(s1_v & s1_f));
    wire e_xb      = (st_done & sf_ox[sq_hp] & ~sf_keep[sq_hp] & xb_v) | (ox_rel & ~xb_v);
    // an MSHR's read issued while the MSHR is not live, or a second time

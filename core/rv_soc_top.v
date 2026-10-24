@@ -530,23 +530,25 @@ module rv_soc_top #(
    // toggles on every new read, so a response to a SUPERSEDED load (a squash re-issues at a
    // new address) carries the stale generation and is discarded -- exactly what the address
    // compare achieved, in 4 bits instead of 64.
-   localparam DRTW = LQ_IB + 2;
+   localparam DRTW = LQ_IB + 1;
    // The tag must be CONSTANT for the request's whole lifetime. lsu_gen flips at the clock
    // edge on dmem_ren, so during the request cycle itself the cache would capture the
    // PRE-flip value while every later compare used the POST-flip one -- legitimate responses
    // mismatch, get discarded, and the load re-issues. Present the value lsu_gen is ABOUT to
    // take; compare against the registered one, which equals it from the next cycle on (a
    // response cannot arrive in the capture cycle -- rd_valid is registered).
-   // Tag = {client, ...}: the LSU's FAST reads carry the load-queue index the LSU allocated
-   // ({2'b00, idx}), its FSM's slow reads one fixed tag of their own (TAG_SLOW), and the two
-   // walkers {01,0} and {10,0}. A response is claimed by the tag its requester allocated
-   // (rule B1); the LSU's generation toggle that stood here could name one read in flight and
-   // is gone. A slow read is one at a time by construction (the FSM parks in S_LD for it).
-   localparam [DRTW-1:0] TAG_SLOW = {2'b11, {LQ_IB{1'b0}}};
-   wire [DRTW-1:0] lsu_tag_req = dmem_rfast ? {2'b00, dmem_rtag} : TAG_SLOW;   // -> the cache
+   // Tag: the LSU's FAST reads carry the load-queue index the LSU allocated ({1'b0, idx}), the
+   // two walkers the next two tags and the LSU FSM's slow reads one fixed tag of their own
+   // (TAG_SLOW): DC_NRQ tags in all, the D$'s waiter entries. A response is claimed by the tag
+   // its requester allocated (rule B1). A slow read is one at a time by construction (the FSM
+   // parks in S_LD for it).
+   localparam [DRTW-1:0] TAG_PTW  = {1'b1, {LQ_IB{1'b0}}};          // + the walker's number
+   localparam [DRTW-1:0] TAG_SLOW = TAG_PTW + 2;
+   localparam integer    DC_NRQ   = (1 << LQ_IB) + 3;
+   wire [DRTW-1:0] lsu_tag_req = dmem_rfast ? {1'b0, dmem_rtag} : TAG_SLOW;   // -> the cache
    wire [DRTW-1:0] dc_rd_resp_tag;
    wire         dc_rv_ok   = dc_rd_valid & (dc_rd_resp_tag == TAG_SLOW);       // the FSM's
-   wire         dc_rv_fast = dc_rd_valid & (dc_rd_resp_tag[DRTW-1 -: 2] == 2'b00);     // a queued load's
+   wire         dc_rv_fast = dc_rd_valid & ~dc_rd_resp_tag[DRTW-1];          // a queued load's
    assign       dmem_rvalid_c  = dc_rv_fast;
    assign       dmem_rtag_resp = dc_rd_resp_tag[LQ_IB-1:0];
    assign       dmem_rdata_c   = dc_rd_data;
@@ -714,11 +716,11 @@ module rv_soc_top #(
    // none presented by the LSU's port register, no walker asking (registers, all three). It is DRAM
    // by its dTLB entry, so it never meets the device decode; it carries a load-queue tag.
    wire                dc_rd_quiet;
-   rv_dcache #(.SIZE_KB(DC_KB), .RTW(DRTW), .PABITS(PABITS), .SW(MSW)) u_dcache
+   rv_dcache #(.SIZE_KB(DC_KB), .RTW(DRTW), .NRQ(DC_NRQ), .PABITS(PABITS), .SW(MSW)) u_dcache
      (.clk(clk), .reset(reset),
       .rd_req(dcr_req), .rd_pa(dcr_addr), .rd_tag(dcr_tag), .rd_ack(dc_rd_ack),
       .rd_quiet(dc_rd_quiet), .f_hint(dmem_fhint), .f_req(dmem_fv), .f_pa(dmem_fpa),
-      .f_tag({2'b00, dmem_ftag}), .f_ok(dmem_fok), .f_cancel(dmem_fcancel), .rd_f(dmem_fans),
+      .f_tag({1'b0, dmem_ftag}), .f_ok(dmem_fok), .f_cancel(dmem_fcancel), .rd_f(dmem_fans),
       // Svpbmt: only a LSU load read can be NC (PTW reads share dcr but are always cacheable -> 0
       // when c_rd_req is low). The store's NC bit qualifies the write port.
       .rd_nc(c_rd_req & c_rd_unc),
@@ -873,8 +875,9 @@ module rv_soc_top #(
    wire [1:0]   pw_match;
    genvar g;
    generate for (g=0; g<2; g=g+1) begin : ptw_adapt
+      localparam [DRTW-1:0] PT = {1'b1, {(LQ_IB-1){1'b0}}, g == 1};   // TAG_PTW + g
       assign pw_match[g] = dc_rd_valid & pw_busy[g]
-                         & (dc_rd_resp_tag == {(g ? 2'd2 : 2'd1), {LQ_IB{1'b0}}});
+                         & (dc_rd_resp_tag == PT);
       assign pw_ack[g] = dc_rd_ack & ~c_rd_req & (g ? (~pw_rq[0] & pw_rq[1]) : pw_rq[0]);
       always @(posedge clk) if (reset) begin pw_busy[g]<=1'b0; pw_sent[g]<=1'b0; pw_rvalid[g]<=1'b0; end
          else begin
@@ -912,8 +915,8 @@ module rv_soc_top #(
                    :             {8'd0, pw_addr[1*56 +: 56]};
    // ...and the tag that names the requester, selected by the SAME priority.
    wire [DRTW-1:0] dcr_tag = c_rd_req ? c_rd_tag
-                           : pw_rq[0] ? {2'd1, {LQ_IB{1'b0}}}
-                           :            {2'd2, {LQ_IB{1'b0}}};
+                           : pw_rq[0] ? TAG_PTW
+                           :            TAG_PTW + 1'b1;
 
    // ---------------- the memory port: the caches as clients of rv_mem_arbiter ----------------
    // PTW reads go through the D$ (dcr_* above), and a D$ miss on a PTE fills like any other line.

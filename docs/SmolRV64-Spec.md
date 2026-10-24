@@ -1915,7 +1915,7 @@ flops, 32 RAMB36, WNS +0.050 ns at 6 ns; `make ooc MODULE=rv_dcache GENERICS=RTW
 | `va` / `da` / `ua` | 32 × 64 | 1 | 6 144 | LUTRAM: valid, dirty, not recently used, each written by one statement |
 | merge buffers | 2 × 32 | 64 + 8 | 4 608 | LUTRAM, even and odd chunks, one write a cycle; a chunk-valid bit and a zero bit per MSHR in flops |
 | MSHRs | 8 | -- | ~800 | flops |
-| waiters | 65 | ~70 | ~4 500 | flops and the PA in LUTRAM (one per requester tag, one for the store) |
+| waiters | 20 | ~70 | ~1 400 | flops and the PA in LUTRAM: one per requester tag in use (`NRQ` = 19: the load queue's 16, the two walkers', the slow path's), one for the store |
 | store queue | 3 | PA, data, mask | ~400 | LUTRAM, its flags in flops |
 | write-back lines | 2 | 512 | 1 024 | flops |
 
