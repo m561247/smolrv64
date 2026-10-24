@@ -49,10 +49,10 @@ module divider
    wire [31:0] a32  = rs1[31:0], b32 = rs2[31:0];
    wire        an   = sgn & (is_w ? a32[31] : rs1[63]);
    wire        bn   = sgn & (is_w ? b32[31] : rs2[63]);
-   wire [31:0] ua_w = an ? -a32 : a32;
-   wire [31:0] ub_w = bn ? -b32 : b32;
-   wire [63:0] ua   = is_w ? {32'd0, ua_w} : (an ? -rs1 : rs1);
-   wire [63:0] ub   = is_w ? {32'd0, ub_w} : (bn ? -rs2 : rs2);
+   // one negation an operand: a W operand's is the low half of the 64-bit one
+   wire [63:0] na   = -rs1, nb = -rs2;
+   wire [63:0] ua   = is_w ? {32'd0, an ? na[31:0] : a32} : (an ? na : rs1);
+   wire [63:0] ub   = is_w ? {32'd0, bn ? nb[31:0] : b32} : (bn ? nb : rs2);
    wire        div0 = is_w ? (b32 == 32'd0) : (rs2 == 64'd0);
    wire        ovf  = sgn & (is_w ? (a32 == 32'h80000000 && b32 == 32'hffffffff)
                                   : (rs1 == 64'h8000000000000000 && rs2 == ~64'd0));
@@ -74,8 +74,12 @@ module divider
    wire        q0 = za > zb;                           // a < 2^(64-za) <= b: quotient 0
    wire [6:0]  qb = q0 ? 7'd0 : zb - za + 7'd1;          // the quotient's significant bits, 1..64
    wire [6:0]  j  = qb + {6'd0, qb[0]};                  // rounded up to even, 0..64
-   wire [63:0] rem_n  = j[6] ? 64'd0 : ua_q >> j[5:0];
-   wire [63:0] divd_n = j == 7'd0 ? 64'd0 : ua_q << (7'd64 - j);
+   // ua_q >> j and ua_q << (64 - j) are the low and high parts of ONE rotation by j
+   wire [127:0] dd    = {ua_q, ua_q} >> j[5:0];                     // the rotation, one funnel shift
+   wire [63:0] rot    = dd[63:0];
+   wire [63:0] lo_m   = j[6] ? 64'd0 : ~64'd0 >> j[5:0];          // the bits below 64 - j
+   wire [63:0] rem_n  = rot & lo_m;
+   wire [63:0] divd_n = rot & ~lo_m;
 
    // ---------------- radix-4 step (combinational over the regs) -----------------
    wire [65:0] r4 = {rem, divd[63:62]};
@@ -86,10 +90,10 @@ module divider
    wire [63:0] rem_s = ~c3[66] ? c3[63:0] : ~c2[66] ? c2[63:0] : ~c1[66] ? c1[63:0] : r4[63:0];
 
    // ---------------- final result (combinational over the regs) -------------------
-   wire [63:0] q_s  = q_neg ? -divd : divd;
-   wire [63:0] r_s  = r_neg ? -rem  : rem;
-   wire [63:0] pick = want_rem ? r_s : q_s;
-   wire [63:0] fin  = w_r ? {{32{pick[31]}}, pick[31:0]} : pick;
+   // one negation, after the pick
+   wire [63:0] pick = want_rem ? rem : divd;
+   wire [63:0] sgnd = (want_rem ? r_neg : q_neg) ? -pick : pick;
+   wire [63:0] fin  = w_r ? {{32{sgnd[31]}}, sgnd[31:0]} : sgnd;
 
    // Outputs combinational off the FSM so busy stays high through the result cycle
    // (the owning shard must not issue then, leaving its WB lane free) and done/result
