@@ -494,7 +494,7 @@ module smolrv64_core
       .r_byp1(rn_byp1v), .r_byp2(rn_byp2v), .r_byp3(rn_byp3v),
       .r_prd(rn_prdv), .r_pold(rn_poldv),
       // commit comes from the ROB head and the entries behind it
-      .c_valid(rc_v), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd),
+      .c_valid(rc_v), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd), .c_pold_in(rc_pold),
       .flush(redirect),
       .w_v(rob_wl_v), .w_rd(rob_wl_rd), .w_pold(rob_wl_pold), .w_prd(rob_wl_prd),
       .w_chk(cf_red_fire & rob_wl_done),
@@ -637,7 +637,7 @@ module smolrv64_core
    // the ROB's commit ports: port k is position k of the head's row (rc_idx[k]), in program order
    wire [IW-1:0]          rc_v, rc_rdv, rc_noret, rc_kill, rc_f;
    wire [IW*6-1:0]        rc_rd;
-   wire [IW*RN_PBITS-1:0] rc_prd;
+   wire [IW*RN_PBITS-1:0] rc_prd, rc_pold;
    wire [ROB_IDXB-1:0]    rc_idx [0:IW-1];
    wire [ROB_SIXB-1:0]    rc_sx  [0:IW-1];          // ...their storage indexes
    // Mirrors m_is_irqop (m_is_sys & funct3==0 & imm==0x7F0) one stage earlier; an op that
@@ -2118,7 +2118,7 @@ module smolrv64_core
       .d_ready(rob_readyv), .d_idx(rob_d_idxv),
       .w_v(rob_wv), .w_ix(rob_wix),
       .h_fin(cf_red_fire | (m_red_fire & ~m_trap) | (sy_done & sy_red)),   // the head completes and flushes (a trap never commits)
-      .c_kill(rc_kill), .c_valid(rc_v), .c_head(rc_head), .c_idx(rc_idxv), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd), .c_noret(rc_noret),
+      .c_kill(rc_kill), .c_valid(rc_v), .c_head(rc_head), .c_idx(rc_idxv), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd), .c_pold(rc_pold), .c_noret(rc_noret),
       .flush(redirect), .empty(rob_empty), .occ_n(rob_occ), .head_idx(rob_head_idx), .head_n_idx(rob_head_n_idx),
       .irr_idx(rob_irr_idx), .irr_v(rob_irr_v), .rp_v(lq_f_v & lq_f_rp), .rp_ix(lq_f_rob),
       .d_pold(rn_poldv),

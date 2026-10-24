@@ -76,6 +76,7 @@ module smolrv64_rob
     output wire [IW*6-1:0]        c_rd,
     output wire [IW-1:0]          c_rd_v,       // derived: |c_prd
     output wire [IW*PBITS-1:0]    c_prd,
+    output wire [IW*PBITS-1:0]    c_pold,       // the mapping it displaced: rename frees it
     output wire [IW-1:0]          c_noret,
 
     // ---- recovery ----
@@ -126,9 +127,8 @@ module smolrv64_rob
     // leave and the tail returns to the row after the branch's; dispatch resumes behind it
     input  wire                   rel);
 
-   // {noret, rd, prd} and nothing else. rd_v is `|prd`; the destination SHARD is the top bits
-   // of prd; and the DISPLACED register is not carried at all, because smolrv64_rename reads
-   // rmap[c_rd] at commit and that still holds it.
+   // {pold, noret, rd, prd}. rd_v is `|prd`; the destination SHARD is the top bits of prd; pold,
+   // the mapping the op displaced, serves the walk's restore and, at commit, the free.
    localparam EW    = PBITS + 1 + 6 + PBITS;      // {pold, noret, rd, prd}
    localparam NCOL  = 1 << CB;                    // columns; those at IW and above are never valid
    localparam RB    = IDXB - 1 - CB;              // row bits
@@ -351,6 +351,7 @@ module smolrv64_rob
       assign c_head[gk]               = (hp == P);
       assign c_idx[gk*IDXB +: IDXB]   = tag_of(hrow, hfc, P);
       assign c_prd[gk*PBITS +: PBITS] = e[PBITS-1:0];
+      assign c_pold[gk*PBITS +: PBITS] = e[EW-1 -: PBITS];
       assign c_rd[gk*6 +: 6]          = e[PBITS +: 6];
       assign c_noret[gk]              = e[PBITS+6];
       assign c_rd_v[gk]               = |e[PBITS-1:0];

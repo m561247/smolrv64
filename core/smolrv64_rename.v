@@ -79,6 +79,7 @@ module smolrv64_rename
     input  wire [IW*6-1:0]       c_rd,
     input  wire [IW-1:0]         c_rd_v,
     input  wire [IW*PBITS-1:0]   c_prd,        // becomes the committed mapping
+    input  wire [IW*PBITS-1:0]   c_pold_in,    // ...and the one it displaced, from the ROB: freed
 
     // ---- recovery ----
     input  wire                  flush,        // total squash: everything uncommitted dies; the sweep follows
@@ -413,17 +414,24 @@ module smolrv64_rename
    // displaces an SH_IE register while allocating an SH_IE2 one.  A register's shard is
    // encoded in its number and never changes, so the free push is routed by c_pold's own
    // shard; routing it by the allocation shard would move registers between shards.
-   // rmap holds committed state, so in the cycle commit k happens rmap[c_rd[k]] is still the
-   // mapping it displaced -- unless an earlier commit this cycle wrote the same register, whose
-   // new mapping is then the one displaced.
+   // The register a commit frees is the mapping it displaced, which the ROB recorded at rename
+   // (pold): commits are in program order, so it is what the committed map holds for c_rd at the
+   // commit -- after this cycle's earlier commits. The check reads it there.
    wire [IW-1:0]    c_w = c_valid & c_rd_v;
    reg  [PBITS-1:0] c_pold [0:IW-1];
    integer          pk, pj;
-   always @* for (pk = 0; pk < IW; pk = pk + 1) begin
-      c_pold[pk] = pv[rnewer[c_rd[pk*6 +: 6]] * IW + pk];
-      for (pj = 0; pj < pk; pj = pj + 1)
-         if (c_w[pj] & (c_rd[pj*6 +: 6] == c_rd[pk*6 +: 6])) c_pold[pk] = c_prd[pj*PBITS +: PBITS];
-   end
+   always @* for (pk = 0; pk < IW; pk = pk + 1) c_pold[pk] = c_pold_in[pk*PBITS +: PBITS];
+`ifndef SYNTHESIS
+   reg  [PBITS-1:0] c_pold_rm;
+   always @(posedge clk) if (!reset)
+      for (pk = 0; pk < IW; pk = pk + 1) if (c_w[pk]) begin
+         c_pold_rm = pv[rnewer[c_rd[pk*6 +: 6]] * IW + pk];
+         for (pj = 0; pj < pk; pj = pj + 1)
+            if (c_w[pj] & (c_rd[pj*6 +: 6] == c_rd[pk*6 +: 6])) c_pold_rm = c_prd[pj*PBITS +: PBITS];
+         if (c_pold[pk] != c_pold_rm)
+            $fatal(1, "smolrv64_rename: commit %0d frees p%h, the committed map displaces p%h", pk, c_pold[pk], c_pold_rm);
+      end
+`endif
 
    // ---- FLOP THE REGISTER RELEASE -------------------------------------------------
    // The free (write + tail advance) is registered one cycle off the retire cone: c_valid rides
