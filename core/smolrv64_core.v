@@ -3091,7 +3091,6 @@ module smolrv64_core
    reg  [5:0]          lr_rd   [0:NL-1];
    reg                 lr_lks  [0:NL-1];
    initial lr_v = {NL{1'b0}};
-   wire [SEQW-1:0]     tr_seq;     // the seq of the CTI that trains this cycle (defined with the training)
    integer lrk;
    always @(posedge clk)
       for (lrk = 0; lrk < NL; lrk = lrk + 1) begin
@@ -3827,8 +3826,8 @@ module smolrv64_core
    always @(posedge clk) begin
       tq_wait <= (reset | tq_out | (tq_n == 0)) ? 16'd0 : tq_wait + 16'd1;
       if (!reset && (tq_wait == 16'd50000))
-         $fatal(1, "smolrv64_core: the training queue's head (rob %0d, seq %0d) has waited 50000 cycles to retire",
-                tq_rob[tq_h], tq_seq[tq_h]);
+         $fatal(1, "smolrv64_core: the training queue's head (rob %0d) has waited 50000 cycles to retire",
+                tq_rob[tq_h]);
    end
 
    // Exactly one frontend flush per event. Re-flushing at the squash would discard the
@@ -3882,7 +3881,6 @@ module smolrv64_core
    reg  [TQB:0]   tq_n;
    // what training reads is read at the head alone, so it is a banked distributed RAM (u_tq below);
    // what every entry is compared on stays in flops
-   reg  [SEQW-1:0] tq_seq [0:TQN-1];
    reg  [ROB_IDXB-1:0] tq_rob [0:TQN-1];
    reg  [TQN-1:0] tq_dk;          // the kill marked the entry's CTI dead: it is discarded, never trained
    reg  [TQN-1:0] tq_rt;          // the entry's CTI has retired: it may train
@@ -3911,8 +3909,9 @@ module smolrv64_core
    reg  [NL-1:0] tq_w;
    always @* for (tqi = 0; tqi < NL; tqi = tqi + 1)
       tq_w[tqi] = tr_ok[tqi] & ({{(TQB+1-RKB){1'b0}}, rk[tqi]} < tq_free);
-   wire         tq_dead = (fr_v & older(fr_seq, tq_seq[tq_h]))   // discarded: past the pending restart,
-                        | tq_dk[tq_h];                            // or killed
+   // discarded: past the pending restart (both live in the ROB: a retired entry's slot may be
+   // reused, and it trains), or killed
+   wire         tq_dead = (fr_v & ~tq_rt[tq_h] & rob_older(fr_rob, tq_rob[tq_h])) | tq_dk[tq_h];
    // non-speculative: the head's CTI is at or behind the ROB's irrevocable point (everything older
    // is done, so nothing can squash it, and the CTI itself has resolved), or every entry is done
    wire [ROB_IDXB-1:0] tq_age_h = tq_rob[tq_h] - rob_head_idx;
@@ -3939,14 +3938,14 @@ module smolrv64_core
             if (tq_rm[tk])        tq_rt[tk] <= 1'b1;
             // a redirect: the restart's own CTI is done (the ROB head), the unretired rest dies
             if (redirect) begin
-               if (cf_red_fire & (tq_seq[tk] == fr_seq)) tq_rt[tk] <= 1'b1;
+               if (cf_red_fire & (tq_rob[tk] == fr_rob)) tq_rt[tk] <= 1'b1;
                else if (~tq_rt[tk] & ~tq_rm[tk])          tq_dk[tk] <= 1'b1;
             end
          end
          for (tk = 0; tk < NL; tk = tk + 1) if (tq_w[tk]) begin : enq
             reg [TQB-1:0] a;
             a = tq_t + {{(TQB-RKB){1'b0}}, rk[tk]};
-            tq_seq[a] <= lr_seq[tk];  tq_rob[a] <= lr_rob[tk];
+            tq_rob[a] <= lr_rob[tk];
             tq_dk[a] <= redirect;              // a redirect's: younger than it (never an enable, rule I11)
             tq_rt[a] <= 1'b0;
          end
@@ -3957,7 +3956,6 @@ module smolrv64_core
    end
    wire [3:0]   tq_dn = ones_nl(tr_ok & ~tq_w);
    wire [RKB:0] tr_drop = tq_dn[RKB:0];
-   assign tr_seq = tq_seq[tq_h];
    assign res_v     = tq_out & ~tq_dead;
    // the entries' training payload: a lane's CTI at the queue's tail plus its rank, one bank per
    // rank, read at the head into res_*_q (a register, so no RAM output reaches the predictor's
