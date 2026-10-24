@@ -451,7 +451,11 @@ module smolrv64_sq
    endfunction
 
    // conf[i][g]: load-queue entry i's bytes overlap store g's. Written only when one of the
-   // two addresses arrives, so nothing about it is on the issue path.
+   // two addresses arrives, so nothing about it is on the issue path. Never cleared: every read
+   // is the load's (l_av) against its OLDER live stores (oldm), and those cells are exact -- the
+   // load's row is rewritten when its address arrives (0 for a store without one), the column when
+   // the store's does. A cell left by a killed or drained store is masked: a store reusing the slot
+   // is younger than every load whose row predates it. Checked below.
    reg [NENT-1:0] conf [0:LQN-1];
    integer        li;
 
@@ -548,6 +552,13 @@ module smolrv64_sq
          // arrives and overlaps it flags it for replay -- its forwarding store aside (fd_*, below). A
          // register, like the block; cleared in the edge its store drains, so the slot it names never
          // outlives the store (and is read in the forward's start cycle, see f_data).
+`ifndef SYNTHESIS
+         integer ck;
+         always @(posedge clk) if (!reset & l_av[gl])
+            for (ck = 0; ck < NENT; ck = ck + 1)
+               if (oldm[ck] && conf[gl][ck] != (av[ck] & ovl_ab(l_off[gl*12 +: 12], l_size[gl*2 +: 2], va[ck][11:0], sz[ck])))
+                  $fatal(1, "smolrv64_sq: load %0d's overlap with older store %0d reads %b", gl, ck, conf[gl][ck]);
+`endif
          wire [NENT-1:0] kov = oldm & conf[gl];
          wire            k1  = (kov != {NENT{1'b0}}) & ((kov & (kov - 1'b1)) == {NENT{1'b0}});
          wire            fwn = l_av[gl] & k1 & (|(kov & cov[gl] & dv & tv & ~flt & ~unc))
@@ -653,7 +664,6 @@ module smolrv64_sq
          ln_v <= 1'b0;
          headc <= {(IDXB+1){1'b0}}; tailc <= {(IDXB+1){1'b0}}; kcc <= {(IDXB+1){1'b0}};
          hoc <= {(IDXB+1){1'b0}}; cnt <= {(IDXB+1){1'b0}};
-         for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
       end else begin
          // A STORE's address arrives: its COLUMN, against every queued load.
          if (a_v)
@@ -697,7 +707,6 @@ module smolrv64_sq
                if (~cmt[k]) begin v[k] <= 1'b0; av[k] <= 1'b0; dv[k] <= 1'b0; end
             tailc <= kcc;
             cnt   <= (kcc - headc) - {{IDXB{1'b0}}, c_done};
-            for (li = 0; li < LQN; li = li + 1) conf[li] <= {NENT{1'b0}};
          end
 
          // address only. The data comes from the snoop or the data read.
@@ -759,9 +768,6 @@ module smolrv64_sq
       if (!reset & (|kmk) & ~flush) begin
          for (k = 0; k < NENT; k = k + 1)
             if (kmk[k]) begin v[k] <= 1'b0;  av[k] <= 1'b0;  dv[k] <= 1'b0; end
-         // per cell: a whole-row write would drop this cycle's column and row updates for the live
-         for (li = 0; li < LQN; li = li + 1)
-            for (k = 0; k < NENT; k = k + 1) if (kmk[k]) conf[li][k] <= 1'b0;
          // the read picked THIS cycle (it lands next) is cancelled when its entry dies; the one landing
          // now (rq_idx) needs nothing, its entry dies with it. Picks come in the order addresses arrive,
          // so a dying entry need not be the one just picked.
