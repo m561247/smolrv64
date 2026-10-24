@@ -538,6 +538,10 @@ module smolrv64_core
    function automatic [ROB_SIXB-1:0] rsi(input [ROB_IDXB-1:0] t);
       rsi = {t[ROB_IDXB-1:ROB_CB+1], t[ROB_CB-1:0]};
    endfunction
+   // ...of lane k's op: its column is k (asserted where the lane's tag is written), so only the row varies
+   function automatic [ROB_SIXB-1:0] rsl(input [ROB_IDXB-1:0] t, input integer k);
+      rsl = {t[ROB_IDXB-1:ROB_CB+1], k[ROB_CB-1:0]};
+   endfunction
    // THE KILL (5.4e): every entry younger than the walked-to branch, from the ROB's flops. Each
    // structure holding an op clears it when dead(its rob) -- the position test of
    // smolrv64_kill.vh against the ROB's kh and kb; the vector rob_kd serves the per-entry clears.
@@ -3992,7 +3996,7 @@ module smolrv64_core
       for (wdk = 0; wdk < IW; wdk = wdk + 1)
          if (s_takev[wdk] & s_is_branch[wdk] & weak_cond(s_pdet[wdk])) wk_e[rsi(s_rob[wdk])] <= 1'b1;
       for (wdk = 0; wdk < NL; wdk = wdk + 1)
-         if (lr_v[wdk] & lr_br[wdk] & weak_cond(lr_pdet[wdk])) wk_e[rsi(lr_rob[wdk])] <= 1'b0;
+         if (lr_v[wdk] & lr_br[wdk] & weak_cond(lr_pdet[wdk])) wk_e[rsl(lr_rob[wdk], wdk)] <= 1'b0;
       if (fr_rel) for (wdk = 0; wdk < ROB_DEPTH; wdk = wdk + 1) if (rob_kd[wdk]) wk_e[wdk] <= 1'b0;
       if (reset | redirect) wk_e <= {ROB_DEPTH{1'b0}};
       if (!reset && !redirect)

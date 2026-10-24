@@ -608,7 +608,7 @@ Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard belo
   head moves to the next row when the row's last valid position commits.
 
 **Entry format — 16 bits.** `ent[]` is `{noret, rd, prd}`, plus `v` and `done` as separate
-bulk-clearable bit vectors.
+bit vectors.
 
 | field | bits | meaning |
 |---|---|---|
@@ -616,7 +616,7 @@ bulk-clearable bit vectors.
 | `rd` | 6 | architectural destination, unified numbering (0–31 int, 32–63 FP) |
 | `prd` | `PBITS`=9 | physical register allocated; **0 when none** |
 | | **16** | × 64 rows × `IW` columns = **4,096 bits** at IW=4 |
-| `v`, `done` | 2 × 64 × 2^⌈log2 `IW`⌉ | separate flops — both are bulk-cleared on flush |
+| `v`, `done` | 2 × 64 × 2^⌈log2 `IW`⌉ | separate flops — `v` is bulk-cleared by the flush and the kill; `done` is read only under `v`, so its allocation alone clears it |
 
 **Three fields are deliberately absent**, each recoverable from state the design already
 keeps. The ROB is sized by the *window*; the scheduler that needs execute detail is sized by
@@ -1852,7 +1852,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `col[0..IW-1].mem` | `smolrv64_rob` | 64 each | 27 | 5 184 | LUTRAM | column k, lane k's entries `{pold, noret, rd, prd}`: 1W (lane k's dispatch), 2R (the head's row, the walk's row; the ports rotate them into program order) |
 | `fc` | `smolrv64_rob` | 64 | 2 | 128 | LUTRAM | each row's first column: 1W (dispatch), read at the next head row, `irr`'s, the walk's and the walked-to branch's rows (`hfc`, the head row's, is a flop) |
 | *(two-wide dispatch and retire)* | | | | | | items 10b/10c: on the board since 2026-09-06 (gate W2F, 319cd248), after four silent bitstreams whose renamer Vivado had folded (docs/rtl-rules.md F4/F5) |
-| `v`, `done` | `smolrv64_rob` | 256 | 1 each | 512 | flops | bulk-clearable, by storage index |
+| `v`, `done` | `smolrv64_rob` | 256 | 1 each | 512 | flops | by storage index; `v` bulk-cleared, `done` cleared at allocation |
 | `head`, `tail`, `irr` | `smolrv64_rob` | 1 each | 9 | 27 | flops | positions `{ring wrap, row, p}`; `irr` the irrevocable pointer (§6) |
 | `u_iq_i` entry | `smolrv64_iq` | 10 | 2+2×9 = 20 | 200 | flops | integer, slot A's, `NSRC`=2 (§6.1) |
 | `u_iq_i2`, `u_iq_i3` entry | `smolrv64_iq` | 10 each | 2+2×10 = 22 | 220 each | flops | integer, slot B's and slot C's, `NSRC`=2 (§6.1) |

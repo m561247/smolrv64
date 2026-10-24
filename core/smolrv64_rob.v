@@ -415,7 +415,7 @@ module smolrv64_rob
          // the release, before the flush (a flush in its cycle wins): the dead entries go and
          // the tail steps back to the row after the branch's
          if (rel) begin
-            for (rj = 0; rj < DEPTH; rj = rj + 1) if (kd[rj]) begin v[rj] <= 1'b0;  done[rj] <= 1'b0; end
+            for (rj = 0; rj < DEPTH; rj = rj + 1) if (kd[rj]) v[rj] <= 1'b0;   // done is read under v, and cleared at allocation
             tail <= {head[SB:CB] + {1'b0, kq_rel} + 1'b1, {CB{1'b0}}};
          end
          // A flush kills everything YOUNGER than the entry committing this cycle -- the
@@ -423,7 +423,6 @@ module smolrv64_rob
          // commit arm above so the head's own retirement stands.
          if (flush) begin
             v    <= {DEPTH{1'b0}};
-            done <= {DEPTH{1'b0}};
             tail <= flush_pos;
             irr  <= flush_pos;
             head <= flush_pos;
