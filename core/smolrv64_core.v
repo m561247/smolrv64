@@ -439,11 +439,13 @@ module smolrv64_core
    wire [IW*64-1:0] rf_wd;
 
    // ---- renaming and the sharded PRF ----------------------------------------------
-   localparam integer RN_IDXB  = 7;
-   localparam integer RN_PBITS = RN_IDXB + 3;   // 3 shard bits: room for a 5th shard (the 3rd ALU)
    // the shards' sizes, one place for rename's free lists and the PRF's arrays: each lane's, and
    // the FP file's SH_FL (FP loads) and SH_FF (the F stage)
    localparam integer RN_NINT = 64, RN_NFL = 64, RN_NFF = 64;
+   // a physical register is {shard, index}: the index as wide as a shard's registers need, and 3
+   // shard bits (lanes 0..3, SH_FL, SH_FF)
+   localparam integer RN_IDXB  = $clog2(RN_NINT);
+   localparam integer RN_PBITS = RN_IDXB + 3;
 `include "smolrv64_shards.vh"
    localparam integer NL = IW;                     // the lanes: slot k's ALU-class ops go to lane k
    function automatic [3:0] ones_nl(input [NL-1:0] v);   // how many of the lanes' bits are set

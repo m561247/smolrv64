@@ -125,7 +125,7 @@ module smolrv64_pending
       reg [2:0] s;
       begin
          s = p[IDXB +: 3];
-         stray = (p[IDXB-1:0] >= SHN[IDXB-1:0])
+         stray = ({1'b0, p[IDXB-1:0]} >= SHN[IDXB:0])
                | (is_f(p) ? ((s != SH_FL) & (s != SH_FF)) : (s >= NL[2:0]));
       end
    endfunction

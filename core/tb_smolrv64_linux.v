@@ -1113,7 +1113,7 @@ module tb;
    // in the next cycle, wrong when it is cancelled, misses or waits. The schedulers' entries waiting
    // on its register at that moment are the ops a right wake issues a cycle sooner -- those waiting on
    // it alone, indeed sooner -- and a wrong wake would have to replay. Integer lanes and the FP queue.
-   localparam integer HS_NL = `SMOLRV64_IW, HS_NI = 10, HS_NF = 8, HS_PB = 10;
+   localparam integer HS_NL = `SMOLRV64_IW, HS_NI = 10, HS_NF = 8, HS_PB = 9;
    initial if (dut.core.NL != HS_NL || dut.core.NI != HS_NI || dut.core.NF != HS_NF || dut.core.RN_PBITS != HS_PB)
       $fatal(1, "HITSPEC-SIM: the core's lanes/queues/register width moved (NL %0d NI %0d NF %0d PB %0d)",
              dut.core.NL, dut.core.NI, dut.core.NF, dut.core.RN_PBITS);
