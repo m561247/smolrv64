@@ -25,6 +25,25 @@
    P``alu_op, P``alu_w, P``alu_uw, P``op1_sel, P``op2_imm, P``res_link, \
    P``br_func, P``mis_taken, P``mis_nt, \
    P``rs1_v, P``rs2_v, P``sq_tag, P``lq_idx}
+// A lane's payload (LPL_DECL/LPL_REC): what a lane, lane A's SYSQ and branch training read of it --
+// the payload without the memory access's fields (M's record carries them) and with rs1 reduced
+// to the one bit the return stack reads of it (link_rs: rs1 is x1 or x5).
+`define LPL_DECL(P) wire [PCW-1:0] P``pc, P``pred_npc; wire P``fault_hi; wire [31:0] P``insn; \
+   wire [31:0] P``imm32; wire [63:0] P``imm = {{32{P``imm32[31]}}, P``imm32}; \
+   wire [PCW-1:0] P``fault_tval = P``pc + {{(PCW-2){1'b0}}, P``fault_hi, 1'b0}; \
+   wire [SQ_IB-1:0] P``sq_tag; wire [LQ_IB-1:0] P``lq_idx; \
+   wire P``rvc, P``rd_v, P``is_store, P``link_rs; \
+   wire [SEQW-1:0] P``seq; wire [PDW-1:0] P``pdet; wire [5:0] P``rd; \
+   wire [RN_PBITS-1:0] P``prd; wire P``is_branch, P``is_jump, P``is_jalr, P``is_csr; \
+   wire [2:0] P``csr_func; wire P``illegal, P``fault; wire [3:0] P``fault_cause; wire [5:0] P``alu_op; \
+   wire P``alu_w, P``alu_uw, P``op2_imm, P``res_link, P``mis_taken, P``mis_nt; \
+   wire [1:0] P``op1_sel; wire [2:0] P``br_func; wire P``rs1_v, P``rs2_v;
+`define LPL_REC(P) {P``pc, P``insn, P``rvc, P``seq, P``pdet, P``pred_npc, P``rd, P``rd_v, P``prd, \
+   P``link_rs, P``imm32, P``is_store, P``is_branch, P``is_jump, P``is_jalr, P``is_csr, P``csr_func, \
+   P``illegal, P``fault, P``fault_cause, P``fault_hi, \
+   P``alu_op, P``alu_w, P``alu_uw, P``op1_sel, P``op2_imm, P``res_link, \
+   P``br_func, P``mis_taken, P``mis_nt, \
+   P``rs1_v, P``rs2_v, P``sq_tag, P``lq_idx}
 `default_nettype none
 
 // smolrv64_core: an out-of-order RVA22S64 core, IW (3) instructions a cycle (docs/SmolRV64-Spec.md
@@ -925,7 +944,10 @@ module smolrv64_core
       assign sl_ps[gs]  = {prs3, (st_nb | f2) ? {RN_PBITS{1'b0}} : prs2, f1 ? {RN_PBITS{1'b0}} : prs1};
       assign sl_rdy[gs] = s_srdy_hit[gs][1:0] | {f2, f1};
       assign sl_prd[gs] = prd_g;
-      assign sl_pl[gs]  = s_pl_in[gs];
+      `PL_DECL(sp_)
+      assign `PL_REC(sp_) = s_pl_in[gs];
+      wire sp_link_rs = (sp_rs1 == 6'd1) | (sp_rs1 == 6'd5);
+      assign sl_pl[gs]  = `LPL_REC(sp_);
       always @(posedge clk) if (!reset)
          if (sl_li[gs] & q_rd_v & ~q_rd[5] & (shard != LANE))
             $fatal(1, "smolrv64_core: slot %0d's ALU op is in shard %0d, not its lane's", gs, shard);
@@ -1045,6 +1067,10 @@ module smolrv64_core
       lane_late = is_mulop(i) | is_divop(i) | is_lmem(i) | is_hop(i) | is_i2fop(i) | is_sysq(i, ill, flt);
    endfunction
    localparam integer PL_INSN = PLW - PCW - 32;   // the instruction's place in the payload (pl_in)
+   localparam integer LPLW = PCW + 32 + 1 + SEQW + PDW + PCW + 6 + 1 + RN_PBITS + 1 + 32
+                           + 1 + 1 + 1 + 1 + 1 + 3 + 1 + 1 + 4 + 1
+                           + 6 + 1 + 1 + 2 + 1 + 1 + 3 + 1 + 1 + 1 + 1 + SQ_IB + LQ_IB;   // a lane's payload
+   localparam integer LPL_INSN = LPLW - PCW - 32;  // the instruction's place in it
 
 
    // INORDER(0): FP arith may reorder freely. It has no memory ordering to respect and
@@ -1374,7 +1400,7 @@ module smolrv64_core
    wire [3*RN_PBITS-1:0] sl_ps  [0:NL-1];
    wire [1:0]            sl_rdy [0:NL-1];
    wire [RN_PBITS-1:0]   sl_prd [0:NL-1];
-   wire [PLW-1:0]        sl_pl  [0:NL-1];
+   wire [LPLW-1:0]       sl_pl  [0:NL-1];
    // each lane's PRF reads (smolrv64_prf's ports ra4..ra9)
    wire [63:0]           l_rd1  [0:NL-1], l_rd2 [0:NL-1];
    // what each lane exports
@@ -1385,7 +1411,7 @@ module smolrv64_core
    wire                  l_we [0:NL-1], l_qv [0:NL-1], l_wv [0:NL-1], l_cti [0:NL-1], l_mis [0:NL-1];
    wire                  l_ready [0:NL-1], l_stg_v [0:NL-1], l_blk_v [0:NL-1], l_pick [0:NL-1];
    wire [IBI:0]          l_free [0:NL-1];
-   wire [PLW-1:0]        l_pl [0:NL-1];
+   wire [LPLW-1:0]       l_pl [0:NL-1];
    wire [63:0]           l_addr [0:NL-1], l_tgt [0:NL-1], l_ttgt [0:NL-1];
    wire                  l_red [0:NL-1], l_taken [0:NL-1];
    wire                  l_lm [0:NL-1], l_st [0:NL-1];      // a load or store generating its address
@@ -1397,7 +1423,8 @@ module smolrv64_core
    wire [SEQW-1:0]       l_seq [0:NL-1];
    wire [PCW-1:0]        l_pc [0:NL-1];
    wire [PDW-1:0]        l_pdet [0:NL-1];
-   wire [5:0]            l_rd [0:NL-1], l_rs1 [0:NL-1];
+   wire [5:0]            l_rd [0:NL-1];
+   wire                  l_lks [0:NL-1];          // rs1 is a link register (the return stack's)
    wire [31:0]           l_insn [0:NL-1];
    wire [LQ_IB-1:0]      l_lqi [0:NL-1];
    wire [SQ_IB-1:0]      l_sqt [0:NL-1];
@@ -1410,7 +1437,7 @@ module smolrv64_core
       reg [3*RN_PBITS-1:0] stg_ps;
       reg [1:0]            stg_r;
       reg [RN_PBITS-1:0]   stg_prd;
-      reg [PLW-1:0]        stg_pl;
+      reg [LPLW-1:0]       stg_pl;
       initial stg_v = 1'b0;
       wire                 ready, iss_v, iss_spec, blk_v;
       wire [IBI-1:0]       d_ent, iss_ent;
@@ -1418,8 +1445,8 @@ module smolrv64_core
       wire [RN_PBITS-1:0]  blk_pr;
       wire [IBI:0]         occ, free;
       wire                 mv = stg_v & ready;
-      `PL_DECL(sg_)
-      assign `PL_REC(sg_) = stg_pl;
+      `LPL_DECL(sg_)
+      assign `LPL_REC(sg_) = stg_pl;
       wire                 stg_late = lane_late(sg_insn, sg_illegal, sg_fault);
       wire                 stg_hx   = is_i2fop(sg_insn) & ~is_sysq(sg_insn, sg_illegal, sg_fault);
       wire                 hx_busy;
@@ -1455,7 +1482,7 @@ module smolrv64_core
          .blk_v(blk_v),.blk_pr(blk_pr),.flush(redirect),.kd_v(rob_kd_v),.kh(rob_kh),.kb(rob_kb),.occupancy(occ),.free_n(free));
       // the tags, and whether the op completes later than its issue (lane_late), read at the pick
       reg  [3*RN_PBITS:0]   psmem [0:NI-1];
-      reg  [PLW-1:0]        plmem [0:NI-1];
+      reg  [LPLW-1:0]       plmem [0:NI-1];
       // written as the stage's op moves into the scheduler (T+1), at the entry it allocates
       always @(posedge clk) if (mv) psmem[d_ent] <= {stg_late, stg_ps};
       always @(posedge clk) if (mv) plmem[d_ent] <= stg_pl;
@@ -1464,7 +1491,7 @@ module smolrv64_core
       reg [ROB_IDXB-1:0]   rob;
       reg [RN_PBITS-1:0]   ps1, ps2;
       reg                  late;            // the op completes later than its issue (lane_late)
-      reg [PLW-1:0]        pl;
+      reg [LPLW-1:0]       pl;
       reg                  sp1;             // the op issued on a load's speculative wake: its base is the D$'s answer
       initial begin v = 1'b0; ent = {IBI{1'b0}}; rob = {ROB_IDXB{1'b0}}; ps1 = {RN_PBITS{1'b0}}; ps2 = {RN_PBITS{1'b0}}; late = 1'b0; sp1 = 1'b0; end
       always @(posedge clk) begin
@@ -1480,8 +1507,8 @@ module smolrv64_core
       end
       always @(posedge clk) if (iss_v) pl <= plmem[iss_ent];   // the payload, read at the pick
       wire iss = v & ~redirect;                                  // completes here, always
-      `PL_DECL(q_)
-      assign `PL_REC(q_) = pl;
+      `LPL_DECL(q_)
+      assign `LPL_REC(q_) = pl;
       // ---- operands: the PRF, or a lane's write register landing this cycle ----
       reg [63:0] rs1, rs2;
       integer f;
@@ -1654,7 +1681,7 @@ module smolrv64_core
       assign l_lm[gl] = v & ~sys & is_lmem(q_insn) & ~(sp1 & ~sv_ok);  assign l_st[gl] = q_is_store;
       assign l_br[gl] = q_is_branch;  assign l_jmp[gl] = q_is_jump;  assign l_jalr[gl] = q_is_jalr;
       assign l_rvc[gl] = q_rvc;  assign l_rdv[gl] = q_rd_v;  assign l_seq[gl] = q_seq;  assign l_pc[gl] = q_pc;
-      assign l_pdet[gl] = q_pdet;  assign l_rd[gl] = q_rd;  assign l_rs1[gl] = q_rs1;  assign l_insn[gl] = q_insn;
+      assign l_pdet[gl] = q_pdet;  assign l_rd[gl] = q_rd;  assign l_lks[gl] = q_link_rs;  assign l_insn[gl] = q_insn;
       assign l_lqi[gl] = q_lq_idx;  assign l_sqt[gl] = q_sq_tag;
       assign wkv_l[gl] = we;  assign wkp_l[gl*RN_PBITS +: RN_PBITS] = wa;  assign l_wbv[gl*64 +: 64] = wb;
    end endgenerate
@@ -2323,7 +2350,7 @@ module smolrv64_core
       if (|(s_takev & s_cls_l & ~{{(IW-1){1'b0}}, 1'b1}))
          $fatal(1, "smolrv64_core: a head op dispatched beside another op");
       for (ak = 1; ak < NL; ak = ak + 1)
-         if (l_v[ak] & is_hop(l_pl[ak][PL_INSN +: 32]))
+         if (l_v[ak] & is_hop(l_pl[ak][LPL_INSN +: 32]))
             $fatal(1, "smolrv64_core: a head op executes in lane %0d, not lane A", ak);
       if (hA & ho_v)
          $fatal(1, "smolrv64_core: a head op arrives with the head-op register full");
@@ -2630,8 +2657,8 @@ module smolrv64_core
    // dispatches after the one before it fires, every other system op into a drained machine), or
    // holding a queue entry's fault or replay, which no credit orders. That record is the ROB head's,
    // so the op is younger, dies at its redirect, and is not loaded over it.
-   `PL_DECL(ya_)
-   assign `PL_REC(ya_) = l_pl[0];
+   `LPL_DECL(ya_)
+   assign `LPL_REC(ya_) = l_pl[0];
    wire                iss_sys  = l_iss[0] & is_sysq(ya_insn, ya_illegal, ya_fault);
    wire                sy_ld    = iss_sys & ~(sy_v & sy_qf);
    wire                ya_trap  = ya_illegal | ya_fault;
@@ -3032,7 +3059,7 @@ module smolrv64_core
    reg  [PCW-1:0]      lr_ttgt [0:NL-1];
    reg  [PDW-1:0]      lr_pdet [0:NL-1];
    reg  [5:0]          lr_rd   [0:NL-1];
-   reg  [5:0]          lr_rs1  [0:NL-1];
+   reg                 lr_lks  [0:NL-1];
    initial lr_v = {NL{1'b0}};
    wire [SEQW-1:0]     tr_seq;     // the seq of the CTI that trains this cycle (defined with the training)
    integer lrk;
@@ -3045,7 +3072,7 @@ module smolrv64_core
          lr_seq[lrk] <= l_seq[lrk];   lr_rob[lrk] <= l_rob[lrk];
          lr_pc[lrk]  <= l_pc[lrk];    lr_tgt[lrk] <= pcpack(l_tgt[lrk]);
          lr_ttgt[lrk] <= pcpack(l_ttgt[lrk]);  lr_pdet[lrk] <= l_pdet[lrk];
-         lr_rd[lrk]  <= l_rd[lrk];    lr_rs1[lrk] <= l_rs1[lrk];
+         lr_rd[lrk]  <= l_rd[lrk];    lr_lks[lrk] <= l_lks[lrk];
       end
    function older(input [SEQW-1:0] a, input [SEQW-1:0] b);   // wrap-safe: a is older than b
       older = $signed(a - b) < 0;
@@ -3074,7 +3101,7 @@ module smolrv64_core
    wire                cf_taken     = lr_taken[wl];
    // call/return classification for the RAS
    wire                cf_link_rd   = lr_rdv[wl] & ((lr_rd[wl] == 6'd1) | (lr_rd[wl] == 6'd5));
-   wire                cf_link_rs   = (lr_rs1[wl] == 6'd1) | (lr_rs1[wl] == 6'd5);
+   wire                cf_link_rs   = lr_lks[wl];
    always @(posedge clk) if (!reset) begin
       if (ones_nl(lw) > 4'd1)
          $fatal(1, "smolrv64_core: %0d lanes each claim the oldest mispredict", ones_nl(lw));
@@ -3866,7 +3893,7 @@ module smolrv64_core
    reg  [NL-1:0] l_lrd, l_lrs;
    always @* for (tqi = 0; tqi < NL; tqi = tqi + 1) begin
       l_lrd[tqi] = lr_rdv[tqi] & ((lr_rd[tqi] == 6'd1) | (lr_rd[tqi] == 6'd5));
-      l_lrs[tqi] = (lr_rs1[tqi] == 6'd1) | (lr_rs1[tqi] == 6'd5);
+      l_lrs[tqi] = lr_lks[tqi];
    end
    wire [NL-1:0] l_call = lr_jmp & l_lrd, l_ret = lr_jalr & l_lrs & ~l_lrd;
    integer tk;
