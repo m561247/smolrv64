@@ -802,14 +802,18 @@ module csr_file
       cw_hpm      <= reset ? {HPMN{1'b0}} : hpm_wct;
       cw_d        <= newv;
    end
-   // The select is decoded from the stored mhpmeventN, a cycle after it is written: the CSR's
-   // write data (the read mux and the set/clear) never reaches hpm_esel. In that cycle the
-   // select is the old event's, so the counter holds (hpm_wev_q).
+   // The select is decoded a cycle after mhpmeventN is written, from the registered write data
+   // (cw_d, what the CSR now holds) by ONE decoder: the CSR's write data (the read mux and the
+   // set/clear) never reaches hpm_esel. In that cycle the select is the old event's, so the
+   // counter holds (hpm_wev_q).
    reg  [HPMN-1:0] hpm_wev_q;
    integer         hi;
+   wire [6:0]      hpm_sel_w = hpm_sel_of(cw_d[15:0]);   // checked against the stored event below
    always @(posedge clk) begin
       hpm_wev_q <= reset ? {HPMN{1'b0}} : hpm_wev;
-      for (hi = 0; hi < HPMN; hi = hi + 1) hpm_esel[hi] <= reset ? HSEL_NONE : hpm_sel_of(mhpmevent[hi][15:0]);
+      for (hi = 0; hi < HPMN; hi = hi + 1)
+         if (reset) hpm_esel[hi] <= HSEL_NONE;
+         else if (hpm_wev_q[hi]) hpm_esel[hi] <= hpm_sel_w;
    end
    genvar g;
    generate for (g = 0; g < HPMN; g = g + 1) begin : g_hpm
