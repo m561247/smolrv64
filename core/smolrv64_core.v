@@ -847,6 +847,7 @@ module smolrv64_core
    wire [3*RN_PBITS-1:0]  s_ps_in [0:IW-1];
    wire [PLW-1:0]         s_pl_in [0:IW-1];
    wire [SRW-1:0]         s_mrec  [0:IW-1];   // a plain load's or store's record for M (SRW, below)
+   wire [FPW-1:0]         s_fpl   [0:IW-1];   // an FP op's payload (FPW, below)
    wire [ROB_IDXB-1:0]    s_rob [0:IW-1];
    wire [PCW-1:0]         s_pc [0:IW-1], s_tgt [0:IW-1], s_fault_tval [0:IW-1];
    wire [SEQW-1:0]        s_seq [0:IW-1];
@@ -893,6 +894,7 @@ module smolrv64_core
                             q_rs1_v, q_rs2_v, s_sqi[gs], s_lqi[gs]};
       assign s_v[gs] = fe_dv[gs];
       assign s_mrec[gs] = {q_rd_v, prd_g, q_mem_size, q_mem_signed, q_is_fp};
+      assign s_fpl[gs]  = {q_insn, q_rd, q_rd_v, prd_g};
       assign s_takev[gs] = fe_dv[gs] & d_take;       // a group dispatches whole
       assign s_cls_i[gs] = q_gc[GC_I];  assign s_cls_l[gs] = q_gc[GC_L];  assign s_cls_fc[gs] = q_gc[GC_FC];
       assign s_cls_m[gs] = q_gc[GC_M];
@@ -999,15 +1001,17 @@ module smolrv64_core
    reg  [ROB_IDXB-1:0]     stg_rob_f;
    reg  [3*RN_PBITS-1:0]   stg_ps_f;
    reg  [2:0]              stg_r_f;
-   reg  [RN_PBITS-1:0]     stg_prd_f;
-   reg  [PLW-1:0]          stg_pl_f;
+   reg  [FPW-1:0]          stg_pl_f;
+   wire [RN_PBITS-1:0]     stg_prd_f = stg_pl_f[RN_PBITS-1:0];
    wire [2:0]              wkq_f;                    // the head's sources in last cycle's wakes (below)
    initial stg_v_f = 1'b0;
-   // the FIFO behind the head: {destination, payload} in distributed RAM, banked by the entry's low
-   // bits so that a group's FP ops, consecutive entries, write one bank each; the sources, their
-   // readiness and the ROB slot in flops (every entry's sources watch the wakes, the kill reads
-   // every ROB slot)
-   localparam integer FSQW = RN_PBITS + PLW;
+   // AN FP OP'S PAYLOAD is what F reads of it: the instruction (decode_fp) and its destination
+   // (the FPU's tag carries rd), the physical register lowest.
+   localparam integer FPW = 32 + 6 + 1 + RN_PBITS;      // {insn, rd, rd_v, prd}
+   // the FIFO behind the head: the payloads in distributed RAM, banked by the entry's low bits so
+   // that a group's FP ops, consecutive entries, write one bank each; the sources, their readiness
+   // and the ROB slot in flops (every entry's sources watch the wakes, the kill reads every ROB slot)
+   localparam integer FSQW = FPW;
    localparam integer FBN = 1 << $clog2(IW);              // the banks: next_pow2(IW)
    reg  [ROB_IDXB-1:0]     fsq_rob [0:(1<<FSQB)-1];
    reg  [3*RN_PBITS-1:0]   fsq_ps  [0:(1<<FSQB)-1];
@@ -1077,18 +1081,17 @@ module smolrv64_core
    reg  [ROB_IDXB-1:0]   f_rob_in;
    reg  [3*RN_PBITS-1:0] f_ps_in;
    reg  [2:0]            f_r_in;
-   reg  [RN_PBITS-1:0]   f_prd_in;
-   reg  [PLW-1:0]        f_pl_in;
+   reg  [FPW-1:0]        f_pl_in;
    integer               fsk, fsj;
    always @* begin
-      f_rob_in = s_rob[0];  f_ps_in = s_ps_in[0];  f_r_in = s_srdy_hit[0];  f_prd_in = s_prd_g[0];  f_pl_in = s_pl_in[0];
+      f_rob_in = s_rob[0];  f_ps_in = s_ps_in[0];  f_r_in = s_srdy_hit[0];  f_pl_in = s_fpl[0];
       for (fsk = 0; fsk < IW; fsk = fsk + 1) begin
          f_rk[fsk] = 4'd0;
          for (fsj = 0; fsj < IW; fsj = fsj + 1)
             if (s_tf[fsj] & (s_pos[fsj] < s_pos[fsk])) f_rk[fsk] = f_rk[fsk] + 4'd1;
          if (s_tf[fsk] & (f_rk[fsk] == 4'd0)) begin
             f_rob_in = s_rob[fsk];  f_ps_in = s_ps_in[fsk];  f_r_in = s_srdy_hit[fsk];
-            f_prd_in = s_prd_g[fsk];  f_pl_in = s_pl_in[fsk];
+            f_pl_in = s_fpl[fsk];
          end
       end
    end
@@ -1292,13 +1295,12 @@ module smolrv64_core
             stg_rob_f <= fsq_rob[fsq_hd];
             stg_ps_f  <= fsq_ps[fsq_hd];
             stg_r_f   <= fsq_hr;
-            {stg_prd_f, stg_pl_f} <= fsq_o;
+            stg_pl_f  <= fsq_o;
          end else if (push_hd) begin
             stg_v_f   <= 1'b1;
             stg_rob_f <= f_rob_in;
             stg_ps_f  <= f_ps_in;
             stg_r_f   <= f_r_in;
-            stg_prd_f <= f_prd_in;
             stg_pl_f  <= f_pl_in;
          end else if (mv_f) stg_v_f <= 1'b0;
          else if (stg_v_f) stg_r_f <= stg_r_f | snp_f | wkq_f;
@@ -1328,7 +1330,7 @@ module smolrv64_core
    genvar gfb;
    generate for (gfb = 0; gfb < IW; gfb = gfb + 1) begin: fsqw
       assign ft_wv[gfb] = ft_v[gfb];  assign ft_wp[gfb*FSQB +: FSQB] = ft_ix[gfb];
-      assign ft_wd[gfb*FSQW +: FSQW] = {s_prd_g[gfb], s_pl_in[gfb]};
+      assign ft_wd[gfb*FSQW +: FSQW] = s_fpl[gfb];
    end endgenerate
    smolrv64_bankq #(.W(FSQW), .DEPTH(1 << FSQB), .NW(IW), .NR(1), .NB(FBN), .PICK(1), .AB(FSQB)) u_fsq
      (.clk(clk), .reset(reset), .wv(ft_wv), .wp(ft_wp), .wd(ft_wd), .rp(fsq_hd), .ro({$clog2(FBN){1'b0}}), .rd(fsq_o));
@@ -1657,10 +1659,7 @@ module smolrv64_core
       assign wkv_l[gl] = we;  assign wkp_l[gl*RN_PBITS +: RN_PBITS] = wa;  assign l_wbv[gl*64 +: 64] = wb;
    end endgenerate
 
-   // ONE payload array across all three schedulers, indexed by a flat slot number with a
-   // per-class offset -- each scheduler has its own entry-number space, and the offsets are
-   // what stop them aliasing.
-   reg [PLW-1:0] plmem_f [0:NF-1];
+   reg [FPW-1:0] plmem_f [0:NF-1];
    // THE PAYLOADS ARE READ AT PICK AND REGISTERED WITH THE TAGS (plan item T1, step 3,
    // 2026-09-06). They used to be read in the execute cycle at last cycle's entry, so every
    // control derived from them -- the pending table's dispatch-cycle compare, the store
@@ -1670,15 +1669,15 @@ module smolrv64_core
    // address is the scheduler's select, not the pick), and the port's load captures it. An
    // entry issues no earlier than the cycle after its dispatch, so a read never meets its
    // own write.
-   reg  [PLW-1:0] plf_q;
+   reg  [FPW-1:0] plf_q;
    always @(posedge clk) if (rf_take) plf_q <= plmem_f[rf_iss_ent];   // the FP port's payload
-   wire [PLW-1:0] plf_out  = plf_q;
+   wire [FPW-1:0] plf_out  = plf_q;
    // Co-timed with the scheduler fill (T+1), from the REGISTERED stage payload.
    always @(posedge clk) if (mv_f) plmem_f[rf_d_ent] <= stg_pl_f;
 
-   // the FP port's payload, unpacked (unused fields fall away)
-   `PL_DECL(qf_)
-   assign `PL_REC(qf_) = plf_out;
+   // the FP port's payload, unpacked
+   wire [31:0] qf_insn;  wire [5:0] qf_rd;  wire qf_rd_v;  wire [RN_PBITS-1:0] qf_prd;
+   assign {qf_insn, qf_rd, qf_rd_v, qf_prd} = plf_out;
 
    // The pack/unpack check that stood here compared the payload against the m_* registers
    // while BOTH were written from d_*. The payload is now the only source for m_*, so the
@@ -4211,6 +4210,7 @@ module smolrv64_core
 `ifndef SYNTHESIS
    reg [PCW-1:0] cs_pc   [0:ROB_DEPTH-1];
    reg [31:0]    cs_insn [0:ROB_DEPTH-1];
+   wire [PCW-1:0] f_iss_pc = cs_pc[rsi(j_rob)];   // the F port's op (the bench's +watch_pc)
    integer       cpk;
    always @(posedge clk) begin
       for (cpk = 0; cpk < IW; cpk = cpk + 1)

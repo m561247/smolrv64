@@ -1655,9 +1655,9 @@ module tb;
    initial begin watch_on = $value$plusargs("watch_pc=%h", watch_pc); watch_prd_v = 1'b0; watch_prd = 16'd0; end
    integer ww;
    always @(posedge clk) if (!reset && watch_on) begin
-      if (dut.core.iss_f && dut.core.qf_pc == watch_pc[39:0]) begin   // a PC's 40 bits (smolrv64_pc.vh)
+      if (dut.core.iss_f && dut.core.f_iss_pc == watch_pc[39:0]) begin   // a PC's 40 bits (smolrv64_pc.vh)
          $display("[c=%0d] watch F-issue pc=%h rob=%0d rd=x%0d rd_v=%b prd=%0d",
-                  c, dut.core.qf_pc, dut.core.j_rob, dut.core.qf_rd, dut.core.qf_rd_v, dut.core.qf_prd);
+                  c, dut.core.f_iss_pc, dut.core.j_rob, dut.core.qf_rd, dut.core.qf_rd_v, dut.core.qf_prd);
          watch_prd <= dut.core.qf_prd;  watch_prd_v <= dut.core.qf_rd_v;
       end
       // a control-flow op resolving in its lane
