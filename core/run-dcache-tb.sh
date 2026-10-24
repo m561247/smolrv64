@@ -10,11 +10,12 @@ verilator --binary --timing -j 0 -sv -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC
    -I../src --top-module tb --Mdir obj_dir_dcache -o tb_dcache \
    rv_dcache.v smolrv64_sdpram_be.v tb_rv_dcache.v > obj_dir_dcache.build.log 2>&1 \
    || { echo "BUILD FAILED"; grep -m10 '%Error' obj_dir_dcache.build.log; exit 1; }
-# Each seed runs over both memory orders and five shapes: the default, a slow memory (every
+# Each seed runs over both memory orders and six shapes: the default, a slow memory (every
 # MSHR busy: the waiters' fairness), a fast one with twice the stores (fills racing the read-out,
-# the store lookup and the merge buffer), a remap every 500 cycles, and the on-chip SRAM's 1-4
-# cycles (a fill landing right behind its read-out).
-CFGS=("" "+latmin=100 +latmax=300" "+latmin=8 +latmax=12 +stores=70" "+remap=500" "+latmin=1 +latmax=4")
+# the store lookup and the merge buffer), a remap every 500 cycles, the on-chip SRAM's 1-4
+# cycles (a fill landing right behind its read-out), and the port shut 64 cycles in every 400
+# (every MSHR allocated before one issues: the issue queue full).
+CFGS=("" "+latmin=100 +latmax=300" "+latmin=8 +latmax=12 +stores=70" "+remap=500" "+latmin=1 +latmax=4" "+pstall=400")
 rc=0; n=0; bad=0
 for s in ${@:-1 2 3 4 5 6}; do
    for mode in "" "+reorder"; do

@@ -6,7 +6,8 @@
 // whose latency has passed may go first. A read returns its line in four 128-bit beats, in order;
 // a write completes with one cw pulse. The model is as late as the port allows: a read returns
 // the memory as it was when the read was taken, and a write reaches the memory only when it
-// completes. The request channel is back-pressured at random.
+// completes. The request channel is back-pressured at random, and with +pstall=<period> shut for
+// 64 cycles in every <period>, so misses allocate every MSHR before one is issued.
 //
 // TWO IMAGES. `dram` is the memory behind the port. `gold` is the architectural memory: every
 // store the cache took is in it from the cycle it was taken. Every load answer is checked against
@@ -53,7 +54,7 @@ module tb;
    always #5 clk = ~clk;
    localparam NTAG = 16, NVP = 96, NPP = 64, NOUT = 8, NMSHR = 8;
    localparam [63:0] PBASE = 64'h8000_0000;
-   integer seed, cycles, reorder, latmin, latmax, remap, timeout, stpct, fence;
+   integer seed, cycles, reorder, latmin, latmax, remap, timeout, stpct, fence, pstall;
    localparam NCS = 10;                         // the NC slot's memory-port id (NMSHR + NWB)
    localparam FN_BUDGET = 1000000;              // a clean writes back up to every line, NWB at a time
    localparam K_ST = 0, K_NC = 1, K_CLN = 2, K_FL = 3, K_Z = 4;
@@ -181,6 +182,7 @@ module tb;
       if (!$value$plusargs("remap=%d", remap)) remap = 3000;
       if (!$value$plusargs("timeout=%d", timeout)) timeout = 5000;
       if (!$value$plusargs("stores=%d", stpct)) stpct = 30;     // percent of cycles a store is offered
+      if (!$value$plusargs("pstall=%d", pstall)) pstall = 0;    // the port shut 64 cycles in every pstall
       if (!$value$plusargs("fence=%d", fence)) fence = 20000;
       for (k = 0; k < NWD; k = k + 1) begin
          pa = PBASE + 64'(k) * 8;
@@ -424,7 +426,7 @@ module tb;
             end
          end
          pick = 0;  for (k = 0; k < NOUT; k = k + 1) if (mo_v[k]) pick = pick + 1;
-         cq_ready = (pick < NOUT) && (rnd(0) % 8 != 0);
+         cq_ready = (pick < NOUT) && (rnd(0) % 8 != 0) && !(pstall > 0 && (now % pstall) < 64);
          // ---- nobody waits forever
          for (k = 0; k < NTAG; k = k + 1)
             if (out_v[k] && (now - out_t[k] > timeout)) begin

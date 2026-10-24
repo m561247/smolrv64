@@ -601,6 +601,7 @@ module rv_dcache #(
    // Reads first: an allocated MSHR's read waits in the issue queue, in allocation order; then the
    // NC access; a write-back goes when neither waits.
    reg  [MB-1:0]   iq [0:NMSHR-1];
+   reg             ms_iss [0:NMSHR-1];            // the MSHR's read has gone to memory (the invariant below)
    reg  [MB-1:0]   iq_rd, iq_wr;
    reg  [MB:0]     iq_n;
    reg             ws_v;  reg [WBB-1:0] ws;       // the write-back to send
@@ -739,7 +740,9 @@ module rv_dcache #(
             mb_cv[ms_free] <= k_st ? (8'd1 << s1_c) : 8'd0;
             mb_z[ms_free]  <= k_z;
          end
-         iq[iq_wr] <= ms_free;
+         // the next slot takes the free MSHR each cycle, the pointer moving on an allocation -- except
+         // when the queue is full: then that slot is the oldest unissued MSHR's (iq_wr is iq_rd)
+         if (!iq_n[MB]) iq[iq_wr] <= ms_free;
          // a request enters the waiter table
          if ((m_drop & ~k_fl) | m_defer | m_join | m_wait | (m_alloc & k_ld)) begin
             wt_v[s1_tag]   <= 1'b1;
@@ -748,7 +751,8 @@ module rv_dcache #(
             wt_m[s1_tag]   <= m_join ? ms_hk : ms_free;
          end
          // an allocation: the MSHR goes live and its read is queued
-         if (m_alloc) begin ms_v[ms_free] <= 1'b1;  iq_wr <= iq_wr + 1'b1; end
+         if (m_alloc) begin ms_v[ms_free] <= 1'b1;  ms_iss[ms_free] <= 1'b0;  iq_wr <= iq_wr + 1'b1; end
+         if (iq_go) ms_iss[iq[iq_rd]] <= 1'b1;
          // a store's bytes joining a live MSHR's merge buffer (the bytes: the one write above)
          if (fp_mg) begin
             mb_cv[sb_hk][sb_c] <= 1'b1;
@@ -865,12 +869,14 @@ module rv_dcache #(
    wire e_fast    = (f_req & (~f_ok | ~f_hint | rd_req | wt_v[{1'b0, f_tag}] | (s1_v & (s1_tag == {1'b0, f_tag}))))
                   | (f_cancel & ~(s1_v & s1_f));
    wire e_xb      = (st_done & sf_ox[sq_hp] & ~sf_keep[sq_hp] & xb_v) | (ox_rel & ~xb_v);
-   wire [15:0] e_now = {1'd0, e_xb, e_fast, e_stcl, e_sqord, e_vic, e_wr2, e_rorace, e_wdead, e_wtbusy, e_btwo, e_two, e_beat, e_wdone, e_slot, e_orphan};
+   // an MSHR's read issued while the MSHR is not live, or a second time
+   wire e_iss     = iq_go & (~ms_v[iq[iq_rd]] | ms_iss[iq[iq_rd]]);
+   wire [15:0] e_now = {e_iss, e_xb, e_fast, e_stcl, e_sqord, e_vic, e_wr2, e_rorace, e_wdead, e_wtbusy, e_btwo, e_two, e_beat, e_wdone, e_slot, e_orphan};
    reg  [15:0] e_q;
    always @(posedge clk) e_q <= reset ? 16'd0 : e_now;
    assign err = e_q;
    always @(posedge clk) if (!reset && (e_now != 0))
-      $fatal(1, "rv_dcache: invariant %b (orphan beat, bad slot, write completion, beat order, two ways, two ways at the store lookup, tag reuse, dead waiter, read-out race, two store writes, reserved victim, store-queue order, store under a clean, fast load, outside block)", e_now[14:0]);
+      $fatal(1, "rv_dcache: invariant %b (orphan beat, bad slot, write completion, beat order, two ways, two ways at the store lookup, tag reuse, dead waiter, read-out race, two store writes, reserved victim, store-queue order, store under a clean, fast load, outside block, MSHR issue)", e_now);
 
 endmodule
 `default_nettype wire
