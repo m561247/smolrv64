@@ -26,8 +26,9 @@ module mul3
    wire a_sgn = (f3 == 3'b001) | (f3 == 3'b010);   // MULH, MULHSU
    wire b_sgn = (f3 == 3'b001);                     // MULH
    wire hi    = (f3 == 3'b001) | (f3 == 3'b010) | (f3 == 3'b011);  // high half
-   wire [64:0] a_ext = is_w ? {33'd0, rs1[31:0]} : {a_sgn & rs1[63], rs1};
-   wire [64:0] b_ext = is_w ? {33'd0, rs2[31:0]} : {b_sgn & rs2[63], rs2};
+   // MULW: the product's low 32 bits depend on the operands' low 32 bits alone (a_sgn = b_sgn = 0)
+   wire [64:0] a_ext = {a_sgn & rs1[63], rs1};
+   wire [64:0] b_ext = {b_sgn & rs2[63], rs2};
 
    // 3 pipeline stages: A = operands, B = product, C = selected result.
    reg               v1, v2, v3;
