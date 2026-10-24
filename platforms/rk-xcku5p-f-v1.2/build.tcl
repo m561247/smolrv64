@@ -274,18 +274,22 @@ if {1} {
         puts "fetch window = 8 halfwords (SMOLRV64_HW=8) -- the shipping build."
         lappend vdefines "SMOLRV64_HW=8"
     }
-    # Pipeline width. 3 is the shipping build AND the RTL default (the ifndef SMOLRV64_IW in
-    # smolrv64_core.v / rv_soc_top.v); 2 and 4 are the other widths. One knob drives the whole width-generic frontend + backend.
+    # Pipeline width: the shipping one is core/smolrv64_width.vh's; SMOLRV64_IW=<n> (2, 3 or 4)
+    # builds another. One knob drives the whole width-generic frontend + backend. The RAM check
+    # below reads the width it built from the environment.
+    set fh [open [file join $smolrv64_dir smolrv64_width.vh]]
+    regexp {`define SMOLRV64_IW (\d+)} [read $fh] -> ship_iw
+    close $fh
     if {[info exists env(SMOLRV64_IW)] && $env(SMOLRV64_IW) ne ""} {
         if {$env(SMOLRV64_IW) < 2 || $env(SMOLRV64_IW) > 4} {
-            error "SMOLRV64_IW=$env(SMOLRV64_IW): only 2, 3 or 4 (pipeline width); 3 is the shipping build."
+            error "SMOLRV64_IW=$env(SMOLRV64_IW): only 2, 3 or 4 (pipeline width); $ship_iw is the shipping build."
         }
-        puts "SMOLRV64_IW override: pipeline width = $env(SMOLRV64_IW) (the shipping build is 3)."
-        lappend vdefines "SMOLRV64_IW=$env(SMOLRV64_IW)"
+        puts "SMOLRV64_IW override: pipeline width = $env(SMOLRV64_IW) (the shipping build is $ship_iw)."
     } else {
-        puts "pipeline width = 3 (SMOLRV64_IW=3) -- the shipping build."
-        lappend vdefines "SMOLRV64_IW=3"
+        set ::env(SMOLRV64_IW) $ship_iw
+        puts "pipeline width = $ship_iw (SMOLRV64_IW=$ship_iw) -- the shipping build."
     }
+    lappend vdefines "SMOLRV64_IW=$env(SMOLRV64_IW)"
 }
 # VDEFS="NAME=VALUE NAME2=VALUE2": further Verilog defines, as the sim runners take them, for a
 # probe bitstream (SMOLRV64_MDSPEC=0: no memory-dependence speculation; SMOLRV64_SQB=4 ...).

@@ -138,12 +138,13 @@ stampable)
     # it): a directive moves placement, not the netlist, and a met build is met.
     cid=${1:?content id}
     pl=${PLACE_DIRECTIVE:-AltSpreadLogic_medium}
-    for d in $(ls -td "$BITCACHE"/*-iw3-div48-"$pl" "$BITCACHE"/*-iw3-div48-"$pl".* 2>/dev/null); do
+    iw=$(sed -n 's/^ *`define SMOLRV64_IW \([0-9]*\).*/\1/p' "$here/core/smolrv64_width.vh")   # the shipping width
+    for d in $(ls -td "$BITCACHE"/*-iw$iw-div48-"$pl" "$BITCACHE"/*-iw$iw-div48-"$pl".* 2>/dev/null); do
         grep -q "^cid: *$cid\$" "$d/meta.txt" 2>/dev/null || continue
         grep -q '^met: *yes' "$d/meta.txt" && [ -f "$d/routed.dcp" ] || continue
         extra=$(sed 's/=.*//' "$d/defines.txt" | grep -v -x -E 'MEM_BASEADDR|SOC_BOOT_HEX|PROBE_CLK_DIV8|SMOLRV64_HW|SMOLRV64_IW|SMOLRV64_GIT_COMMIT|SMOLRV64_GIT_DIRTY|SMOLRV64_BUILD_STAMP' || true)
         [ -z "$extra" ] && grep -q -x 'PROBE_CLK_DIV8=48' "$d/defines.txt" && grep -q -x 'SMOLRV64_HW=8' "$d/defines.txt" \
-            && grep -q -x 'SMOLRV64_IW=3' "$d/defines.txt" || continue
+            && grep -q -x "SMOLRV64_IW=$iw" "$d/defines.txt" || continue
         echo "$d"; exit 0
     done
     exit 1

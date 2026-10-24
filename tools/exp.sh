@@ -71,7 +71,7 @@ export PATH=/opt/homebrew/bin:$HOME/.cargo.arm64-darwin/bin:$HOME/install/x86_64
 run() {   # <name> <kind> <arg>
    case $2 in
       boot) CYC=$3 ./run-cosim-linux.sh ;;
-      rvb)  FW=$T/workloads/rvbench/${3%,*}.bin INITRD= CYC=400000000 VDEFS=-DSMOLRV64_IW=3 \
+      rvb)  FW=$T/workloads/rvbench/${3%,*}.bin INITRD= CYC=400000000 \
                PLUSARGS="+tohost=${3#*,}" ./run-cosim-linux.sh ;;
       pi)   CKPT=$CK/pi/ck/$3.ckpt CYC=0 ./run-linux.sh +measure_from=20000000 +max_retires=70000000 ;;
       gb5)  CKPT=$CK/$3.ckpt MEM_LG2=31 CYC=0 ./run-linux.sh +measure_from=20000000 +max_retires=70000000 ;;

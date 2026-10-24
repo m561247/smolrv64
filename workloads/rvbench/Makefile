@@ -29,7 +29,7 @@ CFLAGS  = -U_FORTIFY_SOURCE -DPREALLOCATE=1 -mcmodel=medany -static -std=gnu99 $
           -Wno-implicit-int -Wno-implicit-function-declaration -march=$(MARCH) -mabi=lp64d \
           -I$(ENVINC) -I$(RVT)/common
 LDFLAGS = -static -nostdlib -nostartfiles -lm -lgcc -T $(RVT)/common/test.ld
-VDEFS  ?= -DSMOLRV64_IW=3
+VDEFS  ?=
 CYC    ?= 400000000
 B      ?= dhrystone
 COREMARK ?= $(HOME)/projects/coremark

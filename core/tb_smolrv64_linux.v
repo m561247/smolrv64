@@ -15,9 +15,7 @@
 // region is never touched and the run is the plain initrd boot.
 `include "tb_rand.vh"
 `include "smolrv64_tags.vh"           // the queue sizes FWD-SIM and DEPLD-SIM walk (SMOLRV64_LQB, SMOLRV64_SQB)
-`ifndef SMOLRV64_IW
- `define SMOLRV64_IW 3
-`endif
+`include "smolrv64_width.vh"
 `ifndef SMOLRV64_FW
  `define SMOLRV64_FW (2*`SMOLRV64_IW)
 `endif

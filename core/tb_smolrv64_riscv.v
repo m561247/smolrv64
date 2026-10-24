@@ -13,9 +13,7 @@
 `ifndef SMOLRV64_HW
  `define SMOLRV64_HW 8
 `endif
-`ifndef SMOLRV64_IW
- `define SMOLRV64_IW 3
-`endif
+`include "smolrv64_width.vh"
 module tb;
    // HW defaults to the SHIPPING window (8 = 16 bytes), so the Verilator/iverilog riscv-tests
    // exercise the width the board runs -- until 2026-09-13 this tb hardcoded HW=2 (a full 32-bit

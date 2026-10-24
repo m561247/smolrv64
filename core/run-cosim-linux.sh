@@ -209,7 +209,8 @@ hw=$(printf '%s' "${VDEFS:-}" | sed -n 's/.*-DSMOLRV64_HW=\([0-9]*\).*/\1/p'); h
 # The rows are keyed by cycles, fetch width and PIPELINE width: a run at another pipeline width
 # retires a different count, so it is graded only against its own width's rows. The width is the
 # RTL default (3) unless VDEFS names another.
-iw=$(printf '%s' "${VDEFS:-}" | sed -n 's/.*-DSMOLRV64_IW=\([0-9]*\).*/\1/p'); iw=${iw:-3}
+iw=$(printf '%s' "${VDEFS:-}" | sed -n 's/.*-DSMOLRV64_IW=\([0-9]*\).*/\1/p')
+iw=${iw:-$(sed -n 's/^ *`define SMOLRV64_IW \([0-9]*\).*/\1/p' smolrv64_width.vh)}
 # A row's optional 5th column is the pipeline width it was measured at (2 when absent), so
 # IW=3 has its own rows since 2026-09-17 -- and its own count, now that the testbench sums
 # the third commit port. A width with no row is judged by the lockstep alone.

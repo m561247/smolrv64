@@ -21,7 +21,8 @@ later, on a design that is 65-83% route-bound (docs/rtl-rules.md I7).  So the in
 recorded here and CHECKED, rather than left to be rediscovered.
 
 Usage:  check-ram-inference.py <synth-runme.log> [manifest]
-        manifest defaults to tools/ram-manifest.txt next to this script.
+        manifest defaults to tools/ram-manifest.txt next to this script. A count `x{expr}` is
+        evaluated in IW, the environment's SMOLRV64_IW (the build sets it to the width it built).
 Exit 0 = every required array is a RAM.  Exit 1 = at least one regressed.
 """
 import re
@@ -95,14 +96,19 @@ def required_present(entry, have, final):
     module instantiated more than once (smolrv64_bankq, smolrv64_mwram) counts each instance's
     banks; an array those reports do not name (a block RAM reported only by instance) is counted
     by its name, as before."""
-    m = re.fullmatch(r"(.+)\s+x(\d+)", entry)
+    m = re.fullmatch(r"(.+)\s+x(\d+|\{[^}]*\})", entry)
     if not m:
         return entry in have
+    want = m.group(2)
+    if want.startswith("{"):
+        if "SMOLRV64_IW" not in os.environ:
+            sys.exit("check-ram-inference: %s needs SMOLRV64_IW, the width the build used" % entry)
+        want = eval(want[1:-1], {}, {"IW": int(os.environ["SMOLRV64_IW"])})
     pat = re.compile(r"(^|/)" + re.escape(m.group(1).strip()).replace(r"\[\*\]", r"\[\d+\]") + "$")
     n = sum(1 for _, p in final if pat.search(p))
     if n == 0:
         n = sum(1 for p in have if pat.search(p))
-    return n == int(m.group(2))
+    return n == int(want)
 
 
 def main():

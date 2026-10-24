@@ -40,9 +40,7 @@
 `ifndef SMOLRV64_HW
  `define SMOLRV64_HW 8                 // fetch window halfwords (must match smolrv64_core.v)
 `endif
-`ifndef SMOLRV64_IW
- `define SMOLRV64_IW 3                 // pipeline width (must match smolrv64_core.v)
-`endif
+`include "smolrv64_width.vh"            // SMOLRV64_IW: the pipeline width
 module rv_soc_top #(
    parameter HW=`SMOLRV64_HW, IW=`SMOLRV64_IW, PCW=40,   // fetch window halfwords / pipeline width / a PC's bits
    parameter [63:0] BASE     = 64'h8000_0000,   // DDR

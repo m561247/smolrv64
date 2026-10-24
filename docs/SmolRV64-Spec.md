@@ -21,8 +21,8 @@ the 2026-09 release; their history is in git, and the dated records in `docs/his
 | Translation | Sv39 (`satp.MODE`=8) or Bare; Ssvnapot level-0 NAPOT leaves |
 | Also implemented | Zicsr, Zifencei, Zicntr, Zihpm (13 counters), Sscofpmf, Sstc, Smstateen, Ssvnapot |
 | Decoded but not in `misa` | Zba, Zbb, Zbs, Zicond (`src/decode_exec.v`) |
-| Fetch / dispatch / retire | **three-wide** (`SMOLRV64_IW=3`, the RTL and build default; `SMOLRV64_IW=2` and `4` build the two- and four-wide machines); fetch is one 16-byte pair per cycle into the fetch ring (§4) |
-| Issue | **dynamic**: ALU ops, multiplies, divides, branches and jumps issue in their slot's lane (three schedulers, three ALUs, three multipliers; a divide's operands go to the one MD stage) and reorder freely; a system op issues in lane A and fires from the SYSQ at the ROB head; FP ops reorder on the FP port (§7); loads, stores, AMOs, LR/SC and CBOs generate their address in their slot's lane and reach M through their LQ/SQ entry or the head-op register (§8) |
+| Fetch / dispatch / retire | **four-wide** (`SMOLRV64_IW=4`, set once in `core/smolrv64_width.vh` for the RTL, the build and the benches; `SMOLRV64_IW=3` and `2` build the three- and two-wide machines); fetch is one 16-byte pair per cycle into the fetch ring (§4) |
+| Issue | **dynamic**: ALU ops, multiplies, divides, branches and jumps issue in their slot's lane (a scheduler, an ALU and a multiplier per lane, four of each; a divide's operands go to the one MD stage) and reorder freely; a system op issues in lane A and fires from the SYSQ at the ROB head; FP ops reorder on the FP port (§7); loads, stores, AMOs, LR/SC and CBOs generate their address in their slot's lane and reach M through their LQ/SQ entry or the head-op register (§8) |
 | Completion | **out of order** (non-blocking loads, tagged FP results, ALU at issue) |
 | Commit | in order, from the ROB head, up to `IW`/cycle |
 | Speculation | branch/jump prediction; loads ahead of older stores of unknown address (§8); an address generator issues on a load's D$ lookup before it answers (§8); no value speculation |
@@ -521,7 +521,7 @@ order: the committed head advances as a row retires and the walk backs a row out
 
 The PRF has **a write address and a write enable per bank, one writer each**. Duplication buys
 read ports only; sharding by *writer* is what buys write ports. The integer shards are the
-lanes' (SH_IE, SH_IE2, SH_IE3: lane k's is shard k), one write register each: the lane's ALU
+lanes' (shard k is lane k's, k < IW: SH_IE, SH_IE2, SH_IE3, ...), one write register each: the lane's ALU
 result and link at issue, a multiply in its reserved slot (§7), and every other integer result
 -- a load's, AMO's or CSR read's (§8), an FP op's integer destination, a divide's -- through the
 lane's landing buffer (§8). The F stage
@@ -531,8 +531,8 @@ lands through the FPU's own landing in any cycle the FPU is not landing; a waiti
 holds the stage. An FP op with mstatus.FS off is illegal at dispatch and traps from the SYSQ.
 **A link is its lane's ALU result**, written into the lane's
 shard at issue, so a jal/jalr never waits for a port and its squash waits for nothing (rule D13
-is satisfied by construction). **The read ports**: each integer shard has 2 x NL + 1, seven at
-three lanes -- the lanes' rs1/rs2 and the store queue's data read -- and each FP shard has four,
+is satisfied by construction). **The read ports**: each integer shard has 2 x NL + 1, nine at
+four lanes -- the lanes' rs1/rs2 and the store queue's data read -- and each FP shard has four,
 the store queue's data read and the FP port's three operands. A lane never names an f-register,
 and the FP port never an integer register (both asserted). **An FP op with an integer source**
 (`fcvt.d.l`, `fmv.d.x`: rs1 is its only source) issues in its slot's lane, which reads rs1 and
@@ -549,7 +549,7 @@ Camera -0.19%, Gaussian Blur -0.02%, Structure from Motion +0.05%, SQLite +0.05%
 
 | shard | entries | written by | why the size |
 |---|---|---|---|
-| IE, IE2, IE3 | 64 each | **lane A, B, C's write register, alone**: its ALU results and links, its multiplies, its landings (loads, AMOs, CSR reads, FP ops' integer results, divides) | > 32 (integer arch regs) each |
+| IE, IE2, ... (one per lane) | 64 each | **its lane's write register, alone**: its ALU results and links, its multiplies, its landings (loads, AMOs, CSR reads, FP ops' integer results, divides) | > 32 (integer arch regs) each |
 | FL | 64 | f0–f31 only: **the load landing, alone** (FP loads) | > 32 (FP arch regs). The shard rename runs short of on the FP slices (Camera: every `be:rename` cycle, RENAME-SIM); at 128 those stalls are gone and the cycles move 0.04% at most (Camera, Gaussian Blur, Structure from Motion, PDF Rendering): the window waits on something else instead |
 | FF | 64 | f0–f31 only: **the F stage, alone** (FP results) | > 32 (FP arch regs) |
 
@@ -580,7 +580,7 @@ Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard belo
 
 ## 6. Reorder buffer
 
-- **64 rows of a group** (192 entries at IW=3), status only — no result values, no PC, no operands. A dispatch
+- **64 rows of a group** (256 entries at IW=4, 228 of them live at once: `ROB_CAP`, below), status only — no result values, no PC, no operands. A dispatch
   group takes a row, its instruction in lane k in column k. The lanes rotate (§3.2), so a
   row's instructions start at its **first column** `fc[row]` and run on cyclically: position p
   is column `(fc + p) % IW`. An op's **tag** is `{row, wrap, column}`, the wrap bit set when its
@@ -615,7 +615,7 @@ bulk-clearable bit vectors.
 | `noret` | 1 | commits but must not be counted (see below) |
 | `rd` | 6 | architectural destination, unified numbering (0–31 int, 32–63 FP) |
 | `prd` | `PBITS`=9 | physical register allocated; **0 when none** |
-| | **16** | × 64 rows × `IW` columns = **3,072 bits** at IW=3 |
+| | **16** | × 64 rows × `IW` columns = **4,096 bits** at IW=4 |
 | `v`, `done` | 2 × 64 × 2^⌈log2 `IW`⌉ | separate flops — both are bulk-cleared on flush |
 
 **Three fields are deliberately absent**, each recoverable from state the design already
@@ -974,9 +974,7 @@ runs inside every 240-test and cosim run.
 
 | unit | latency | outstanding | blocks M? | writes |
 |---|---|---|---|---|
-| lane A's ALU (slot A's ALU ops) | 1 cycle (at issue) | — | no | IE shard |
-| lane B's ALU (slot B's ALU ops) | 1 cycle (at issue) | — | no | IE2 shard |
-| lane C's ALU (slot C's ALU ops) | 1 cycle (at issue) | — | no | IE3 shard |
+| each lane's ALU (slot k's ALU ops) | 1 cycle (at issue) | — | no | the lane's shard (k) |
 | each lane's multiplier (`mul3`, slot k's multiplies) | 3 cycles: wake at T+2, written at T+3 | — | no (one a cycle) | the lane's shard |
 | branch, `jal`/`jalr` (its slot's lane) | 1 cycle (at issue) | — | no | the lane's shard (the link) |
 | CSR | 1 cycle at the ROB head; younger work runs meanwhile | 1 | yes | LD shard (M's port) |
@@ -1843,7 +1841,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 
 | array | module | shape | width | bits | storage | ports |
 |---|---|---|---|---|---|---|
-| `ish[0..IW-1].mem` | `smolrv64_prf` | 64 each | 64 | 12 288 | LUTRAM | lane k's integer shard: 1W (lane k's write register), 7R at IW=3 (2 per lane, the store queue's) |
+| `ish[0..IW-1].mem` | `smolrv64_prf` | 64 each | 64 | 16 384 | LUTRAM | lane k's integer shard: 1W (lane k's write register), 9R at IW=4 (2 per lane, the store queue's) |
 | `lb_prd`, `lb_rob`, `lb_fe`, `lb_dk` | `smolrv64_core` | 3×4 | 10/8/1/1 | 240 | flops | the lanes' landing buffers (§8): what the kill and the wakes read at every entry |
 | `g_lp[*].u_lbd` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_core`) | 3 × 2 × 2 | 64 | 768 | LUTRAM | the landing buffers' data: the LD stream's at the tail, the FE stream's after it, read at the head |
 | `fp[0].mem`, `fp[1].mem` | `smolrv64_prf` | 64 each | 64 | 8 192 | LUTRAM | 4R (the store queue's, the FP port's 3), 1W each: SH_FL (the load landing) and SH_FF (the F stage) |
@@ -1861,15 +1859,15 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `ho_va`, `ho_dat`, `ho_rec`, `ho_v` | `smolrv64_core` | 1 | 64/64/282/1 | 411 | flops | the head-op register (§8) |
 | `u_tq` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_core`) | 4 x 8 | 117 | 3 744 | LUTRAM | the training queue's payload (a CTI's PC, RVC bit, taken-target, predict details, kind and outcome): one write a bank (a lane's CTI at the tail plus its rank), read at the head into `res_*_q` (§4.2) |
 | `tq_seq`, `tq_rob`, `tq_dk`, `tq_rt` | `smolrv64_core` | 32 | 9/9/1/1 | 640 | flops | the training queue's entries as every one is compared: the redirect's seq, the retire ports' and the kill's ROB index |
-| `rob_ffr` | `smolrv64_core` | 256 (192 used) | 5 | 960 | LUTRAM | an FP op's exception flags by ROB slot: 1W (the landing result), 1R per retire port |
-| `rob_ffv` | `smolrv64_core` | 256 (192 used) | 1 | 192 | flops | the slot's FP result landed: cleared by its allocation, set by the landing |
+| `rob_ffr` | `smolrv64_core` | 256 | 5 | 1 280 | LUTRAM | an FP op's exception flags by ROB slot: 1W (the landing result), 1R per retire port |
+| `rob_ffv` | `smolrv64_core` | 256 | 1 | 256 | flops | the slot's FP result landed: cleared by its allocation, set by the landing |
 | `mdw` | `smolrv64_core` | 256 | 2 | 512 | LUTRAM | the memory-dependence wait table: read at dispatch by the load's PC and by training, 1W (a replay, else one training event, else the forget's step; §8) |
 | `spl_ld`, `spl_st` | `smolrv64_core` | 16, 32 | 8+274 = 282 | 13 536 | LUTRAM | a lane load's or store's record by LQ/SQ entry: four banks by entry, 1W each (a group's row), 1R at M's pick (§8) |
 | `u_la`, `u_sa` `wb[0..IW-1].mem` | `smolrv64_mwram` (in `smolrv64_core`) | 16, 32 a bank | 64 | 9 216 | LUTRAM | the lanes' arrived VAs, a bank per lane (1W, its lane), 1R at M's pick; `lvt` (2 bits an entry, flops) names the bank that wrote the entry last (§8) |
 | `la_v`, `sa_v` | `smolrv64_core` | 16, 32 | 1 | 48 | flops | an entry's address has arrived and M has not taken it |
 | `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 274 | 10 412 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each; the immediate is stored as its low 32 bits, which it sign-extends (the queue's write asserts it), and a fetch fault's address as one bit, set for a straddler's pc+2 (`imm` and `fault_tval` are rebuilt from them) |
-| `ipend`, `fpend` | `smolrv64_pending` | 192, 128 | 1 | 320 | flops | readiness, a table per file indexed by {shard, index}: 18R that read both and let the number's file pick (the slots' rs1/rs2, 6; the lanes' operands, 6), 6R of the FP table alone (the slots' rs3, 3; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 3 sets, 5 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
+| `ipend`, `fpend` | `smolrv64_pending` | 256, 128 | 1 | 384 | flops | readiness, a table per file indexed by {shard, index}: 23R, 16 that read both and let the number's file pick (the slots' rs1/rs2, 8; the lanes' operands, 8) and 7 of the FP table alone (the slots' rs3, 4; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 4 sets, 6 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
 | `u_pa` `wb[0..1].mem` | `smolrv64_mwram` (in `smolrv64_lq`) | 16 a bank | 56 | 1 792 | LUTRAM | the load queue's PA, a bank per writer (M's fill, the walker's answer), 3R (the start's entry, the landing's two candidates); `lvt` (a bit an entry, flops) names the writer |
 | `pcm` | `smolrv64_lq` | 16 | 39 | 624 | LUTRAM | a load's PC: four banks by entry, 1W each at dispatch, 1R the fault pick; `pch` (16 × 8 flops) keeps its wait-table bits, which every entry reports |
 | `om` | `smolrv64_lq` | 16 | 16 | 256 | flops | the load queue's program order: an entry's row names the entries older than it, written at its allocation (the row the live entries, its column cleared); every "oldest of these" reads it |
@@ -1988,11 +1986,11 @@ Not present in synthesis (`ifndef SYNTHESIS`), listed so nobody counts them as a
 
 | array | shape | width | purpose |
 |---|---|---|---|
-| `cs_pc` | 192 (`ROB_DEPTH`) | 40 | retire PC for the cosim trace |
-| `cs_insn` | 192 | 32 | retire instruction word |
-| `cs_val` | 192 | 64 | retire value — captured at the writeback event |
-| `cs_mkind` | 192 | 2 | memory-effect kind |
-| `cs_mpa` | 192 | 56 | memory-effect physical address |
+| `cs_pc` | 256 (`ROB_DEPTH`) | 40 | retire PC for the cosim trace |
+| `cs_insn` | 256 | 32 | retire instruction word |
+| `cs_val` | 256 | 64 | retire value — captured at the writeback event |
+| `cs_mkind` | 256 | 2 | memory-effect kind |
+| `cs_mpa` | 256 | 56 | memory-effect physical address |
 
 ---
 

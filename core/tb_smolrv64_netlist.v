@@ -3,9 +3,7 @@
 // (tools/netlist-boot.sh, rule F5) or the RTL (-DRTL_RUN) -- with a full port trace: every retire, store, DDR request and UART byte, one
 // line per event, so a netlist run and an RTL run of the same tree diff to their first divergence.
 //   +maxcyc=N (default 400000)  +maxchars=N (default 60)
-`ifndef SMOLRV64_IW
- `define SMOLRV64_IW 3
-`endif
+`include "smolrv64_width.vh"
 module tb;
    reg clk = 0; always #3 clk = ~clk;
    reg reset = 1;

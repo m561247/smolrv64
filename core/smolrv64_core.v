@@ -64,9 +64,7 @@
 `ifndef SMOLRV64_HW
  `define SMOLRV64_HW 8                 // fetch window halfwords: 16 bytes, the shipping build since 2026-09-05 (4 before)
 `endif
-`ifndef SMOLRV64_IW
- `define SMOLRV64_IW 3                 // pipeline width (instructions/cycle); 3 = shipping. Stage 3 width knob.
-`endif
+`include "smolrv64_width.vh"            // SMOLRV64_IW: the pipeline width (instructions/cycle)
 `ifndef SMOLRV64_FW
  `define SMOLRV64_FW (2*`SMOLRV64_IW)  // fetch width: instructions into the decoupling queue per cycle (IW..8)
 `endif
