@@ -87,6 +87,9 @@ if stale || [ "${BUILD:-0}" = 1 ]; then
 fi
 flock -s 9      # shared for the run: the exec'd binary keeps fd 9
 exec 8>&-       # the next runner's check
+# the run's memory, booked before it starts (tools/simmem.sh): the DDR array and the model
+. ../tools/simmem.sh
+simmem_book $(( (1 << MEM_LG2) / 1048576 + 512 )) || exit 1
 
 if [ -n "${CKPT:-}" ]; then
    ../tools/ckpt-stub.py "$CKPT" || exit 1

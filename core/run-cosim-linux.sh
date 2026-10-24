@@ -71,8 +71,10 @@ mkdir -p "$OBJ"; exec 8>"$OBJ.build.flock" 9>"$OBJ.flock"; flock -x 8
 # probe_cosim.o gave REF and DUT different RAM sizes (91d75614), and a stale .a hid the
 # cbo.zero capture fix and reproduced a "MISMATCH" that was already fixed.  Cargo is
 # incremental; this costs ~2 s when up to date.
+# Under a host-wide lock: four runs of different trees started together once raced in cargo's
+# package cache ("failed to unpack ... File exists", 2026-10-24).
 echo "building simmerv cosim lib ..."
-(cd "$SIMMERV_DIR" && cargo build --release -p simmerv-cosim) || exit 1
+(cd "$SIMMERV_DIR" && flock /tmp/simmerv-cargo-$(id -un).lock cargo build --release -p simmerv-cosim) || exit 1
 # Relink if the archive is newer than the binary -- verilator's make does not track it.
 wipe=0
 if [ -f "$BIN" ] && [ "$SIMMERV_LIB" -nt "$BIN" ]; then
@@ -160,6 +162,10 @@ if [ "$need_build" = 1 ]; then
 fi
 flock -s 9      # back to shared for the run
 exec 8>&-       # the next runner's check
+# the run's memory, booked before it starts (tools/simmem.sh): the DDR array, simmerv's copy of
+# it and the model
+. ../tools/simmem.sh
+simmem_book $(( 2 * (1 << MEM_LG2) / 1048576 + 512 )) || exit 1
 
 if [ -n "${CKPT:-}" ]; then
    ../tools/ckpt-stub.py "$CKPT" || exit 1
