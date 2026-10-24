@@ -11,20 +11,20 @@
    wire [SQ_IB-1:0] P``sq_tag; wire [LQ_IB-1:0] P``lq_idx; \
    wire P``rvc, P``rd_v, P``mem_signed, P``is_mem, P``is_store, P``is_amo; \
    wire [SEQW-1:0] P``seq; wire [PDW-1:0] P``pdet; wire [5:0] P``rd, P``rs1; \
-   wire [RN_PBITS-1:0] P``prd; wire [2:0] P``shard; wire [1:0] P``mem_size; \
-   wire [4:0] P``amo_func; wire P``is_branch, P``is_jump, P``is_jalr, P``is_mul, P``is_csr; \
-   wire [2:0] P``csr_func; wire P``is_serialize, P``is_fp, P``is_fencei, P``is_cbo, P``cbo_zero; \
+   wire [RN_PBITS-1:0] P``prd; wire [1:0] P``mem_size; \
+   wire [4:0] P``amo_func; wire P``is_branch, P``is_jump, P``is_jalr, P``is_csr; \
+   wire [2:0] P``csr_func; wire P``is_serialize, P``is_fp, P``is_cbo, P``cbo_zero; \
    wire P``cbo_keep, P``illegal, P``fault; wire [3:0] P``fault_cause; wire [5:0] P``alu_op; \
    wire P``alu_w, P``alu_uw, P``op2_imm, P``res_link, P``mis_taken, P``mis_nt; \
-   wire [1:0] P``op1_sel; wire [2:0] P``br_func; wire P``rs1_v, P``rs2_v, P``rs3_v, P``ord;
-`define PL_REC(P) {P``pc, P``insn, P``rvc, P``seq, P``pdet, P``pred_npc, P``rd, P``rd_v, P``prd, P``shard, \
+   wire [1:0] P``op1_sel; wire [2:0] P``br_func; wire P``rs1_v, P``rs2_v;
+`define PL_REC(P) {P``pc, P``insn, P``rvc, P``seq, P``pdet, P``pred_npc, P``rd, P``rd_v, P``prd, \
    P``rs1, P``imm32, P``mem_size, P``mem_signed, P``is_mem, P``is_store, P``is_amo, \
-   P``amo_func, P``is_branch, P``is_jump, P``is_jalr, P``is_mul, P``is_csr, P``csr_func, \
-   P``is_serialize, P``is_fp, P``is_fencei, P``is_cbo, P``cbo_zero, P``cbo_keep, \
+   P``amo_func, P``is_branch, P``is_jump, P``is_jalr, P``is_csr, P``csr_func, \
+   P``is_serialize, P``is_fp, P``is_cbo, P``cbo_zero, P``cbo_keep, \
    P``illegal, P``fault, P``fault_cause, P``fault_hi, \
    P``alu_op, P``alu_w, P``alu_uw, P``op1_sel, P``op2_imm, P``res_link, \
    P``br_func, P``mis_taken, P``mis_nt, \
-   P``rs1_v, P``rs2_v, P``rs3_v, P``ord, P``sq_tag, P``lq_idx}
+   P``rs1_v, P``rs2_v, P``sq_tag, P``lq_idx}
 `default_nettype none
 
 // smolrv64_core: an out-of-order RVA22S64 core, IW (3) instructions a cycle (docs/SmolRV64-Spec.md
@@ -783,7 +783,6 @@ module smolrv64_core
                                                  // dispatched against a FULL queue counts NENT
                                                  // older stores, not zero
    localparam integer LQ_N = 1 << LQ_IB;         // load queue entries
-   localparam [1:0] C_I = 2'd0, C_L = 2'd1, C_F = 2'd2, C_I2 = 2'd3;   // C_I2: slot B's ALU ops, the second integer scheduler (10d-ii)
 
    // ORDERED: anything that can trap, redirect, touch memory or hold a unit for more than a
    // cycle. Those go to the in-order schedulers; what is left free to reorder is the pure
@@ -882,15 +881,15 @@ module smolrv64_core
       // not-taken resolve must redirect back to fall-through (mis_nt=1)
       wire dcr = dcr_arm & q_gc[GC_DCR];
       assign s_pl_in[gs] = {q_pc, q_insn, q_rvc, q_seq, q_pdet, q_pred_npc, q_rd, q_rd_v,
-                            prd_g, shard, q_rs1, q_imm32,
+                            prd_g, q_rs1, q_imm32,
                             q_mem_size, q_mem_signed, q_is_mem, q_is_store, q_is_amo,
-                            q_amo_func, q_is_branch, q_is_jump, q_is_jalr, q_is_mul,
-                            q_is_csr, q_csr_func, q_is_serialize, q_is_fp, q_is_fencei,
+                            q_amo_func, q_is_branch, q_is_jump, q_is_jalr,
+                            q_is_csr, q_csr_func, q_is_serialize, q_is_fp,
                             q_is_cbo, q_cbo_zero, q_cbo_keep, q_illegal, q_fault,
                             q_fault_cause, q_fault_hi,
                             q_alu_op, q_alu_w, q_alu_uw, q_op1_sel, q_op2_imm, q_res_link,
                             q_br_func, (dcr ? 1'b0 : q_mis_taken), (dcr ? 1'b1 : q_mis_nt),
-                            q_rs1_v, q_rs2_v, q_rs3_v, q_gc[GC_ORD], s_sqi[gs], s_lqi[gs]};
+                            q_rs1_v, q_rs2_v, s_sqi[gs], s_lqi[gs]};
       assign s_v[gs] = fe_dv[gs];
       assign s_takev[gs] = fe_dv[gs] & d_take;       // a group dispatches whole
       assign s_cls_i[gs] = q_gc[GC_I];  assign s_cls_l[gs] = q_gc[GC_L];  assign s_cls_fc[gs] = q_gc[GC_FC];
@@ -1195,12 +1194,11 @@ module smolrv64_core
 
    // Payload: packed at dispatch, unpacked at issue with the SAME concatenation, so a
    // width or ordering mistake is a lint error rather than a wrong instruction.
-   localparam integer PLW = PCW + 32 + 1 + SEQW + PDW + PCW + 6 + 1 + RN_PBITS + 3 + 6   // shard is 3 bits
-                          + 32 + 2 + 1 + 1 + 1 + 1 + 5 + 1 + 1 + 1 + 1 + 1 + 3 + 1 + 1   // imm32
-                          + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 1                               // fault_hi
+   localparam integer PLW = PCW + 32 + 1 + SEQW + PDW + PCW + 6 + 1 + RN_PBITS + 6
+                          + 32 + 2 + 1 + 1 + 1 + 1 + 5 + 1 + 1 + 1 + 1 + 3 + 1 + 1   // imm32
+                          + 1 + 1 + 1 + 1 + 1 + 4 + 1                               // fault_hi
                           + 6 + 1 + 1 + 2 + 1 + 1 + 3 + 1 + 1   // execute controls
-                          + 1 + 1 + 1                           // source-valid bits
-                          + 1                                   // ordered
+                          + 1 + 1                               // source-valid bits
                           + SQ_IB                               // store-buffer slot (a store's)
                           + LQ_IB;                              // load-queue slot
    // ---- dispatch-stage load + wakeup snoop ----------------------------------------------
@@ -2086,7 +2084,6 @@ module smolrv64_core
    reg  [31:0]      m_insn;
    reg  [SEQW-1:0]  m_seq;
    reg  [RN_PBITS-1:0] m_prd;           // rename result, carried X->M
-   reg  [2:0]       m_shard;
    reg  [63:0]      m_addr, m_st_data;
    reg  [1:0]       m_mem_size;
    reg              m_mem_signed, m_is_mem, m_is_store, m_is_amo;
@@ -2961,8 +2958,8 @@ module smolrv64_core
          $fatal(1, "smolrv64_core: F stage holds a non-FP op (insn %08x)", f_insn);
       if (m_valid & m_is_fp & ~m_is_mem)
          $fatal(1, "smolrv64_core: a non-memory FP op reached M (pc %h)", m_pc);
-      if (iss_f & ~sh_used(qf_shard))
-         $fatal(1, "smolrv64_core: F-class op is in shard %0d, which this width does not use", qf_shard);
+      if (iss_f & qf_rd_v & ~sh_used(qf_prd[RN_PBITS-1 -: 3]))
+         $fatal(1, "smolrv64_core: F-class op is in shard %0d, which this width does not use", qf_prd[RN_PBITS-1 -: 3]);
       // ROUNDING MODE IS AN FP BARRIER, and out-of-order FP depends on it.
       //
       // Reordering FP is safe for the exception FLAGS because they accumulate: csr_file
@@ -4818,7 +4815,6 @@ module smolrv64_core
             m_seq         <= qm_seq;
             m_rd_v        <= qm_rd_v;
             m_prd         <= qm_prd;
-            m_shard       <= qm_shard;
             m_addr        <= s_win ? s_va : ho_va;
             m_st_data     <= ho_dat;         // an AMO's or SC's: the store queue reads its own
             m_sq_tag      <= qm_sq_tag;
