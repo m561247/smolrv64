@@ -1642,20 +1642,28 @@ module smolrv64_core
       // register, and the forward above covers that cycle. The enables do not read the live
       // redirect (rule I11): a redirect fires at the ROB head, so the op executing then is younger
       // and its write lands in a register the rollback frees before any producer of it dispatches.
+      // Every register the lane writes is in its own shard (rename allocates the lane's ops there,
+      // the streams land a register in the lane of its shard): the tag's shard bits are the
+      // constant LANE, so every wake compare, pending clear and snoop of it sees three constants.
+      localparam [2:0] SHK = gl;
       wire                 we = (v & q_rd_v & ~late) | m_wr | d;
-      wire [RN_PBITS-1:0]  wa = d ? dprd : m2 ? mprd2 : q_prd;
+      wire [RN_PBITS-1:0]  wa_src = d ? dprd : m2 ? mprd2 : q_prd;
+      wire [RN_PBITS-1:0]  wa = {SHK, wa_src[RN_IDXB-1:0]};
       wire [63:0]          wb = d ? ddat : m2 ? mres : result;
+      wire [RN_PBITS-1:0]  q_src = bs ? (by0[gl] ? wa_ld : wa_fe) : wa_src;
       reg                  qv;
       reg  [RN_PBITS-1:0]  qprd;
       reg  [63:0]          qval;
-      initial begin qv = 1'b0; qprd = {RN_PBITS{1'b0}}; qval = 64'd0; end
+      initial begin qv = 1'b0; qprd = {SHK, {RN_IDXB{1'b0}}}; qval = 64'd0; end
       always @(posedge clk) begin
          qv <= ~reset & (we | bs);
          if (we | bs) begin
-            qprd <= bs ? (by0[gl] ? wa_ld : wa_fe) : wa;
+            qprd <= {SHK, q_src[RN_IDXB-1:0]};
             qval <= bs ? (by0[gl] ? wb_ld : wb_fe) : wb;
          end
       end
+      always @(posedge clk) if (!reset & ((we & (wa_src[RN_PBITS-1:RN_IDXB] != SHK)) | (bs & (q_src[RN_PBITS-1:RN_IDXB] != SHK))))
+         $fatal(1, "smolrv64_core: lane %0d writes p%h / lands p%h, outside its shard", gl, wa_src, q_src);
       // the lane's ROB completion port: its op at issue (a load or store never; a mispredicting
       // CTI at its squash), its multiply in the reserved slot, its landing at the drain
       // -- in its own ROB column: every op a lane runs or lands is its slot's (an integer register
