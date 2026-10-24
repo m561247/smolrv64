@@ -312,7 +312,9 @@ module smolrv64_frontend
       if (reset | redirect)  pb_v <= 1'b0;
       else if (pb_load)       pb_v <= 1'b1;
       else if (q_push)       pb_v <= 1'b0;
-      if (pb_load) begin
+      // The data load whenever the register is free: pb_v alone says it holds a bundle, so its
+      // enable waits on no fetch verdict (dq_valid fanned out to ~1,100 flops' enables).
+      if (pb_ready) begin
          for (k = 0; k < FW; k = k + 1) pb_in[k] <= q_in[k];
          // a fetch fault's address is its instruction's pc, or pc+2 for a straddler's high halfword
          // (src/fetch.v: imem_addr is pc_q, which is ipc_q but while it fetches that halfword)
