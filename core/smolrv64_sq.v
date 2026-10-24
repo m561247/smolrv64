@@ -459,10 +459,11 @@ module smolrv64_sq
    reg [NENT-1:0] conf [0:LQN-1];
    integer        li;
 
-   // FORWARDING. cov[i][g]: store g holds every byte of load i -- the same VA doubleword (the
-   // offsets alone also match other pages), its bytes covering the load's, and itself inside one
+   // FORWARDING. cov[i][g]: store g holds every byte of load i -- the same VA page (the offsets
+   // alone also match other pages), its bytes covering the load's, and itself inside one
    // doubleword. Written at exactly the sites conf is and read only through conf, so a stale cell
-   // behind a clear conf cell is never seen. VAs compare because everything in the queues shares one
+   // behind a clear conf cell is never seen -- and so is the doubleword: two byte ranges that
+   // overlap (conf), each inside one doubleword (l_hi <= s_hi <= 8), lie in the same one. VAs compare because everything in the queues shares one
    // address space: an satp write and sfence.vma drain them first. A synonym does not forward.
    function cov_ab;
       input [VAW-12:0] lp; input [11:0] la; input [1:0] ls;
@@ -471,7 +472,7 @@ module smolrv64_sq
       begin
          l_lo = {1'b0, la[2:0]};  l_hi = l_lo + (4'd1 << ls);
          s_lo = {1'b0, sa[2:0]};  s_hi = s_lo + (4'd1 << ss);
-         cov_ab = (lp == sp) & (la[11:3] == sa[11:3]) & (s_lo <= l_lo) & (l_hi <= s_hi) & (s_hi <= 4'd8);
+         cov_ab = (lp == sp) & (s_lo <= l_lo) & (l_hi <= s_hi) & (s_hi <= 4'd8);
       end
    endfunction
    reg [NENT-1:0] cov [0:LQN-1];
@@ -562,7 +563,7 @@ module smolrv64_sq
          wire [NENT-1:0] kov = oldm & conf[gl];
          wire            k1  = (kov != {NENT{1'b0}}) & ((kov & (kov - 1'b1)) == {NENT{1'b0}});
          wire            fwn = l_av[gl] & k1 & (|(kov & cov[gl] & dv & tv & ~flt & ~unc))
-                             & ~(l_wt[gl] & (|(oldm & ~av))) & ~(c_done & kov[head]);
+                             & ~(l_wt[gl] & (|(oldm & ~av))) & ~(c_done & (enc1(kov) == head));   // k1: kov is one-hot
          reg             fw_q;  reg [IDXB-1:0] fws_q;
          initial begin fw_q = 1'b0; fws_q = {IDXB{1'b0}}; end
          always @(posedge clk) begin
