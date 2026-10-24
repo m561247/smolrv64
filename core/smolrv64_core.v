@@ -100,10 +100,7 @@ module smolrv64_core
     input  wire                    ic_valid,
     input  wire [127:0]            ic_data,
     input  wire [`SMOLRV64_ICTAG_W-1:0] ic_rtag,
-    // Diagnostic only (FBDIAG_BASE readout).  These are the REGISTERED copies the VA tag
-    // already maintains, so exporting them adds a fanout and nothing else.
-    output wire [63:0]             imem_satp_q,
-    output wire [1:0]              imem_priv_q,
+    // diagnostic only (FBDIAG_BASE readout)
     output wire                    fe_redirect,
     // ---- platform interrupt lines + time ----
     input  wire [11:0]             hw_ip,
@@ -417,20 +414,25 @@ module smolrv64_core
       $fatal(1, "smolrv64_core: the iMMU delivers PA %h, wider than a PC", immu_pa);
 
    // ---- a mapping change ------------------------------------------------------------
-   // What a VA maps to changes with a satp write, an sfence.vma, or a switch to or from M-mode's
-   // bare translation (all folded into satp_fetch). It empties the fetch ring and advances the
-   // I$ epoch. A privilege change alone does not: the iMMU checks permissions on every fetch.
-   // mstatus.SUM/MXR gate data accesses, not fetch.
-   reg  [1:0]  ipriv_q;
-   reg  [63:0] isatp_q;
-   always @(posedge clk) begin
-      ipriv_q <= mmu_priv;
-      isatp_q <= satp_fetch;
-   end
-   assign imem_ctx_chg  = mmu_flush_q | (isatp_q != satp_fetch);
+   // What a VA maps to changes with a satp write or an sfence.vma -- both raise the TLB flush
+   // (csr_file's o_tlb_flush: mmu_flush_q, in the cycle the new satp shows) -- or with a switch
+   // between M-mode's bare translation and a translating satp (ft: satp_fetch is not 0). It empties
+   // the fetch ring and advances the I$ epoch. A privilege change alone does not: the iMMU checks
+   // permissions on every fetch. mstatus.SUM/MXR gate data accesses, not fetch.
+   wire ft = (mmu_priv != 2'd3) & (|mmu_satp);
+   reg  ft_q;
+   initial ft_q = 1'b0;
+   always @(posedge clk) ft_q <= ft;
+   assign imem_ctx_chg  = mmu_flush_q | (ft_q != ft);
    assign fe_redirect   = fe_red_pulse;
-   assign imem_satp_q   = isatp_q;
-   assign imem_priv_q   = ipriv_q;
+`ifndef SYNTHESIS
+   reg [63:0] satp_chk_q;
+   always @(posedge clk) begin
+      satp_chk_q <= mmu_satp;
+      if (!reset && (mmu_satp != satp_chk_q) && !mmu_flush_q)
+         $fatal(1, "smolrv64_core: satp changed (%h -> %h) without the TLB flush", satp_chk_q, mmu_satp);
+   end
+`endif
 
    // =========================================================== stage X
    // the architectural writes of commit port k, for tb_smolrv64_riscv's trace
