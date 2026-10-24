@@ -319,6 +319,35 @@ module smolrv64_lq
    generate for (gw = 0; gw < NW; gw = gw + 1) begin: g_widx
       assign d_idx[gw*IDXB +: IDXB] = ws[gw];
    end endgenerate
+   // THE ROW'S FIELDS, A BANK AT A TIME: its loads take distinct banks (wbk), so a bank's writer is
+   // muxed once (one-hot, AND-OR) and each of its entries only enabled -- not a writers' priority mux
+   // in front of every entry.
+   reg  [NB-1:0]      b_w;                 // bank b takes a load this cycle...
+   reg  [NW-1:0]      b_oh [0:NB-1];       // ...writer j's
+   reg                b_wt [0:NB-1];  reg b_rdv [0:NB-1];
+   reg [ROBB-1:0]     b_rob [0:NB-1];  reg [PBITS-1:0] b_prd [0:NB-1];  reg [5:0] b_rdn [0:NB-1];
+   reg [SQIB-1:0]     b_sqt [0:NB-1];  reg [PCHB:1] b_pch [0:NB-1];  reg [SEQW-1:0] b_sqn [0:NB-1];
+   integer            fbk, fwj;
+   always @* for (fbk = 0; fbk < NB; fbk = fbk + 1) begin
+      b_w[fbk] = 1'b0;  b_oh[fbk] = {NW{1'b0}};
+      b_wt[fbk] = 1'b0;  b_rdv[fbk] = 1'b0;  b_rob[fbk] = {ROBB{1'b0}};  b_prd[fbk] = {PBITS{1'b0}};
+      b_rdn[fbk] = 6'd0;  b_sqt[fbk] = {SQIB{1'b0}};  b_pch[fbk] = {PCHB{1'b0}};  b_sqn[fbk] = {SEQW{1'b0}};
+      for (fwj = 0; fwj < NW; fwj = fwj + 1)
+         if (d_alloc[fwj] & (wbk[fwj] == fbk[BL-1:0])) begin
+            b_w[fbk] = 1'b1;  b_oh[fbk][fwj] = 1'b1;
+            b_wt[fbk]  = b_wt[fbk]  | d_wt[fwj];
+            b_rdv[fbk] = b_rdv[fbk] | d_rd_v[fwj];
+            b_rob[fbk] = b_rob[fbk] | d_rob[fwj*ROBB +: ROBB];
+            b_prd[fbk] = b_prd[fbk] | d_prd[fwj*PBITS +: PBITS];
+            b_rdn[fbk] = b_rdn[fbk] | d_rd[fwj*6 +: 6];
+            b_sqt[fbk] = b_sqt[fbk] | d_sqtag[fwj*SQIB +: SQIB];
+            b_pch[fbk] = b_pch[fbk] | d_pc[fwj*VAW + 1 +: PCHB];
+            b_sqn[fbk] = b_sqn[fbk] | d_seq[fwj*SEQW +: SEQW];
+         end
+   end
+   always @(posedge clk) if (!reset) for (fbk = 0; fbk < NB; fbk = fbk + 1)
+      if ((b_oh[fbk] & (b_oh[fbk] - 1'b1)) != {NW{1'b0}})
+         $fatal(1, "smolrv64_lq: two loads of a row take bank %0d (%b)", fbk, b_oh[fbk]);
    generate for (gw = 0; gw < NB; gw = gw + 1) begin: g_bfree
       assign d_bfree[gw*(BRB+1) +: BRB+1] = bfc[gw];
    end endgenerate
@@ -476,12 +505,12 @@ module smolrv64_lq
          if (x_v & x_take) begin sent[x_idx] <= 1'b1;  fwd[x_idx] <= x_fwd; end
          // a row's allocations: each its entry's fields, then every one's column cleared (younger
          // than every live entry), then each one's row: the live entries and the row's loads ahead
-         for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw]) begin
-            v[ws[aw]] <= 1'b1;  av[ws[aw]] <= 1'b0;  sent[ws[aw]] <= 1'b0;  lnd[ws[aw]] <= 1'b0;  rpl[ws[aw]] <= 1'b0;
-            wt[ws[aw]] <= d_wt[aw];  fwd[ws[aw]] <= 1'b0;
-            rob[ws[aw]] <= d_rob[aw*ROBB +: ROBB];  prd[ws[aw]] <= d_prd[aw*PBITS +: PBITS];  rdn[ws[aw]] <= d_rd[aw*6 +: 6];
-            rdv[ws[aw]] <= d_rd_v[aw];  sqt[ws[aw]] <= d_sqtag[aw*SQIB +: SQIB];  pch[ws[aw]] <= d_pc[aw*VAW + 1 +: PCHB];
-            sqn[ws[aw]] <= d_seq[aw*SEQW +: SEQW];
+         for (aw = 0; aw < NB; aw = aw + 1) if (b_w[aw]) begin : bank_wr
+            reg [IDXB-1:0] e;
+            e = {bfr[aw], aw[BL-1:0]};
+            v[e] <= 1'b1;  av[e] <= 1'b0;  sent[e] <= 1'b0;  lnd[e] <= 1'b0;  rpl[e] <= 1'b0;  fwd[e] <= 1'b0;
+            wt[e] <= b_wt[aw];  rob[e] <= b_rob[aw];  prd[e] <= b_prd[aw];  rdn[e] <= b_rdn[aw];
+            rdv[e] <= b_rdv[aw];  sqt[e] <= b_sqt[aw];  pch[e] <= b_pch[aw];  sqn[e] <= b_sqn[aw];
          end
          for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw])
             for (kw = 0; kw < NENT; kw = kw + 1) om[kw*NENT + ws[aw]] <= 1'b0;
