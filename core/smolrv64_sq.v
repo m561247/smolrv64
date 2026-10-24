@@ -318,6 +318,30 @@ module smolrv64_sq
       end
    end
    wire                  al_any = |al_m;
+   // THE ROW'S FIELDS, A BANK AT A TIME: its stores take consecutive entries from the tail, so they
+   // land in distinct banks (an entry's low ABL bits); a bank's writer is muxed once (one-hot,
+   // AND-OR) and its entry -- the one at tail + ((bank - tail) mod banks) -- only enabled
+   localparam integer ANB = 1 << RKB;   localparam integer ABL = RKB;
+   reg  [ANB-1:0]        ab_w;
+   reg  [IDXB-1:0]       ab_e  [0:ANB-1];
+   reg  [ROBB-1:0]       ab_rob [0:ANB-1];  reg [PBITS-1:0] ab_dpr [0:ANB-1];  reg ab_rd [0:ANB-1];
+   integer               abk, abj;
+   always @* for (abk = 0; abk < ANB; abk = abk + 1) begin : abank
+      reg [ABL-1:0] ob;
+      ob = abk[ABL-1:0] - tail[ABL-1:0];
+      ab_e[abk] = tail + {{(IDXB-ABL){1'b0}}, ob};
+      ab_w[abk] = 1'b0;  ab_rob[abk] = {ROBB{1'b0}};  ab_dpr[abk] = {PBITS{1'b0}};  ab_rd[abk] = 1'b0;
+      for (abj = 0; abj < NW; abj = abj + 1)
+         if (d_alloc[abj] & (d_rank[abj*RKB +: RKB] == ob)) begin
+            ab_w[abk]   = 1'b1;
+            ab_rob[abk] = ab_rob[abk] | d_rob[abj*ROBB +: ROBB];
+            ab_dpr[abk] = ab_dpr[abk] | d_dpreg[abj*PBITS +: PBITS];
+            ab_rd[abk]  = ab_rd[abk]  | d_rdy[abj];
+         end
+   end
+   always @(posedge clk) if (!reset) for (abk = 0; abk < NW; abk = abk + 1) for (abj = abk + 1; abj < NW; abj = abj + 1)
+      if (d_alloc[abk] & d_alloc[abj] & (d_rank[abk*RKB +: RKB] == d_rank[abj*RKB +: RKB]))
+         $fatal(1, "smolrv64_sq: stores %0d and %0d of a row share rank %0d", abk, abj, d_rank[abk*RKB +: RKB]);
 
    initial begin v = {NENT{1'b0}}; av = {NENT{1'b0}}; dv = {NENT{1'b0}}; rd = {NENT{1'b0}}; cmt = {NENT{1'b0}};
                  headc = {(IDXB+1){1'b0}}; tailc = {(IDXB+1){1'b0}}; kcc = {(IDXB+1){1'b0}};
@@ -692,10 +716,9 @@ module smolrv64_sq
             headc <= headc + 1'b1;
          end
          // allocate at the tail: a row's stores at the tail plus their ranks
-         for (aw = 0; aw < NW; aw = aw + 1) if (d_alloc[aw]) begin
-            v[al_e[aw]] <= 1'b1; av[al_e[aw]] <= 1'b0; dv[al_e[aw]] <= 1'b0; cmt[al_e[aw]] <= 1'b0;
-            rob[al_e[aw]] <= d_rob[aw*ROBB +: ROBB];  dpr[al_e[aw]] <= d_dpreg[aw*PBITS +: PBITS];
-            rd[al_e[aw]] <= d_rdy[aw];
+         for (aw = 0; aw < ANB; aw = aw + 1) if (ab_w[aw]) begin
+            v[ab_e[aw]] <= 1'b1; av[ab_e[aw]] <= 1'b0; dv[ab_e[aw]] <= 1'b0; cmt[ab_e[aw]] <= 1'b0;
+            rob[ab_e[aw]] <= ab_rob[aw];  dpr[ab_e[aw]] <= ab_dpr[aw];  rd[ab_e[aw]] <= ab_rd[aw];
          end
          tailc <= tailc + n_alloc;
          cnt <= cnt + n_alloc - {{IDXB{1'b0}}, c_done};
