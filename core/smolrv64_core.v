@@ -981,6 +981,11 @@ module smolrv64_core
    wire [NL*RN_PBITS-1:0]    wkp_l;
    wire [NWB_C-1:0]          wkv  = {wk_fe, wk_ld, wkv_l};
    wire [NWB_C*RN_PBITS-1:0] wkp  = {wa_fe, wa_ld, wkp_l};
+   // The FP pipe's sources are f-registers only (cls_fc: an int->FP op leaves through a lane with
+   // its operand's value), and only the LD and FE streams write one (smolrv64_pending asserts no
+   // lane does): the FP scheduler, the F FIFO and its head watch those two ports alone.
+   wire [1:0]                wkv_fp = {wk_fe, wk_ld};
+   wire [2*RN_PBITS-1:0]     wkp_fp = {wa_fe, wa_ld};
    // What can wake an integer consumer: a lane's write, a load bypassed into a lane's slot
    // (by0), an FP-pipe result bypassed into one (by2). The other halves of wk_ld and wk_fe
    // are FP-destination writes, and they carry M's and the FPU's live completion cones (the
@@ -1089,15 +1094,14 @@ module smolrv64_core
    // (workloads/blurbench) is a 4-deep serial fadds chain whose taps are independent, and
    // it ran at exactly its critical path (39.50 cyc/px against 5 levels x 8 cycles) because
    // in-order issue would not let the NEXT iteration's multiplies start early.
-   smolrv64_iq #(.NENT(NF),.IDXB(IBF),.NSRC(3),.ROBB(ROB_IDXB),.PBITS(RN_PBITS),.NWB(NWB_C),
+   smolrv64_iq #(.NENT(NF),.IDXB(IBF),.NSRC(3),.ROBB(ROB_IDXB),.PBITS(RN_PBITS),.NWB(2),
              .FIXEDL(0),.INORDER(0)) u_iq_f
      (.clk(clk),.reset(reset),
-      // FP-arith AND control flow (jal/jalr/bXX) share this one queue and issue slot.
       .d_valid(mv_f),.d_ready(rf_ready),
       .d_rob(stg_rob_f),
       .d_ps(stg_ps_f),.d_r(stg_r_f | wkq_f),
       .d_prd(stg_prd_f),.d_long(1'b0),.d_hx(1'b0),.d_ag(1'b0),.d_ent(rf_d_ent),
-      .wb_v(wkv),.wb_preg(wkp),.s_v(1'b0),.s_preg({RN_PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(),
+      .wb_v(wkv_fp),.wb_preg(wkp_fp),.s_v(1'b0),.s_preg({RN_PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(),
       .unit_busy(j_v & ~j_adv),.hx_busy(1'b0),.ag_only(1'b0),   // j_* can't take: occupied and its op not draining
       .iss_v(rf_iss_v),.iss_ent(rf_iss_ent),.iss_rob(rf_iss_rob),
      .iss_take(rf_take),
@@ -1256,22 +1260,26 @@ module smolrv64_core
          for (i = 0; i < NWB_C; i = i + 1) wk = wk | (wkv[i] & (wkp[i*RN_PBITS +: RN_PBITS] == p));
       end
    endfunction
-   // THE F STAGE'S WAKES ARE A CYCLE OLD: a registered copy of the wake buses (wkv, wkp) that the
-   // FIFO's entries and its head compare against, so the stage adds no load to the live buses or the
-   // pending table; the head's own live snoop (snp_f) is the one same-cycle compare
-   reg  [NWB_C-1:0]          wkv_q;
-   reg  [NWB_C*RN_PBITS-1:0] wkp_q;
-   initial wkv_q = {NWB_C{1'b0}};
-   always @(posedge clk) begin wkv_q <= reset ? {NWB_C{1'b0}} : wkv;  wkp_q <= wkp; end
+   // THE F STAGE'S WAKES ARE A CYCLE OLD: a registered copy of the FP wake ports (wkv_fp, wkp_fp)
+   // that the FIFO's entries and its head compare against, so the stage adds no load to the live
+   // buses or the pending table; the head's own live snoop (snp_f) is the one same-cycle compare
+   reg  [1:0]                wkv_q;
+   reg  [2*RN_PBITS-1:0]     wkp_q;
+   initial wkv_q = 2'b00;
+   always @(posedge clk) begin wkv_q <= reset ? 2'b00 : wkv_fp;  wkp_q <= wkp_fp; end
    function automatic [2:0] wkq3;       // which of three sources a broadcast named LAST cycle
       input [3*RN_PBITS-1:0] ps;
       integer i, j;
       begin
          wkq3 = 3'b000;
          for (j = 0; j < 3; j = j + 1)
-            for (i = 0; i < NWB_C; i = i + 1)
+            for (i = 0; i < 2; i = i + 1)
                if (wkv_q[i] & (wkp_q[i*RN_PBITS +: RN_PBITS] == ps[j*RN_PBITS +: RN_PBITS])) wkq3[j] = 1'b1;
       end
+   endfunction
+   function automatic wk_fp;            // wk() over the FP wake ports
+      input [RN_PBITS-1:0] p;
+      wk_fp = (wkv_fp[0] & (wkp_fp[0 +: RN_PBITS] == p)) | (wkv_fp[1] & (wkp_fp[RN_PBITS +: RN_PBITS] == p));
    endfunction
    function automatic wk_i;             // wk() over the integer wakes (wkv_i)
       input [RN_PBITS-1:0] p;
@@ -1291,7 +1299,12 @@ module smolrv64_core
    // F: the group's first FP op goes into the head when the head is free this cycle and nothing
    // waits behind it; the rest, and all of them otherwise, go behind the ops that wait, in program
    // order: FP op k at the tail plus its rank (less the one the head took).
-   wire [2:0] snp_f   = {wk(stg_ps_f[2*RN_PBITS +: RN_PBITS]), wk(stg_ps_f[RN_PBITS +: RN_PBITS]), wk(stg_ps_f[0 +: RN_PBITS])};
+   wire [2:0] snp_f   = {wk_fp(stg_ps_f[2*RN_PBITS +: RN_PBITS]), wk_fp(stg_ps_f[RN_PBITS +: RN_PBITS]), wk_fp(stg_ps_f[0 +: RN_PBITS])};
+   integer fpk;
+   always @(posedge clk) if (!reset & stg_v_f)
+      for (fpk = 0; fpk < 3; fpk = fpk + 1)
+         if (~stg_r_f[fpk] & (stg_ps_f[fpk*RN_PBITS + RN_IDXB +: 3] != SH_FL) & (stg_ps_f[fpk*RN_PBITS + RN_IDXB +: 3] != SH_FF))
+            $fatal(1, "smolrv64_core: the F stage waits on p%h, not an f-register", stg_ps_f[fpk*RN_PBITS +: RN_PBITS]);
    assign     wkq_f   = wkq3(stg_ps_f);
    wire [2:0] fsq_hr  = fsq_r[fsq_hd] | wkq3(fsq_ps[fsq_hd]);     // the next head's readiness
    assign     fpq_h1  = fsq_ps[fsq_hd];
