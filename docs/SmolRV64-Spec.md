@@ -1973,9 +1973,12 @@ Address translation, two instances (iTLB in `smolrv64_core`, dTLB in `smolrv64_l
 
 | array | shape | width | bits |
 |---|---|---|---|
-| iTLB `tlb_v`/`tag`/`ppn`/`lvl`/`perm`/`nc`/`n` | 64 | 1+27+44+2+8+1+1 = 84 | 5 376 |
-| dTLB, the same fields | 64, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 84 | 5 376 per copy |
-| second level `tlb2`, block RAM: {installed, 16-bit generation} and the fields but `v` | iTLB 512, dTLB 2048 | 17+27+44+2+8+1+1 = 100 | 51 200 + 204 800 |
+| iTLB `tlb_g` ({installed, 16-bit generation})/`tag`/`ppn`/`lvl`/`perm`/`nc`/`n`/`dram` | 64 | 17+21+44+2+8+1+1+1 = 95 | 6 080 |
+| dTLB, the same fields | 64, read by two ports (M's lookup, the walker's), so the LUTRAM is held twice | 95 | 6 080 per copy |
+| second level `tlb2`, block RAM: the fields but `dram` | iTLB 512, dTLB 2048 | 17+18+44+2+8+1+1 = 91, 17+16+44+2+8+1+1 = 89 | 46 592 + 182 272 |
+
+A tag is the VPN above the entry's index (`VPN[26:TLBI]`, `VPN[26:L2I]`): the index bits are the
+entry's own.
 
 Also in `rv_soc_top`: `lmem` — the 256 KiB on-chip boot/monitor SRAM, `NLLINE × 512`; and
 `u_uart_rxq` — the UART's receive FIFO, 4096 × 8, one block RAM.

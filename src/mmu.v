@@ -117,7 +117,7 @@ module mmu
    reg              scan;                 // clearing the arrays
    reg [SCI-1:0]    scan_i;
    (* ram_style = "distributed" *) reg [GB:0] tlb_g [0:TLBN-1];   // {installed, generation}
-   reg [26:0]       tlb_tag [0:TLBN-1];   // VPN[26:0] (vpn2,vpn1,vpn0)
+   reg [26-TLBI:0]  tlb_tag [0:TLBN-1];   // VPN[26:TLBI]: the entry's index is the VPN's low bits
    reg [43:0]       tlb_ppn [0:TLBN-1];   // page PPN (leaf)
    reg [1:0]        tlb_lvl [0:TLBN-1];   // leaf level (0=4K,1=2M,2=1G)
    reg [7:0]        tlb_perm[0:TLBN-1];   // PTE perm bits V,R,W,X,U,G,A,D
@@ -135,7 +135,7 @@ module mmu
 
    wire [26:0]     vpn_all = {vpn2, vpn1, vpn0};
    wire [TLBI-1:0] tlb_idx = vpn_all[TLBI-1:0];   // VA[12 +: TLBI], as the fill writes it
-   wire            tlb_hit = ~scan && (tlb_g[tlb_idx] == {1'b1, cg}) && (tlb_tag[tlb_idx] == vpn_all);
+   wire            tlb_hit = ~scan && (tlb_g[tlb_idx] == {1'b1, cg}) && (tlb_tag[tlb_idx] == vpn_all[26:TLBI]);
 
    // assemble the translated physical address from a leaf entry by level.
    // Ssvnapot (`n`): a level-0 leaf with pte.N=1 is a 64 KiB NAPOT page, so the low
@@ -263,14 +263,14 @@ module mmu
    wire [26:0]     s_vpn  = s_vaddr[38:12];
    wire [TLBI-1:0] s_idx  = s_vpn[TLBI-1:0];
    wire            s_v_e  = ~scan & (tlb_g[s_idx] == {1'b1, cg});
-   wire [26:0]     s_tag  = tlb_tag[s_idx];
+   wire [26-TLBI:0] s_tag = tlb_tag[s_idx];
    wire [43:0]     s_ppn  = tlb_ppn[s_idx];
    wire [1:0]      s_lvl  = tlb_lvl[s_idx];
    wire [7:0]      s_perm = tlb_perm[s_idx];
    wire            s_nc_e = tlb_nc[s_idx];
    wire            s_n    = tlb_n[s_idx];
    wire            s_dr_e = tlb_dram[s_idx];
-   wire            s_hit  = s_v_e & (s_tag == s_vpn)
+   wire            s_hit  = s_v_e & (s_tag == s_vpn[26:TLBI])
                           & ~perm_fault({56'd0, s_perm}, s_access, priv, sum, mxr);
    wire            s_noncanon = (s_vaddr[63:39] != {25{s_vaddr[38]}});
    wire            s_oob      = ({1'b0, s_vaddr} >= {1'b0, DRAM_TOP});
@@ -334,7 +334,7 @@ module mmu
    // along so the hit path substitutes va[15:12] for the PTE's size-encoded ppn[3:0]. A page
    // reaching past the cap is answered for its access only and never installed.
    always @(posedge clk) if (f1) begin
-      tlb_tag[va_q[12+:TLBI]]  <= va_q[38:12];
+      tlb_tag[va_q[12+:TLBI]]  <= va_q[38:12+TLBI];
       tlb_ppn[va_q[12+:TLBI]]  <= f1_ppn;
       tlb_lvl[va_q[12+:TLBI]]  <= f1_lvl;
       tlb_perm[va_q[12+:TLBI]] <= f1_perm;
@@ -348,8 +348,10 @@ module mmu
       // is out in L2LK, which checks it against va_q (the same VA, registered as the walk starts):
       // the hit answers in the same cycle a distributed read of va_q would. A scan in the read's
       // cycle may have cleared the entry after it was read, so that word does not hit (l2q_ok).
+      // The tag is VPN[26:L2I]: the low bits are the entry's index, va_q's (checked below).
+      localparam integer L2T = 27 - L2I;
       localparam integer O_PERM = 2, O_LVL = O_PERM + 8, O_PPN = O_LVL + 2, O_TAG = O_PPN + 44;
-      localparam integer L2W = O_TAG + 27 + (GB + 1);
+      localparam integer L2W = O_TAG + L2T + (GB + 1);
       (* ram_style = "block" *) reg [L2W-1:0] tlb2 [0:L2N-1];
       reg [L2W-1:0] l2q;
       reg           l2q_ok;
@@ -360,10 +362,14 @@ module mmu
       end
       always @(posedge clk) if (st == IDLE) l2q <= tlb2[req_vaddr[12+:L2I]];
       always @(posedge clk) if (st == IDLE) l2q_ok <= ~scan;
+      reg [L2I-1:0] l2q_ix;   // the word's index, for the check below only
+      always @(posedge clk) if (st == IDLE) l2q_ix <= req_vaddr[12+:L2I];
+      always @(posedge clk) if (!reset && st == L2LK && l2q_ix != va_q[12+:L2I])
+         $fatal(1, "[mmu] the second level's word is entry %0h, not the walk's %0h", l2q_ix, va_q[12+:L2I]);
       wire [GB:0]  q_g    = l2q[L2W-1 -: GB+1];
-      wire [26:0]  q_tag  = l2q[O_TAG +: 27];
+      wire [L2T-1:0] q_tag = l2q[O_TAG +: L2T];
       wire [7:0]   q_perm = l2q[O_PERM +: 8];
-      assign l2_hit  = ~scan & l2q_ok & (q_g == {1'b1, cg}) & (q_tag == va_q[38:12])
+      assign l2_hit  = ~scan & l2q_ok & (q_g == {1'b1, cg}) & (q_tag == va_q[38:12+L2I])
                      & ~perm_fault({56'd0, q_perm}, acc_q, prv_q, sum_q, mxr_q);
       assign l2_ppn  = l2q[O_PPN +: 44];  assign l2_lvl = l2q[O_LVL +: 2];  assign l2_perm = q_perm;
       assign l2_nc   = l2q[1];         assign l2_n   = l2q[0];
@@ -372,7 +378,7 @@ module mmu
       wire           we2 = ~reset & (scan | fill);
       wire [L2I-1:0] wa2 = scan ? scan_i[L2I-1:0] : va_q[12+:L2I];
       wire [L2W-1:0] wd2 = scan ? {L2W{1'b0}}
-                         : {({1'b0, leaf_last} < TOP_PPN), cg, va_q[38:12], ptw_rdata[53:10], lvl,
+                         : {({1'b0, leaf_last} < TOP_PPN), cg, va_q[38:12+L2I], ptw_rdata[53:10], lvl,
                             ptw_rdata[7:0], ptw_rdata[62] | ptw_rdata[61], ptw_rdata[63]};
       always @(posedge clk) if (we2) tlb2[wa2] <= wd2;
    end else begin : no_l2
