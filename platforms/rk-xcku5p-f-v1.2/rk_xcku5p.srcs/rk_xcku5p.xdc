@@ -295,17 +295,16 @@ set_property IOB TRUE [get_ports {vga_hs vga_vs vga_r[*] vga_g[*] vga_b[*]}]
 # as RELATED clocks at an off-integer ratio (and DRP retunes it at run time anyway). Every
 # crossing is designed as asynchronous (vga_scanout's header):
 #   ui_clk -> pixel: CTRL.enable through a 2-FF synchronizer; the mode registers quasi-static.
-#   pixel -> ui_clk: the line-request toggle through a synchronizer; its line number is written
-#     with the toggle and held for a whole line, so it only has to settle before the toggle
-#     clears the synchronizer -- one ui_clk period bounds it.
+#   pixel -> ui_clk: one toggle a line each -- a line shown (done_tog), a line scanned before it was
+#     whole (late_tog) -- and the scan's running (en_p), each through a synchronizer.
 #   LOCKED -> both domains: an asynchronous status.
 # Objects, not literal clock names (see the CDC note above: a lookup that matches nothing
 # fails silently).
 set vga_ui_clk  [get_clocks -of_objects [get_nets ui_clk]]
 set vga_pix_clk [get_clocks -of_objects [get_pins -hier -filter {NAME =~ *vga_mmcm_inst/CLKOUT0}]]
 set_false_path -from $vga_ui_clk -to $vga_pix_clk
-set_false_path -to [get_pins -hier -filter {NAME =~ *vga_scanout_inst/tog_s_reg[0]/D}]
-set_max_delay -datapath_only 3.000 \
-    -from [get_cells -hier -filter {NAME =~ *vga_scanout_inst/req_line_reg[*]}] -to $vga_ui_clk
+set_false_path -to [get_pins -hier -filter {NAME =~ *vga_scanout_inst/done_s_reg[0]/D}]
+set_false_path -to [get_pins -hier -filter {NAME =~ *vga_scanout_inst/late_s_reg[0]/D}]
+set_false_path -to [get_pins -hier -filter {NAME =~ *vga_scanout_inst/en_a_reg[0]/D}]
 set_false_path -to [get_pins -hier -filter {NAME =~ *vga_scanout_inst/locked_s_reg[0]/D}]
 set_false_path -to [get_pins -hier -filter {NAME =~ *vga_pix_rst_s_reg[0]/D}]

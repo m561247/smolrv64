@@ -6,16 +6,16 @@
 // The framebuffer is ordinary RAM that Linux's simplefb draws into (docs/PLAN-2026-10-03-
 // graphics-console.md); this block only reads it. Two clock domains:
 //
-//   clk (ui_clk)  the MMIO registers, and the line fetcher: an AXI read master that copies one
-//                 scanline of the framebuffer into a two-line buffer, 64-byte bursts.
-//   pix_clk       the timing generator. At the start of each line's horizontal blank it asks
-//                 for the NEXT displayed line (line 0 on the last line of the frame), so a whole
-//                 line time -- tens of microseconds -- covers a fetch of a few dozen bursts.
+//   clk (ui_clk)  the MMIO registers, and the line fetcher: an AXI read master that reads the
+//                 frame line after line into a ring of line slots, 64-byte bursts, several in
+//                 flight, as far ahead of the scan as the ring is deep.
+//   pix_clk       the timing generator, which scans the slot of the line it shows. It starts in
+//                 the vertical blank, so the fetcher fills the ring before the first line.
 //
-// The request crosses as {line, toggle}: the line number is written in the same cycle as the
-// toggle flips and then held for a whole line, so it is long stable when the synchronized toggle
-// reaches clk. The timing registers cross the same way, quasi-statically: software changes
-// them only with CTRL.enable clear (XDC: false paths into pix_clk).
+// The two sides tell each other one event a line, as a toggle: a line shown (its slot is free),
+// a line fetched whole, and a line scanned before it was whole (counted: STATUS[31:16]). The
+// timing registers cross quasi-statically: software changes them only with CTRL.enable clear
+// (XDC: false paths into pix_clk).
 //
 // Registers (32-bit, full-word writes only), offsets within the 256-byte page:
 //   0x00 CTRL         [0] enable  [1] HSYNC active-high  [2] VSYNC active-high
@@ -23,7 +23,7 @@
 //   0x08 STRIDE       bytes per line; a multiple of 64, at most 4096
 //   0x10 H_ACTIVE     0x14 H_SYNC_START  0x18 H_SYNC_END  0x1C H_TOTAL   (pixels)
 //   0x20 V_ACTIVE     0x24 V_SYNC_START  0x28 V_SYNC_END  0x2C V_TOTAL   (lines)
-//   0x30 STATUS (ro)  [0] pixel clock locked  [1] DRP busy  [31:16] lines fetched late
+//   0x30 STATUS (ro)  [0] pixel clock locked  [1] DRP busy  [31:16] lines scanned before fetched whole
 //   0x40 DRP          write {we[31], addr[22:16], data[15:0]} starts one access of the pixel
 //                     clock's MMCM; read gives {busy[31], last read data[15:0]}
 //   0x44 PIXCLK_CTRL  [0] hold the pixel-clock MMCM in reset
@@ -155,31 +155,45 @@ module vga_scanout (
       endcase
    end
 
-   // ======================= line buffer: two lines of 512 beats =======================
-   reg [63:0] lb [0:1023];
+   // ===================== line buffer: a ring of NS line slots, 512 beats each ====================
+   // Line s of the scan's sequence (every active line, frame after frame) lives in slot s % NS. The
+   // fetcher fills a slot as soon as the scan has left the line before it there, so it runs up to
+   // NS-1 lines ahead of the scan instead of racing it: a stall of DRAM costs nothing until it is
+   // longer than NS-1 line times.
+   localparam integer NS = 4, NSB = 2;
+   reg [63:0] lb [0:NS*512-1];
    reg        lb_we;
-   reg [ 9:0] lb_waddr;
+   reg [NSB+8:0] lb_waddr;
    reg [63:0] lb_wdata;
    always @(posedge clk) if (lb_we) lb[lb_waddr] <= lb_wdata;
 
    // ================================ timing (pix_clk) ================================
+   // Three toggles cross, one event a line (a line is microseconds, the clocks nanoseconds):
+   // done_tog (the scan has shown a line: its slot is free), cmp_tog (the fetcher has written a
+   // whole line) and late_tog (a line's scan began before its line was whole).
    (* async_reg = "true" *) reg [1:0] en_p;
+   (* async_reg = "true" *) reg [2:0] cmp_s;
    reg [11:0] h, v;
-   reg [11:0] req_line;
-   reg        req_tog;
-   always @(posedge pix_clk) en_p <= {en_p[0], en & ~pix_rst};
+   reg [ 7:0] seq_p;          // the active line being scanned, in sequence
+   reg [ 7:0] cmp_p;          // the lines the fetcher has finished
+   reg        done_tog, late_tog;
+   always @(posedge pix_clk) begin en_p <= {en_p[0], en & ~pix_rst};  cmp_s <= {cmp_s[1:0], cmp_tog}; end
 
    wire        last_h   = h == h_total - 12'd1;
    wire        last_v   = v == v_total - 12'd1;
-   wire [11:0] next_v   = last_v ? 12'd0 : v + 12'd1;
+   wire        act_v    = v < v_active;
    always @(posedge pix_clk) begin
       if (!en_p[1]) begin
-         h <= 12'd0;  v <= 12'd0;  req_line <= 12'd0;  req_tog <= 1'b0;
+         // the scan starts in the vertical blank: the fetcher has the blank to fill the ring
+         h <= 12'd0;  v <= v_active;  seq_p <= 8'd0;  cmp_p <= 8'd0;  done_tog <= 1'b0;  late_tog <= 1'b0;
       end else begin
          h <= last_h ? 12'd0 : h + 12'd1;
-         if (last_h) v <= next_v;
-         // The line just shown is done with its half of the buffer: fetch the next one into it.
-         if (h == h_active && next_v < v_active) begin req_line <= next_v;  req_tog <= ~req_tog; end
+         if (last_h) v <= last_v ? 12'd0 : v + 12'd1;
+         if (cmp_s[2] ^ cmp_s[1]) cmp_p <= cmp_p + 8'd1;
+         // a line whose scan begins before the fetcher finished it shows the slot's older contents
+         if (act_v && h == 12'd0 && !($signed(cmp_p - seq_p) > 0)) late_tog <= ~late_tog;
+         // the line just shown frees its slot
+         if (act_v && h == h_active) begin seq_p <= seq_p + 8'd1;  done_tog <= ~done_tog; end
       end
    end
 
@@ -187,11 +201,11 @@ module vga_scanout (
    // register. sel1 must be the same stage as lb_q: it picks a pixel out of the beat lb_q holds.
    reg        act1, hs1, vs1;  reg [1:0] sel1;  reg [63:0] lb_q;
    always @(posedge pix_clk) begin
-      act1 <= en_p[1] && h < h_active && v < v_active;
+      act1 <= en_p[1] && h < h_active && act_v;
       hs1  <= en_p[1] && h >= h_sync_start && h < h_sync_end;
       vs1  <= en_p[1] && v >= v_sync_start && v < v_sync_end;
       sel1 <= h[1:0];
-      lb_q <= lb[{v[0], h[10:2]}];
+      lb_q <= lb[{seq_p[NSB-1:0], h[10:2]}];
    end
    wire [15:0] px = lb_q[{sel1, 4'd0} +: 16];
    always @(posedge pix_clk) begin
@@ -203,52 +217,74 @@ module vga_scanout (
    end
 
    // ================================ line fetch (clk) ================================
-   (* async_reg = "true" *) reg [2:0] tog_s;
-   always @(posedge clk) tog_s <= {tog_s[1:0], req_tog};
-   wire req = tog_s[2] ^ tog_s[1];
-
-   localparam [2:0] F_IDLE = 3'd0, F_MUL = 3'd1, F_ADD = 3'd2, F_AR = 3'd3, F_R = 3'd4;
-   reg [ 2:0] fs;
-   reg [11:0] f_line;
-   reg [23:0] f_off;
+   // The fetcher reads the frame line after line, a burst at a time, up to NOUT bursts in flight
+   // (one ID: they answer in order), wherever the line's slot is free (the scan is fewer than NS
+   // lines behind it); the answers land in order at the receive pointer.
+   localparam [2:0] NOUT = 3'd4;
+   (* async_reg = "true" *) reg [2:0] done_s, late_s;
+   (* async_reg = "true" *) reg [1:0] en_a;   // the scan is running: it counts the lines the fetcher finishes
+   reg [ 7:0] done_c;         // the lines the scan has shown
+   reg [ 7:0] f_seq;          // the line being asked for, in sequence
+   reg [11:0] f_line;         // ...its line in the frame
+   reg [ 9:0] f_bur;          // ...and the bursts of it asked for
    reg [31:0] f_addr;
-   reg [ 9:0] f_word;       // beats of this line written so far
-   reg [ 2:0] f_beat;
-
+   reg        ar_v;
+   reg [ 2:0] f_out;          // bursts in flight
+   reg [ 7:0] r_seq;          // the line the answers land in
+   reg [ 8:0] r_word;         // ...the beat they land at
+   reg [ 2:0] r_beat;
+   reg        cmp_tog;
+   wire [9:0] bursts = {3'd0, stride[12:6]};                           // a line's bursts
+   wire [9:0] beats  = stride[12:3];                                   // ...and beats
+   wire       line_last = f_bur == bursts - 10'd1;
+   wire       ar_go = ar_v & m_axi_arready;
+   wire       r_go  = m_axi_rvalid & m_axi_rready;
+   wire       ask   = en & en_a[1] & ~ar_v & (f_out < NOUT) & ($signed(f_seq - done_c) < NS);
    always @(posedge clk) begin
+      done_s <= {done_s[1:0], done_tog};  late_s <= {late_s[1:0], late_tog};  en_a <= {en_a[0], en_p[1]};
       lb_we <= 1'b0;
       if (reset) begin
-         fs <= F_IDLE;  late_lines <= 16'd0;
+         late_lines <= 16'd0;  ar_v <= 1'b0;  f_out <= 3'd0;  cmp_tog <= 1'b0;
+         done_c <= 8'd0;  f_seq <= 8'd0;  f_line <= 12'd0;  f_bur <= 10'd0;  f_addr <= 32'd0;
+         r_seq <= 8'd0;  r_word <= 9'd0;  r_beat <= 3'd0;
       end else begin
-         // A request that finds the fetcher busy is a line that will be shown stale: the DDR
-         // arbiter starved us for a whole line time. Counted, never silent (STATUS[31:16]).
-         if (req && fs != F_IDLE) late_lines <= late_lines + 16'd1;
-         case (fs)
-            F_IDLE: if (req) begin f_line <= req_line;  fs <= F_MUL; end
-            F_MUL:  begin f_off <= f_line * {11'd0, stride};  fs <= F_ADD; end
-            F_ADD:  begin f_addr <= fb_base + {8'd0, f_off};  f_word <= 10'd0;  fs <= F_AR; end
-            F_AR:   if (m_axi_arready) begin f_beat <= 3'd0;  fs <= F_R; end
-            F_R:    if (m_axi_rvalid) begin
-                       if (m_axi_rresp != 2'b00 || m_axi_rid != 3'd0)
-                          $fatal(1, "vga_scanout: read response resp=%b id=%0d at %h", m_axi_rresp, m_axi_rid, f_addr);
-                       if (m_axi_rlast != (f_beat == 3'd7))
-                          $fatal(1, "vga_scanout: rlast=%b on beat %0d of an 8-beat burst", m_axi_rlast, f_beat);
-                       lb_we    <= 1'b1;
-                       lb_waddr <= {f_line[0], f_word[8:0]};
-                       lb_wdata <= m_axi_rdata;
-                       f_word   <= f_word + 10'd1;
-                       f_beat   <= f_beat + 3'd1;
-                       if (m_axi_rlast) begin
-                          f_addr <= f_addr + 32'd64;
-                          fs <= ({f_word + 10'd1, 3'd0} == stride) ? F_IDLE : F_AR;
-                       end
-                    end
-            default: $fatal(1, "vga_scanout: fetch FSM in undefined state %0d", fs);
-         endcase
+         if (en_a[1] & (late_s[2] ^ late_s[1])) late_lines <= late_lines + 16'd1;   // counted, never silent (STATUS[31:16])
+         if (done_s[2] ^ done_s[1]) done_c <= done_c + 8'd1;
+         // asking: a burst at f_addr, then the next; the frame's last line wraps to its first
+         if (ar_go) begin
+            ar_v  <= 1'b0;
+            f_bur <= line_last ? 10'd0 : f_bur + 10'd1;
+            if (line_last) begin
+               f_seq  <= f_seq + 8'd1;
+               f_line <= (f_line == v_active - 12'd1) ? 12'd0 : f_line + 12'd1;
+               f_addr <= (f_line == v_active - 12'd1) ? fb_base : f_addr + 32'd64;
+            end else f_addr <= f_addr + 32'd64;
+         end
+         if (ask) ar_v <= 1'b1;
+         f_out <= f_out + {2'd0, ar_go} - {2'd0, r_go & m_axi_rlast};
+         // landing: in order, a beat at a time; a line's last beat finishes it
+         if (r_go) begin
+            if (m_axi_rresp != 2'b00 || m_axi_rid != 3'd0)
+               $fatal(1, "vga_scanout: read response resp=%b id=%0d", m_axi_rresp, m_axi_rid);
+            if (m_axi_rlast != (r_beat == 3'd7))
+               $fatal(1, "vga_scanout: rlast=%b on beat %0d of an 8-beat burst", m_axi_rlast, r_beat);
+            lb_we    <= 1'b1;
+            lb_waddr <= {r_seq[NSB-1:0], r_word};
+            lb_wdata <= m_axi_rdata;
+            r_beat   <= r_beat + 3'd1;
+            if (r_word == beats[8:0] - 9'd1) begin       // (a 512-beat line's last is 511)
+               r_word <= 9'd0;  r_seq <= r_seq + 8'd1;  cmp_tog <= ~cmp_tog;
+            end else r_word <= r_word + 9'd1;
+         end
+         // disabled: start over at the frame's first line once nothing is in flight
+         if (!en & ~ar_v & (f_out == 3'd0)) begin
+            done_c <= 8'd0;  f_seq <= 8'd0;  f_line <= 12'd0;  f_bur <= 10'd0;  f_addr <= fb_base;
+            r_seq <= 8'd0;  r_word <= 9'd0;  r_beat <= 3'd0;
+         end
       end
    end
 
-   assign m_axi_arvalid = fs == F_AR;
+   assign m_axi_arvalid = ar_v;
 `include "dram_window.vh"
    assign m_axi_araddr  = dram_axi({32'd0, f_addr});
    assign m_axi_arlen   = 8'd7;       // 8 beats = 64 bytes; never crosses 4 KiB (64-aligned)
@@ -259,10 +295,10 @@ module vga_scanout (
    assign m_axi_arcache = 4'b0011;
    assign m_axi_arprot  = 3'b000;
    assign m_axi_arqos   = 4'd0;
-   assign m_axi_rready  = fs == F_R;
+   assign m_axi_rready  = 1'b1;     // a beat always has its place: its slot was free when it was asked for
 
    always @(posedge clk)
-      if (!reset && fs == F_AR && !dram_ok({32'd0, f_addr}))
+      if (!reset && ar_v && !dram_ok({32'd0, f_addr}))
          $fatal(1, "vga_scanout: line address %h is outside DRAM", f_addr);
 endmodule
 
