@@ -2427,6 +2427,22 @@ at 111 MHz to 5ef15e3d (CTF-on-FP) -- 760fe336 boots clean, 5ef15e3d with either
 not. No cosim can see it: `tb_smolrv64_linux` ties virtio and every PLIC interrupt off. The
 closure above is real; the branch cannot ship until that defect is found (handoff, 'Board').**
 
+### 13.y IW=4 closure at 166.67 MHz (2026-10-24)
+
+`make` (the shipping build, `SMOLRV64_IW=4`, `SMOLRV64_HW=8`) closes at **WNS +0.001 ns** on 325e5341,
+from −0.591 on the first IW=4 build. The plateau was route: 92–95% of the CLBs in use and every
+failing family within 0.03 ns of the worst, so area went first, then the deepest family. Per build
+(each verified by lint, riscv-tests 240/0 and the 60 M Linux lockstep at IW=4):
+
+| build | cuts | WNS | TNS | LUTs |
+|---|---|---|---|---|
+| 79c1a9ac | IW=4, `SEQW` 9 (the ROB at 57 rows), FW 8 | −0.591 | | 160 825 |
+| 3b1b81d3 | + the geometry header, 9-bit physical registers, the state review (lane write tags, the ROB's done clears, the FP wake ports, the waiter table, the translate flag, ...) | −0.412 | −516 | 151 696 |
+| 9ec51393 | + FW 6, `PABITS` 33 for every PA the core holds, TLB tags without their index bits, the queues' banked allocation writes, the divider's one rotation, the PRF's shard select | −0.167 | −81 | 147 239 |
+| 325e5341 | + the lanes' operand bypass selected by the scheduler's registered wake match | **+0.001** | 0 | 146 097 |
+
+The board gate passes on 325e5341 (the 2g board, 2026-10-24): login, 900 s of Geekbench, zero faults.
+
 ## 14. Known limits
 
 - **Up to `LQ_N`=16 fast loads outstanding (by tag), one slow one, and two divides in the MD
