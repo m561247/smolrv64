@@ -122,7 +122,7 @@ module rv_dcache #(
    input  wire              rd_nc,       // Svpbmt NC/IO: no allocation
    output wire              rd_ack,      // taken this cycle
    output reg               rd_valid,
-   output reg  [63:0]       rd_data,     // the addressed bytes at bit 0
+   output reg  [63:0]       rd_data,     // the addressed doubleword as stored (a read names one: below)
    output reg  [RTW-1:0]    rd_resp_tag,
    output reg  [63:0]       rd_resp_addr,// the PA the response answers
    // ---- M's load in M's own cycle: taken whenever presented, so it never waits at a door. The
@@ -752,14 +752,14 @@ module rv_dcache #(
          sc      <= sc + {1'b0, sq_take} - {1'b0, st_done};
          wr_room <= ((sc + {1'b0, sq_take} - {1'b0, st_done}) != SD) & ~ox_pri;
          ox_w    <= (ox_pend & ~ox_take) ? ((ox_w == 3'd7) ? ox_w : ox_w + 3'd1) : 3'd0;
-         // a load's answer: from the lookup, else the NC slot's
+         // a load's answer: from the lookup, else the NC slot's -- the doubleword, unshifted
          rd_valid <= ans | nc_rdy;
          rd_f     <= ans & s1_f;
          if (ans) begin
-            rd_data      <= ans_chunk >> (8 * s1_pa[2:0]);
+            rd_data      <= ans_chunk;
             rd_resp_tag  <= tg(s1_tag);  rd_resp_addr <= s1_pa;
          end else if (nc_rdy) begin
-            rd_data      <= nc_data >> (8 * nc_pa[2:0]);
+            rd_data      <= nc_data;
             rd_resp_tag  <= nc_tag;  rd_resp_addr <= nc_pa;
          end
          // the store written at this edge, for the row the next lookup read as it was written
@@ -905,6 +905,11 @@ module rv_dcache #(
    wire e_btwo    = sb_hd & ((bhitv & (bhitv - 1'b1)) != 0);
    wire [TB-1:0] rd_wi = wi(rd_tag), f_wi = wi(f_tag);   // the requests' waiter entries
    wire e_wtbusy  = new_go & (wt_v[rd_wi] | (s1_v & (s1_tag == rd_wi)));
+   // A READ NAMES A DOUBLEWORD and is answered with it as stored: the LSU aligns its loads, a
+   // straddle's halves and its atomics (picking the bytes itself), the walkers read PTEs, and no
+   // device is behind this port. A byte address here would come back unshifted.
+   always @(posedge clk) if (!reset && ((rd_req && rd_pa[2:0] != 3'd0) || (f_req && f_pa[2:0] != 3'd0)))
+      $fatal(1, "rv_dcache: a read at %h, not a doubleword's address", rd_req ? rd_pa : f_pa);
    always @(posedge clk) if (!reset && ((rd_req && ({1'b0, rd_tag} >= NRQ[RTW:0])) || (f_req && ({1'b0, f_tag} >= NRQ[RTW:0]))))
       $fatal(1, "rv_dcache: a request tag %0d / %0d past the %0d the table holds", rd_tag, f_tag, NRQ);
    reg  e_wdead;

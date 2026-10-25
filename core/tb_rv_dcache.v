@@ -110,6 +110,7 @@ module tb;
 
    // ---- the requesters
    reg        out_v [0:NTAG-1];  reg [63:0] out_pa [0:NTAG-1];  reg [1:0] out_sz [0:NTAG-1];
+   reg [2:0]  out_bo [0:NTAG-1];   // the access's byte in the doubleword (a read names the doubleword)
    reg [31:0] out_t [0:NTAG-1];
    reg        st_pend;  reg [31:0] st_t;         // an NC store or a CBO presented, not yet done
    reg        st_acc;  integer st_kind;          // ...taken, awaiting wr_cpl; its kind
@@ -225,10 +226,11 @@ module tb;
             t = rd_resp_tag;
             if (!out_v[t]) begin $display("FAIL c=%0d: a response for tag %0d, which has nothing outstanding", now, t); errors = errors + 1; end
             else begin
-               expv = gold[wi(out_pa[t])] >> (8 * out_pa[t][2:0]);
-               mask = (out_sz[t] == 3) ? ~64'd0 : ((64'd1 << (8 << out_sz[t])) - 1);
+               // the doubleword as stored: the access's bytes in their own lanes
+               expv = gold[wi(out_pa[t])];
+               mask = ((out_sz[t] == 3) ? ~64'd0 : ((64'd1 << (8 << out_sz[t])) - 1)) << (8 * out_bo[t]);
                if (((rd_data ^ expv) & mask) != 0) begin
-                  $display("FAIL c=%0d tag %0d pa %h size %0d: got %h expected %h", now, t, out_pa[t], 1 << out_sz[t], rd_data & mask, expv & mask);
+                  $display("FAIL c=%0d tag %0d pa %h size %0d: got %h expected %h", now, t, out_pa[t] | {61'd0, out_bo[t]}, 1 << out_sz[t], rd_data & mask, expv & mask);
                   errors = errors + 1;
                end
                if (rd_resp_addr != out_pa[t]) begin $display("FAIL c=%0d tag %0d: response addr %h, issued %h", now, t, rd_resp_addr, out_pa[t]); errors = errors + 1; end
@@ -338,14 +340,14 @@ module tb;
             if (!st_covers(pa) && !(ic_pend && !ic_keep && pa[63:6] == ic_pa[63:6])) begin   // nor a flush's line
                kind = rnd(0) % 10;
                if (kind == 1 && nc_busy(0)) kind = 2;
-               out_pa[t] = pa;  out_sz[t] = sz[1:0];  out_kind[t] = (kind == 0) ? 2'd1 : (kind == 1) ? 2'd2 : 2'd0;
+               out_pa[t] = pa & ~64'd7;  out_bo[t] = pa[2:0];  out_sz[t] = sz[1:0];  out_kind[t] = (kind == 0) ? 2'd1 : (kind == 1) ? 2'd2 : 2'd0;
                // a cached load goes the fast way, half the time the cache takes one (f_ok, of its registers)
                if (kind >= 2 && rnd(0) % 2) begin f_hint = 1'b1;  #1; end
                if (f_hint && f_ok) begin
-                  f_req = 1'b1;  f_tag = t[3:0];  f_pa = pa;
+                  f_req = 1'b1;  f_tag = t[3:0];  f_pa = pa & ~64'd7;
                end else begin
                   rd_req = 1'b1;  rd_quiet = 1'b0;  rd_tag = t[3:0];  rd_phys = (kind == 0);  rd_nc = (kind == 1);
-                  rd_va = (kind == 0) ? {rnd(0), rnd(0)} : vp_va[p] + off;  rd_pa = pa;   // a walk's VA is noise
+                  rd_va = (kind == 0) ? {rnd(0), rnd(0)} : (vp_va[p] + off) & ~64'd7;  rd_pa = pa & ~64'd7;   // a walk's VA is noise
                end
             end
          end

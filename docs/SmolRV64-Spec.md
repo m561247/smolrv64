@@ -1539,8 +1539,9 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
 - **Every request carries its PA**: the core translates before it asks. The set is inside the
   page offset, so the VA names it as well; the dTLB in the access cycle, the D$ taking the VA, is
   step 2 of `docs/PLAN-2026-10-03-dcache-vipt-l2.md`'s revised order.
-- **No access spans an 8-byte chunk**: the LSU splits them (the no-span alignment), and the
-  D$ answers the chunk shifted to the access's byte.
+- **No access spans an 8-byte chunk**: the LSU splits them (the no-span alignment), and a read
+  names its chunk -- the address aligned to 8 bytes, asserted at the D$'s door -- which the D$
+  answers as stored; the LSU takes the access's bytes from it (an atomic its half).
 - Load-format controls (`nb`, signed, fp) are **latched at dispatch**, not read at
   completion — the stage they came from has moved on by then.
 
