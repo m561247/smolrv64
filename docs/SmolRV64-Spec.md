@@ -64,10 +64,10 @@ The scheduler holds the instruction until its sources are ready and then issues 
 **fixed priority, lowest entry index** — there is no age anywhere (§6.1).
 
 What may reorder is deliberately narrow, but it is no longer only the ALU. **Pure ALU ops
-and FP arithmetic both reorder freely**, in `u_iq_i`/`u_iq_i2`/`u_iq_i3` and `u_iq_f`
-respectively. **Slot k's ALU op goes to lane k** (lanes plan step 5.2a): three integer
-schedulers, each with its own ALU and shard, and no steering. **The lanes rotate** (§3.2):
-consecutive instructions go to consecutive lanes, so every lane takes every third instruction. An ALU op completes at issue; an FP op goes to stage F. Neither ever enters M.
+and FP arithmetic both reorder freely**, in the lanes' schedulers (`ln[k].u_iq`) and `u_iq_f`
+respectively. **Slot k's ALU op goes to lane k** (lanes plan step 5.2a): an integer scheduler
+per lane, four, each with its own ALU and shard, and no steering. **The lanes rotate** (§3.2):
+consecutive instructions go to consecutive lanes, so every lane takes every fourth instruction. An ALU op completes at issue; an FP op goes to stage F. Neither ever enters M.
 
 Everything else carries an `ord` bit; of those, FP ops go to the FP queue, and branches, jumps,
 multiplies, divides, system ops (lane A), loads, stores and the head ops (AMO, LR/SC, CBO) run in
@@ -137,7 +137,7 @@ speculation, front-end or back-end, and a cause beneath each. The stall counters
 
 ### 3.2 X stalls — the queue head without a credit
 
-Nothing after the decoupling queue holds. The queue head forms a dispatch group of up to three
+Nothing after the decoupling queue holds. The queue head forms a dispatch group of up to `IW` (four)
 instructions that may go together: every member plain (a serialising op, `fence.i`, a CBO, an
 AMO, a CSR op, a trap at dispatch or the interrupt pseudo-op goes alone), at most one divide
 (the MD stage tracks two in flight), any number of loads, stores and FP ops (the LQ, the SQ and
@@ -197,8 +197,8 @@ held a group until its room appeared and dispatched it in that cycle.
 | cause | meaning |
 |---|---|
 | *(operands)* | **no longer a dispatch stall.** Waiting for operands happens in the scheduler now (§2.1); dispatch is blocked by structural resources only. |
-| `~cr_rob1..3` | no free ROB row (64 rows) beyond the IR group's (`st_rob`) |
-| `~cr_ia/ib/ic/l/f` | the member's scheduler (its lane's, rotated by `lc`) has no entry beyond its dispatch-stage register and the IR's op — integer 10 each; the head-op register holds one (`cr_l`: none in flight, none in the IR); for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
+| `~cr_rob` | no free ROB row within the 57 the ROB fills at IW=4 (`ROB_CAP`, §6) beyond the IR group's (`st_rob`) |
+| `~cr_i/l/f` | the member's scheduler (its lane's, rotated by `lc`) has no entry beyond its dispatch-stage register and the IR's op — integer 10 each; the head-op register holds one (`cr_l`: none in flight, none in the IR); for FP (`cr_f`), the F FIFO (8) and the FP scheduler (8, §6.1) have no room beyond the FIFO's ops and the IR's; `~cr_ld`/`~cr_st`, no LQ or SQ entry beyond the IR's (`st_iq`, `st_lq`, `st_sq`) |
 | `rn_stall` | any rename shard below its low-water mark (4 free registers for a lane's, 2 x `IW` for an FP shard), or the map's sweep after a squash (`st_rn`) |
 | `cr_ser`, `cr_csr` | a serializing op -- a fence, `fence.i`, an AMO, an xret, `ecall`/`ebreak`/`wfi`/`sfence.vma`, a trap from dispatch -- is **alone in flight**: it pops only when the ROB AND the store queue have drained (`drained`, rule C5) and the IR is empty, and nothing pops behind it until it commits. A CSR op does not drain: it waits only for the CSR op before it (`csr_infl`, or one in the IR) (`st_srz`) |
 
@@ -444,7 +444,7 @@ order on its own pipe, and a wrong-path call or return resolves before its squas
 
 **Training.** Every CTI trains the predictor once, mispredicted or not, and only once it is
 NON-SPECULATIVE: when the ROB's irrevocable point (§6) has reached it, so everything older is done
-and nothing can squash it, or it has retired. Up to three resolve per cycle; each enters a
+and nothing can squash it, or it has retired. Up to `IW` (four) resolve per cycle; each enters a
 32-entry queue in age order from its lane's resolve register (`lr_*`), carrying a copy of all
 training reads (rule D16; the copy is a banked distributed RAM read only at the head, the
 fields every entry is compared on are flops), and the queue's head trains one per cycle once
@@ -722,8 +722,7 @@ the kill has held four cycles, no live op is left in the backend; at a release, 
 It selects what executes. See §2.1 for what may reorder and why the usual OoO machinery
 is not needed alongside it.
 
-**There are four schedulers, one per unit (two integer since 10d-ii: slot A's ALU ops and
-slot B's), and none stores age.**
+**There is a scheduler per lane, four, and the FP scheduler, and none stores age.**
 
 **SCHEDULER-SIZE TIMING NUMBERS IN THIS DOCUMENT ARE SINGLE SAMPLES AND DO NOT
 DISTINGUISH THE CONFIGURATIONS.** Rule I2: four placer directives over IDENTICAL RTL span
@@ -979,13 +978,12 @@ runs inside every 240-test and cosim run.
 | unit | latency | outstanding | blocks M? | writes |
 |---|---|---|---|---|
 | each lane's ALU (slot k's ALU ops) | 1 cycle (at issue) | — | no | the lane's shard (k) |
-| each lane's multiplier (`mul3`, slot k's multiplies) | 3 cycles: wake at T+2, written at T+3 | — | no (one a cycle) | the lane's shard |
+| each lane's multiplier (`mul3`, slot k's multiplies) | 3 cycles: wake at T+2, written at T+3 | — | no (it reserves its lane's T+2 slot) | the lane's shard |
 | branch, `jal`/`jalr` (its slot's lane) | 1 cycle (at issue) | — | no | the lane's shard (the link) |
-| CSR | 1 cycle at the ROB head; younger work runs meanwhile | 1 | yes | LD shard (M's port) |
-| mul (`mul3`) | 3 cycles, pipelined | 1 (the MD stage's tag) | **never enters M** (MD stage, §7.x) | FE shard |
-| div (`divider`) | 3 + ceil(q/2) cycles, q the quotient's significant bits (3-35): radix 4, iterations limited to q | 1 | **never enters M** (MD stage, §7.x) | FE shard |
-| FPU (CVFPU) | 6 cycles (§7.1) | **4** | **never enters M** (stage F) | the FP file's F-stage bank; FE shard for an integer result |
-| LSU load | see §8 | 4 fast (by tag, C4a) + 1 slow | **no** | LD shard; the FP file's load bank for an FP load |
+| CSR | 1 cycle at the ROB head; younger work runs meanwhile | 1 | yes | lane A's shard, through its landing slot |
+| div (`divider`) | 3 + ceil(q/2) cycles, q the quotient's significant bits (3-35): radix 4, iterations limited to q | 2 (the MD stage and its queue register) | **never enters M** (MD stage, §7.x) | its destination's lane's shard, through the lane's landing buffer |
+| FPU (CVFPU) | 6 cycles (§7.1) | **4** | **never enters M** (stage F) | SH_FF; an integer result through its lane's landing buffer |
+| LSU load | see §8 | 16 fast (by load-queue tag) + 1 slow | **no** | its destination's lane's shard (straight through or by the landing buffer); SH_FL for an FP load |
 | LSU store / AMO | see §8 | 1 | yes | — |
 
 Only loads, FP, multiplies and divides are non-blocking. Stores and AMOs still hold M: a
@@ -1210,8 +1208,8 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   LSU's FSM after its read is issued: the address is translated, the fault decided, and the
   only per-request state is how to format the word when it returns. So it starts from S_IDLE
   and the FSM STAYS THERE; the next access starts behind it; its D$ read carries the load-queue
-  index as `rd_tag` (`{2'b00, idx}`; the FSM's slow reads one fixed `TAG_SLOW`, the walkers
-  `{01,00}`/`{10,00}`), and the response is claimed by that tag -- never by "only one in
+  index as `rd_tag` (`{1'b0, idx}`; the walkers `TAG_PTW` and `TAG_PTW + 1`, past the loads'
+  tags, and the FSM's slow reads one fixed `TAG_SLOW` = `TAG_PTW + 2`), and the response is claimed by that tag -- never by "only one in
   flight" (rule B1). The formatting state lives per tag in the LSU (`o_nb/o_sgn/o_fp/o_boff`,
   `o_v` = a response is still coming), the landing is `ld_land_fast` by `pt_rtag` into the
   load queue's entry, the ROB, the lane's landing (above) and the retire record. Each per-tag
@@ -1620,7 +1618,7 @@ a straight index, and a hashed index would scatter them across sets.
 
 **The D$ (`rv_dcache`).** A way is a 4 KiB page and the set is PA[11:6], inside the page offset, so
 the VA names the set too and no line can have a synonym; the core still translates first and hands
-every request its PA, and a hit is the PA's tag (PA[35:12], 24 bits) matching one valid way of the
+every request its PA, and a hit is the PA's tag (PA[32:12], 21 bits: `PABITS - 12`) matching one valid way of the
 set. **The data is diagonal in groups of eight:** chunk c of way w sits at row {set, c} of array
 {w[4:3], w[2:0] + c}. A load reads row {set, c} of all 32 arrays and takes the hit way's by a
 rotation within each group, never the set's 4096 bits; a fill beat writes two arrays, one of each
@@ -1839,7 +1837,7 @@ control, so a byte that finds the FIFO full is dropped and sets LSR.OE. The THR 
 ## 10. Array inventory
 
 Every array in the core, with the shape the RTL actually declares. Sizes are for the
-shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches).
+shipping configuration (`SIZE_KB`=128, `SMOLRV64_HW`=8, `PAW`=64 into the caches).
 
 ### 10.1 Core
 
@@ -1847,12 +1845,12 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 |---|---|---|---|---|---|---|
 | `ish[0..IW-1].mem` | `smolrv64_prf` | 64 each | 64 | 16 384 | LUTRAM | lane k's integer shard: 1W (lane k's write register), 9R at IW=4 (2 per lane, the store queue's) |
 | `lb_prd`, `lb_rob`, `lb_fe`, `lb_dk` | `smolrv64_core` | 3×4 | 10/8/1/1 | 240 | flops | the lanes' landing buffers (§8): what the kill and the wakes read at every entry |
-| `g_lp[*].u_lbd` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_core`) | 3 × 2 × 2 | 64 | 768 | LUTRAM | the landing buffers' data: the LD stream's at the tail, the FE stream's after it, read at the head |
+| `g_lp[*].u_lbd` `bank[*].mem` | `smolrv64_bankq` (in `smolrv64_core`) | 4 × 2 × 2 | 64 | 1 024 | LUTRAM | the landing buffers' data: the LD stream's at the tail, the FE stream's after it, read at the head |
 | `fp[0].mem`, `fp[1].mem` | `smolrv64_prf` | 64 each | 64 | 8 192 | LUTRAM | 4R (the store queue's, the FP port's 3), 1W each: SH_FL (the load landing) and SH_FF (the F stage) |
-| `cp[0..IW-1].smap` | `smolrv64_rename` | 64 each | 10 | 1 920 | LUTRAM | one copy per rename slot (1W each: the slot's rename, the walk's column, the sweep's lane; `newer` picks), 5*IW reads (the sources and destinations, the commits' dirty tests) |
-| `cp[0..IW-1].rmap` | `smolrv64_rename` | 64 each | 10 | 1 920 | LUTRAM | one copy per commit port (1W each, `rnewer` picks), 2*IW reads (the commits' displaced mappings, the sweep) |
+| `cp[0..IW-1].smap` | `smolrv64_rename` | 64 each, twice at IW=4 (`smap_d`) | 9 | 4 608 | LUTRAM | one copy per rename slot (1W each: the slot's rename, the walk's column, the sweep's lane; `newer` picks), 5*IW reads (the sources and destinations, the commits' dirty tests) |
+| `cp[0..IW-1].rmap` | `smolrv64_rename` | 64 each | 9 | 2 304 | LUTRAM | one copy per commit port (1W each, `rnewer` picks), 2*IW reads (the commits' displaced mappings, the sweep) |
 | `dirty` | `smolrv64_rename` | 64 | 1 | 64 | flops | the registers the sweep rewrites after a squash |
-| `fl[*].u.bank[*].mem` | `smolrv64_rename` | 64 per shard | 7 | 448 per shard | LUTRAM | one free list per shard in use (lanes 0..IW-1, SH_FL, SH_FF), `next_pow2(IW)` banks each |
+| `fl[*].u.bank[*].mem` | `smolrv64_rename` | 64 per shard | 6 | 384 per shard | LUTRAM | one free list per shard in use (lanes 0..IW-1, SH_FL, SH_FF), `next_pow2(IW)` banks each |
 | `col[0..IW-1].mem` | `smolrv64_rob` | 64 each | 25 | 6 400 | LUTRAM | column k, lane k's entries `{pold, noret, rd, prd}`: 1W (lane k's dispatch), 2R (the head's row, the walk's row; the ports rotate them into program order) |
 | `fc` | `smolrv64_rob` | 64 | 2 | 128 | LUTRAM | each row's first column: 1W (dispatch), read at the next head row, `irr`'s, the walk's and the walked-to branch's rows (`hfc`, the head row's, is a flop) |
 | *(two-wide dispatch and retire)* | | | | | | items 10b/10c: on the board since 2026-09-06 (gate W2F, 319cd248), after four silent bitstreams whose renamer Vivado had folded (docs/rtl-rules.md F4/F5) |
@@ -1869,7 +1867,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `spl_ld`, `spl_st` | `smolrv64_core` | 16, 32 | 8+274 = 282 | 13 536 | LUTRAM | a lane load's or store's record by LQ/SQ entry: four banks by entry, 1W each (a group's row), 1R at M's pick (§8) |
 | `u_la`, `u_sa` `wb[0..IW-1].mem` | `smolrv64_mwram` (in `smolrv64_core`) | 16, 32 a bank | 64 | 9 216 | LUTRAM | the lanes' arrived VAs, a bank per lane (1W, its lane), 1R at M's pick; `lvt` (2 bits an entry, flops) names the bank that wrote the entry last (§8) |
 | `la_v`, `sa_v` | `smolrv64_core` | 16, 32 | 1 | 48 | flops | an entry's address has arrived and M has not taken it |
-| `u_iq_f` entry | `smolrv64_iq` | 5 | 2+3×9 = 29 | 145 | flops | FP, reorders, `NSRC`=3 (§6.1) |
+| `u_iq_f` entry | `smolrv64_iq` | 8 | 2+3×9 = 29 | 232 | flops | FP, reorders, `NSRC`=3 (§6.1) |
 | `plmem` (payload) | `smolrv64_core` | 38 (10+10+10+8) | 274 | 10 412 | LUTRAM | one array per scheduler: 1W dispatch, 1R issue each; the immediate is stored as its low 32 bits, which it sign-extends (the queue's write asserts it), and a fetch fault's address as one bit, set for a straddler's pc+2 (`imm` and `fault_tval` are rebuilt from them) |
 | `ipend`, `fpend` | `smolrv64_pending` | 256, 128 | 1 | 384 | flops | readiness, a table per file indexed by {shard, index}: 23R, 16 that read both and let the number's file pick (the slots' rs1/rs2, 8; the lanes' operands, 8) and 7 of the FP table alone (the slots' rs3, 4; the F FIFO head's sources, 3), and each writeback its own register (the integrity check); 4 sets, 6 clears into the integer table (the lanes', the streams' integer landings) and 2 into the FP (the streams'), bulk-clear |
 | `u_pa` `wb[0..1].mem` | `smolrv64_mwram` (in `smolrv64_lq`) | 16 a bank | 33 (`PABITS`) | 1 056 | LUTRAM | the load queue's PA, a bank per writer (M's fill, the walker's answer), 3R (the start's entry, the landing's two candidates); `lvt` (a bit an entry, flops) names the writer |
@@ -2450,7 +2448,7 @@ The board gate passes on 325e5341 (the 2g board, 2026-10-24): login, 900 s of Ge
   stage** (the stage and its queue register; the divide credit holds a third at dispatch). FP is no longer
   among them: `NFLIGHT`=4 and results return by tag, out of issue order (§7). `LQ_N = 1 << LQ_IB`;
   `LQ_IB` = `SMOLRV64_LQB` = 4 (`smolrv64_tags.vh`, which the core, `rv_soc_top` and the benches
-  read), and the D$ read tag is `{client[1:0], lq_idx}`, `DRTW = LQ_IB + 2`. 8 -> 16 entries:
+  read), and the D$ read tag is `{1'b0, lq_idx}` for a load, the walkers' and the slow path's past them, `DRTW = LQ_IB + 1`. 8 -> 16 entries:
   Dhrystone 1,660,876 -> 1,585,889 cycles (lockstep, IW=3). 16 -> 32 at the lane rotation
   (6f2bbf1f, the GB5 checkpoint slices): -0.37% of their cycles, PDF Rendering +1.21%. PDF's full
   queue was 13.1 loads of 16 ready and waiting for the port in its no-credit cycles, behind the
