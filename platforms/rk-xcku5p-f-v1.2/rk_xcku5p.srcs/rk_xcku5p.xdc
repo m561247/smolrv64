@@ -278,7 +278,8 @@ set_multicycle_path -hold 1 -end -from [get_clocks probe_clk] \
 
 # ---- TinyVGA adapter on the 40-pin header (vga_scanout) ------------------------------------
 # Header names from the board's pin table (doc/RK-XCKU5P-F V1.2管脚定义.xls, sheet "40 PIN"),
-# all bank 87. The outputs are vga_scanout's own registers, so they pack into the IOBs.
+# all bank 87. The outputs are vga_scanout's own registers, kept in the fabric: bank 87 is an HD
+# bank, whose I/O flops stop at 8 ns (CLKC-54), and the pixel clock runs to 6 ns.
 set_property PACKAGE_PIN F12 [get_ports {vga_r[1]}]   ;# IO14_N
 set_property PACKAGE_PIN G12 [get_ports {vga_r[0]}]   ;# IO14_P
 set_property PACKAGE_PIN G14 [get_ports {vga_g[1]}]   ;# IO15_N
@@ -289,7 +290,7 @@ set_property PACKAGE_PIN H13 [get_ports vga_vs]       ;# IO17_N
 set_property PACKAGE_PIN J13 [get_ports vga_hs]       ;# IO17_P
 set_property IOSTANDARD LVCMOS33 [get_ports {vga_hs vga_vs vga_r[*] vga_g[*] vga_b[*]}]
 set_property SLEW SLOW [get_ports {vga_hs vga_vs vga_r[*] vga_g[*] vga_b[*]}]
-set_property IOB TRUE [get_ports {vga_hs vga_vs vga_r[*] vga_g[*] vga_b[*]}]
+set_property IOB FALSE [get_ports {vga_hs vga_vs vga_r[*] vga_g[*] vga_b[*]}]
 
 # The pixel clock is an MMCM output fed from ui_clk, so Vivado would time ui_clk <-> pixel clock
 # as RELATED clocks at an off-integer ratio (and DRP retunes it at run time anyway). Every

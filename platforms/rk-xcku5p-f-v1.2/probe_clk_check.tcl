@@ -53,3 +53,19 @@ if {[llength $probe_mmcm] == 1} {
  DIVCLK_DIVIDE in rk_xcku5p.v." $vco]
    }
 }
+
+# Every cell runs within its own minimum period and pulse widths. WNS (setup) does not show these,
+# so a flop clocked above its limit -- one packed into an HD bank's I/O stops at 8 ns -- would
+# otherwise reach a bitstream that "met timing". Placement decides some of them (an I/O flop), so
+# the check that counts is the one after route.
+set pw_bad {}
+foreach line [split [report_pulse_width -all_violators -return_string] "\n"] {
+   if {[regexp {^(Min Period|Max Period|Low Pulse Width|High Pulse Width|Max Skew)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(-[0-9.]+)\s+\S+\s+(\S+)} \
+           $line -> check slack pin]} {
+      lappend pw_bad "$check $slack ns: $pin"
+   }
+}
+if {[llength $pw_bad]} {
+   error "probe_clk_check: [llength $pw_bad] pulse-width / minimum-period violation(s):\n  [join [lrange $pw_bad 0 9] "\n  "]"
+}
+puts "probe_clk_check: pulse widths and minimum periods met."
