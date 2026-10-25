@@ -56,13 +56,14 @@ module tb_vga_scanout;
       begin seed = seed * 1103515245 + 12345;  rnd = (seed[30:16] % 100) < pct; end
    endfunction
    reg [31:0] burst_addr;  integer beats_left = 0;
+   reg        stall = 1'b0;                 // the memory takes no request (run_stall)
    always @(posedge clk) begin
       if (arvalid && arready) begin
          if (arlen != 8'd7 || arsize != 3'b011 || arburst != 2'b01 || araddr[5:0] != 6'd0 || arid != 3'd0)
             $fatal(1, "AR: len=%0d size=%0d burst=%0d addr=%h id=%0d", arlen, arsize, arburst, araddr, arid);
          burst_addr <= araddr ^ 32'h8000_0000;  beats_left <= 8;
       end
-      arready <= beats_left == 0 && !(arvalid && arready) && rnd(30);
+      arready <= !stall && beats_left == 0 && !(arvalid && arready) && rnd(30);
       if (rvalid && rready) begin
          burst_addr <= burst_addr + 32'd8;  beats_left <= beats_left - 1;
       end
@@ -83,7 +84,7 @@ module tb_vga_scanout;
 
    // ---- the mode, and the check ----
    integer HA, HSS, HSE, HT, VA, VSS, VSE, VT;
-   integer mh, mv, synced = 0, armed = 0, frames = 0, errors = 0;
+   integer mh, mv, synced = 0, armed = 0, frames = 0, errors = 0, checking = 1;
    reg     vs_d = 1'b0;
    always @(posedge pix_clk) begin
       vs_d <= vs;
@@ -99,7 +100,7 @@ module tb_vga_scanout;
          p      = pixel(mh, mv);
          exp_rgb = act ? {p[15:14], p[10:9], p[4:3]} : 6'd0;
          // The first frame after the edge may show lines fetched before the mode settled.
-         if (frames > 0 && (hs !== exp_hs || vs !== exp_vs || {r, g, b} !== exp_rgb)) begin
+         if (checking && frames > 0 && (hs !== exp_hs || vs !== exp_vs || {r, g, b} !== exp_rgb)) begin
             if (errors < 10)
                $display("FAIL: frame %0d (x=%0d, y=%0d): hs=%b vs=%b rgb=%b, expected %b %b %b",
                         frames, mh, mv, hs, vs, {r, g, b}, exp_hs, exp_vs, exp_rgb);
@@ -145,6 +146,18 @@ module tb_vga_scanout;
       // One burst per line, then three; odd porches so an off-by-one shows.
       run_mode(32, 35, 39, 44, 6, 7, 9, 11, 32'd64);
       run_mode(96, 101, 110, 117, 5, 6, 8, 9, 32'd192);
+      // The memory refuses every request for 400 line times, so the scan runs ~220 active lines
+      // ahead of the fetcher (shown late, not checked); once it answers, the fetcher catches up and
+      // every frame is the frame again -- an 8-bit line count wrapped past 128 and left the picture
+      // rotated by 252 lines, which a five-line frame shows (252 is a multiple of six).
+      run_mode(96, 101, 110, 117, 5, 6, 8, 9, 32'd192);
+      checking = 0;  stall = 1'b1;
+      repeat (400 * 117) @(posedge pix_clk);
+      stall = 1'b0;
+      repeat (40 * 117) @(posedge pix_clk);
+      frames = 0;  checking = 1;
+      wait (frames == 4);
+      $display("after a 400-line stall: 3 frames checked, %0d errors", errors);
       // DRP: one write, one read; the instant ack loops 0xBEEF back.
       wr(8'h40, 32'h8008_1234);
       repeat (10) @(posedge clk);

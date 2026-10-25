@@ -163,6 +163,12 @@ module vga_scanout (
    // NS-1 lines ahead of the scan instead of racing it: a stall of DRAM costs nothing until it is
    // longer than NS-1 line times.
    localparam integer NS = 4, NSB = 2;
+   // The line sequences both sides count (seq_p, cmp_p; done_c, f_seq, r_seq) are compared as
+   // signed differences, so they are wide enough that no stall of the DMA path wraps one: an 8-bit
+   // count took the scan 128 lines ahead (a 1920x1200 redraw's first frame) for the fetcher being
+   // ahead, which then stopped until the difference wrapped and stayed 252 lines behind for good --
+   // every frame rotated by a fifth. A wrap now needs the scan 32K lines ahead, half a second.
+   localparam integer SQB = 16;
    reg [63:0] lb [0:NS*512-1];
    reg        lb_we;
    reg [NSB+8:0] lb_waddr;
@@ -176,8 +182,8 @@ module vga_scanout (
    (* async_reg = "true" *) reg [1:0] en_p;
    (* async_reg = "true" *) reg [2:0] cmp_s;
    reg [11:0] h, v;
-   reg [ 7:0] seq_p;          // the active line being scanned, in sequence
-   reg [ 7:0] cmp_p;          // the lines the fetcher has finished
+   reg [SQB-1:0] seq_p;       // the active line being scanned, in sequence
+   reg [SQB-1:0] cmp_p;       // the lines the fetcher has finished
    reg        done_tog, late_tog;
    always @(posedge pix_clk) begin en_p <= {en_p[0], en & ~pix_rst};  cmp_s <= {cmp_s[1:0], cmp_tog}; end
 
@@ -187,15 +193,15 @@ module vga_scanout (
    always @(posedge pix_clk) begin
       if (!en_p[1]) begin
          // the scan starts in the vertical blank: the fetcher has the blank to fill the ring
-         h <= 12'd0;  v <= v_active;  seq_p <= 8'd0;  cmp_p <= 8'd0;  done_tog <= 1'b0;  late_tog <= 1'b0;
+         h <= 12'd0;  v <= v_active;  seq_p <= {SQB{1'b0}};  cmp_p <= {SQB{1'b0}};  done_tog <= 1'b0;  late_tog <= 1'b0;
       end else begin
          h <= last_h ? 12'd0 : h + 12'd1;
          if (last_h) v <= last_v ? 12'd0 : v + 12'd1;
-         if (cmp_s[2] ^ cmp_s[1]) cmp_p <= cmp_p + 8'd1;
+         if (cmp_s[2] ^ cmp_s[1]) cmp_p <= cmp_p + 1'b1;
          // a line whose scan begins before the fetcher finished it shows the slot's older contents
          if (act_v && h == 12'd0 && !($signed(cmp_p - seq_p) > 0)) late_tog <= ~late_tog;
          // the line just shown frees its slot
-         if (act_v && h == h_active) begin seq_p <= seq_p + 8'd1;  done_tog <= ~done_tog; end
+         if (act_v && h == h_active) begin seq_p <= seq_p + 1'b1;  done_tog <= ~done_tog; end
       end
    end
 
@@ -225,14 +231,14 @@ module vga_scanout (
    localparam [2:0] NOUT = 3'd4;
    (* async_reg = "true" *) reg [2:0] done_s, late_s;
    (* async_reg = "true" *) reg [1:0] en_a;   // the scan is running: it counts the lines the fetcher finishes
-   reg [ 7:0] done_c;         // the lines the scan has shown
-   reg [ 7:0] f_seq;          // the line being asked for, in sequence
+   reg [SQB-1:0] done_c;      // the lines the scan has shown
+   reg [SQB-1:0] f_seq;       // the line being asked for, in sequence
    reg [11:0] f_line;         // ...its line in the frame
    reg [ 9:0] f_bur;          // ...and the bursts of it asked for
    reg [31:0] f_addr;
    reg        ar_v;
    reg [ 2:0] f_out;          // bursts in flight
-   reg [ 7:0] r_seq;          // the line the answers land in
+   reg [SQB-1:0] r_seq;       // the line the answers land in
    reg [ 8:0] r_word;         // ...the beat they land at
    reg [ 2:0] r_beat;
    reg        cmp_tog;
@@ -247,17 +253,17 @@ module vga_scanout (
       lb_we <= 1'b0;
       if (reset) begin
          late_lines <= 16'd0;  ar_v <= 1'b0;  f_out <= 3'd0;  cmp_tog <= 1'b0;
-         done_c <= 8'd0;  f_seq <= 8'd0;  f_line <= 12'd0;  f_bur <= 10'd0;  f_addr <= 32'd0;
-         r_seq <= 8'd0;  r_word <= 9'd0;  r_beat <= 3'd0;
+         done_c <= {SQB{1'b0}};  f_seq <= {SQB{1'b0}};  f_line <= 12'd0;  f_bur <= 10'd0;  f_addr <= 32'd0;
+         r_seq <= {SQB{1'b0}};  r_word <= 9'd0;  r_beat <= 3'd0;
       end else begin
          if (en_a[1] & (late_s[2] ^ late_s[1])) late_lines <= late_lines + 16'd1;   // counted, never silent (STATUS[31:16])
-         if (done_s[2] ^ done_s[1]) done_c <= done_c + 8'd1;
+         if (done_s[2] ^ done_s[1]) done_c <= done_c + 1'b1;
          // asking: a burst at f_addr, then the next; the frame's last line wraps to its first
          if (ar_go) begin
             ar_v  <= 1'b0;
             f_bur <= line_last ? 10'd0 : f_bur + 10'd1;
             if (line_last) begin
-               f_seq  <= f_seq + 8'd1;
+               f_seq  <= f_seq + 1'b1;
                f_line <= (f_line == v_active - 12'd1) ? 12'd0 : f_line + 12'd1;
                f_addr <= (f_line == v_active - 12'd1) ? fb_base : f_addr + 32'd64;
             end else f_addr <= f_addr + 32'd64;
@@ -275,13 +281,13 @@ module vga_scanout (
             lb_wdata <= m_axi_rdata;
             r_beat   <= r_beat + 3'd1;
             if (r_word == beats[8:0] - 9'd1) begin       // (a 512-beat line's last is 511)
-               r_word <= 9'd0;  r_seq <= r_seq + 8'd1;  cmp_tog <= ~cmp_tog;
+               r_word <= 9'd0;  r_seq <= r_seq + 1'b1;  cmp_tog <= ~cmp_tog;
             end else r_word <= r_word + 9'd1;
          end
          // disabled: start over at the frame's first line once nothing is in flight
          if (!en & ~ar_v & (f_out == 3'd0)) begin
-            done_c <= 8'd0;  f_seq <= 8'd0;  f_line <= 12'd0;  f_bur <= 10'd0;  f_addr <= fb_base;
-            r_seq <= 8'd0;  r_word <= 9'd0;  r_beat <= 3'd0;
+            done_c <= {SQB{1'b0}};  f_seq <= {SQB{1'b0}};  f_line <= 12'd0;  f_bur <= 10'd0;  f_addr <= fb_base;
+            r_seq <= {SQB{1'b0}};  r_word <= 9'd0;  r_beat <= 3'd0;
          end
       end
    end
