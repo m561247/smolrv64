@@ -599,6 +599,7 @@ static int run_cmd(const char *p)
         if (!p) { puts_("usage: X<addr> [a0 [a1]]\n"); return -1; }
         if (*p == ' ') { const char *q = parse_hex(p + 1, &a0); if (q) p = q; }
         if (*p == ' ') { const char *q = parse_hex(p + 1, &a1); if (q) p = q; }
+        if (a1) video_dtb(a1);                // the tree says the screen's mode (a V before the jump)
         puts_("jumping...\n");
         disk_quiesce();
         net_quiesce();

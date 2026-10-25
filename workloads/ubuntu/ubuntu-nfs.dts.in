@@ -179,8 +179,8 @@
 		@MEMORY@
 	};
 
-	/* simplefb and fbcon draw here, in the mode the monitor leaves the scanout in (640x480 unless
-	 * its V command set another; tools/vga-mode.py prints this node for any mode).
+	/* simplefb and fbcon draw here, in the mode the monitor leaves the scanout in: 640x480 here, and
+	 * the monitor rewrites width, height and stride to its mode when it starts the payload.
 	 * simplefb warns "cannot reserve video memory": the region is System RAM, as intended. */
 	framebuffer@ff000000 {
 		compatible = "simple-framebuffer";

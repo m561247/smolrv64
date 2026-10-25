@@ -25,8 +25,8 @@ and LOG (default ~/smolrv64/workloads/ubuntu/screenlog.0). The script
 The pattern's outermost pixels are a 1-pixel white border, so a monitor's auto-adjust has edges
 to lock onto and any cropping is plain to see. The pattern goes where simmerv's `--graphics WxH`
 would put its framebuffer, clear of the monitor's console at 0xFF00_0000 for a frame up to 8 MiB.
-A mode that looks right boots with the monitor's V command and the device-tree node the script
-prints (the fixed 16 MiB region at 0xFF00_0000, as tools/vga-mode.py prints it).
+A mode that looks right boots with the monitor's V command before the boot: the monitor writes the
+mode into the device tree's framebuffer node when it starts the payload.
 
 Limits: the width must be a multiple of 32 (the stride, W*2, a multiple of 64), at most 2048;
 totals at most 4095. The pixel clock is 1000/D MHz, so the refresh rate moves a little from
@@ -335,11 +335,8 @@ def main():
     if not a.dry_run:
         print(f'pixel clock {"LOCKED" if st & 1 else "NOT LOCKED"}; lines fetched late: '
               f'{st2 >> 16} (+{(st2 >> 16) - (st >> 16)} in the last ~2 s)')
-    print(f'\n# to boot Linux in this mode: at the monitor,\nV {mhz:g} {" ".join(map(str, hs + vs))} '
-          f'{"+" if hpos else "-"}hsync {"+" if vpos else "-"}vsync\n# and in ubuntu-nfs.dts.in:')
-    print(f'\tframebuffer@ff000000 {{ compatible = "simple-framebuffer"; reg = <0 0xff000000 0 0x1000000>; '
-          f'width = <{w}>; height = <{h}>; stride = <{w * 2}>; format = "r5g6b5"; }};')
-
+    print(f'\n# to boot Linux in this mode, at the monitor before the boot:\nV {mhz:g} {" ".join(map(str, hs + vs))} '
+          f'{"+" if hpos else "-"}hsync {"+" if vpos else "-"}vsync')
 
 if __name__ == '__main__':
     main()

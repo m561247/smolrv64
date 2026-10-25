@@ -78,6 +78,7 @@ void net_quiesce(void);
 void video_init(void);
 void video_putc(char c);
 int  video_cmd(const char *args);                // V: show or set the mode (an X11 modeline)
+void video_dtb(uint64_t dtb);                    // a device tree's framebuffer node to the mode
 
 // disk.c: the SD card's EFI System Partition, read-only
 int  disk_load(const char *path, uint64_t addr, uint64_t max, uint64_t *size);   // -2: no such file

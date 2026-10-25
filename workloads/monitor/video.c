@@ -236,6 +236,48 @@ int video_cmd(const char *p)
     return 0;
 }
 
+// The device tree a payload is started with says the mode the screen is in: its framebuffer node
+// (compatible "simple-framebuffer") has its width, height and stride cells rewritten in place --
+// the same sizes, so the tree's layout does not move -- and the kernel's simplefb draws what the
+// scanout shows. A tree is the flattened one (magic d00dfeed); anything else is left alone.
+static uint32_t fdt32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static void fdt32w(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+static int fdt_is(const uint8_t *s, const char *t) { while (*t) if (*s++ != (uint8_t)*t++) return 0; return *s == 0; }
+static uint8_t *fdt_al(uint8_t *p) { return (uint8_t *)(((uint64_t)p + 3) & ~3ul); }
+void video_dtb(uint64_t a)
+{
+    uint8_t *f = (uint8_t *)a;
+    if (!on || fdt32(f) != 0xd00dfeedu) return;
+    uint8_t *p = f + fdt32(f + 8), *end = p + fdt32(f + 36), *strs = f + fdt32(f + 12);
+    uint8_t *w = 0, *h = 0, *st = 0;
+    int fb = 0;
+    while (p < end) {
+        uint32_t tok = fdt32(p);
+        p += 4;
+        if (tok == 1) {                              // a node begins: its name, then its properties
+            while (*p) p++;
+            p = fdt_al(p + 1);
+            fb = 0;  w = h = st = 0;
+        } else if (tok == 3) {                       // a property: length, name, value
+            uint32_t len = fdt32(p);
+            const uint8_t *nm = strs + fdt32(p + 4);
+            p += 8;
+            if (fdt_is(nm, "compatible") && fdt_is(p, "simple-framebuffer")) fb = 1;
+            else if (len == 4 && fdt_is(nm, "width"))  w = p;
+            else if (len == 4 && fdt_is(nm, "height")) h = p;
+            else if (len == 4 && fdt_is(nm, "stride")) st = p;
+            p = fdt_al(p + len);
+        } else if (tok == 2) {                       // the node ends (the framebuffer's has no children)
+            if (fb && w && h && st) {
+                fdt32w(w, (uint32_t)W);  fdt32w(h, (uint32_t)H);  fdt32w(st, (uint32_t)STRIDE);
+                puts_("dtb: the framebuffer is ");  putdec((uint64_t)W);  putc_('x');  putdec((uint64_t)H);  putc_('\n');
+                return;
+            }
+            fb = 0;
+        } else if (tok != 4) break;                  // the end, or not a tree
+    }
+}
+
 // the console's cell (c, r): set pixels FG, clear ones BG, then clean its rows to DDR
 static void cell(int ch, int c, int r)
 {

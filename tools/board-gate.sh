@@ -208,8 +208,8 @@ if [ -n "${BOARD:-}" ]; then
       || { echo "BOARD: FAIL (staging $T)"; exit 1; }
    { echo "# The gate's boot of $RTL_BANNER from $REPO ($DTB), staged by tools/board-gate.sh."
      echo "N80000000 fw_payload.bin"; echo "Nfefff000 smolrv64.dtb"
-     # the monitor turns the scanout on at every reset (workloads/monitor/video.c), so VGA=0 turns it off
-     [ "$VGA" = 1 ] && echo "WW10005000 1"
+     # the monitor turns the scanout on at every reset, in the mode its V command last set, and tells
+     # the device tree that mode at the jump (workloads/monitor/video.c); VGA=0 turns it off
      [ "$VGA" = 0 ] && echo "WW10005000 0"
      echo "X80000000 0 fefff000"; } > "$T/boot.txt"
    cp "$T/boot.txt" "$RES/boot.txt"

@@ -281,7 +281,7 @@ tools/gate.sh                                 # build, program, boot Ubuntu to l
 The board boots through the ROM monitor, which turns the VGA output on at reset (640x480, the
 device tree's framebuffer): a splash, and a console that shows everything it prints; `V` followed
 by an X11 modeline sets another mode, up to a 166.67 MHz pixel clock (`tools/vga-mode.py` prints
-the line and the device tree's matching framebuffer node). It waits at
+the line), and the monitor writes the mode into the device tree it boots Linux with. It waits at
 its prompt. `go [dir]`, or key[0], boots from the TFTP server on coffee (tftpd-hpa serving
 `/srv/tftp`): the monitor takes an address by DHCP and runs `dir/boot.txt`, monitor commands
 that load the OpenSBI+Linux payload and the device tree (`N<addr> <file>`) and jump to the

@@ -131,19 +131,12 @@ if [[ -n "${INITRD:-}" && -f "$INITRD" ]]; then
     n=3
     send_file "$INITRD_ADDR" "$INITRD" $((base + 3))
 fi
-# The monitor turns the scanout on at reset in its reset mode, 640x480@60 at 0xFF00_0000 -- the
-# DTB's framebuffer -- and VGA=1 asks for that again. VGA=<mode> (tools/vga-mode.py --list)
-# programs another mode; the DTB's framebuffer node must then be the one the tool prints.
-if [[ "${VGA:-0}" == 1 ]]; then
-    send_line "WW10005000 1"
-elif [[ "${VGA:-0}" != 0 ]]; then
-    want=$(../../tools/vga-mode.py "$VGA" | sed -n 's/^\t\twidth = <\([0-9]*\)>;/\1/p')
-    have=$(dtc -I dtb -O dts "$DTB" 2>/dev/null | sed -n '/simple-framebuffer/,/};/s/.*width = <\(0x[0-9a-f]*\|[0-9]*\)>;.*/\1/p')
-    if [[ -z "$have" || $((have)) != "$want" ]]; then
-        echo "ERROR: VGA=$VGA but $DTB's framebuffer is ${have:-missing}, not $want wide;" \
-             "put tools/vga-mode.py $VGA's DTS lines in ubuntu-nfs.dts.in" >&2
-        exit 1
-    fi
+# The monitor turns the scanout on at reset (640x480@60 at 0xFF00_0000) and writes the mode it is in
+# into the device tree's framebuffer node when it jumps, so VGA=1 (or unset) leaves the screen as it
+# is, VGA=0 turns it off and VGA=<mode> (tools/vga-mode.py --list) sends that mode's V line first.
+if [[ "${VGA:-1}" == 0 ]]; then
+    send_line "WW10005000 0"
+elif [[ "${VGA:-1}" != 1 ]]; then
     send_line "$(../../tools/vga-mode.py "$VGA" | grep '^V ')"
 fi
 send_line "X${FW_ADDR} 0 ${DTB_ADDR}"

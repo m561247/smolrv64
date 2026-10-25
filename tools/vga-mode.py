@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""A video mode for vga_scanout: the ROM monitor's V command and the matching device tree.
+"""A video mode for vga_scanout: the ROM monitor's V command.
 
-    tools/vga-mode.py 1024x768@60      # the V line, then the DTS lines
+    tools/vga-mode.py 1024x768@60      # the V line
     tools/vga-mode.py --list
 
 The pixel clock is vga_mmcm_inst's CLKOUT0 = VCO / divider, with the VCO fixed at 1000 MHz
@@ -12,18 +12,16 @@ integer divider cannot hit every VESA clock exactly; the refresh rate moves inst
 table says by how much.
 
 The framebuffer is the base of a fixed 16 MiB region at the top of 2 GiB of DRAM (0xFF00_0000),
-whatever the mode: room for any mode up to 4K30 at 16 bpp, and one place for the monitor, the
-device tree and the boot script to agree on. The DTS lines replace the framebuffer node in
-workloads/ubuntu/ubuntu-nfs.dts.in, and the DTB and initrd load below the region (ubuntu-boot.sh:
-DTB_ADDR, INITRD_ADDR). (simmerv's `--graphics WxH` places its own framebuffer at the top of 2 GiB,
-aligned to its size rounded up to a power of two, and describes it in its own device tree.)
+whatever the mode: room for any mode up to 4K30 at 16 bpp. The device trees reserve the region
+(workloads/ubuntu/ubuntu-nfs.dts.in), and the monitor writes the mode it is in into the tree's
+framebuffer node when it starts a payload, so a V line before the boot is all a mode takes.
+(simmerv's `--graphics WxH` places its own framebuffer and describes it in its own device tree.)
 """
 import argparse
 import sys
 
 VCO_MHZ = 1000.0
-DRAM_TOP = 0x1_0000_0000
-FB_SIZE = 16 << 20                       # the framebuffer region, at DRAM_TOP - FB_SIZE
+FB_SIZE = 16 << 20                       # the framebuffer region, at 0xFF00_0000
 
 # name: (VESA pixel clock MHz, h active/sync start/sync end/total, v ..., hsync+, vsync+)
 MODES = {
@@ -42,12 +40,6 @@ MODES = {
 
 def divider(mhz):
     return round(VCO_MHZ / mhz)
-
-
-def placement(w, h):
-    if w * h * 2 > FB_SIZE:
-        sys.exit(f'{w}x{h}: {w * h * 2} bytes do not fit the {FB_SIZE >> 20} MiB framebuffer region')
-    return DRAM_TOP - FB_SIZE, FB_SIZE
 
 
 def describe(name):
@@ -76,19 +68,14 @@ def main():
     stride = w * 2
     if stride % 64:
         sys.exit(f'{a.mode}: stride {stride} is not a multiple of 64 bytes')
-    base, size = placement(w, h)
+    if w * h * 2 > FB_SIZE:
+        sys.exit(f'{a.mode}: {w * h * 2} bytes do not fit the {FB_SIZE >> 20} MiB framebuffer region')
 
-    print(f'# {a.mode}: pixel clock {real:.3f} MHz (VCO {VCO_MHZ:.0f} / {d}), {refresh:.2f} Hz;'
-          f' framebuffer {size // 1024} KiB at {base:#x}')
+    print(f'# {a.mode}: pixel clock {real:.3f} MHz (VCO {VCO_MHZ:.0f} / {d}), {refresh:.2f} Hz,'
+          f' {w * h * 2 // 1024} KiB of the framebuffer region')
     print('# the monitor command, before X (ubuntu-boot.sh sends it with VGA=<mode>):')
     sync = lambda pos, n: ('+' if pos else '-') + n
     print('V', f'{mhz:g}', *hs, *vs, sync(hpos, 'hsync'), sync(vpos, 'vsync'))
-    print()
-    print('# device tree (ubuntu-nfs.dts.in):')
-    print(f'/memreserve/ {base:#x} {size:#x};')
-    print(f'\tframebuffer@{base:x} {{\n\t\tcompatible = "simple-framebuffer";\n'
-          f'\t\treg = <0 {base:#x} 0 {size:#x}>;\n\t\twidth = <{w}>;\n\t\theight = <{h}>;\n'
-          f'\t\tstride = <{stride}>;\n\t\tformat = "r5g6b5";\n\t}};')
     print(f'# simmerv: --graphics {w}x{h}')
 
 
