@@ -4,8 +4,8 @@
 
 SmolRV64 is a 64-bit RISC-V application processor, written from scratch in Verilog, that
 boots stock Ubuntu on a Kintex UltraScale+ FPGA at 166.67 MHz and runs Geekbench on it.
-It is a three-wide out-of-order machine with register renaming, a decoupled fetch stream
-over a virtually tagged 128 KiB instruction cache, four schedulers, a load queue and a senior
+It is a four-wide out-of-order machine with register renaming, a decoupled fetch stream
+over a virtually tagged 128 KiB instruction cache, a scheduler per lane, a load queue and a senior
 store queue, non-blocking tagged loads into a non-blocking 128 KiB data cache, a tagged
 four-deep FPU pipeline, a 2 MiB second-level cache in UltraRAM, and coherent DMA: every
 device's line is cleaned or flushed in the caches before it moves. Every committed
@@ -19,10 +19,10 @@ change has to boot Ubuntu to a login prompt on the board with zero faults before
 | Geekbench 5.4.1, board, 2026-10-23 | **18** single-core (Integer 22, Crypto 2, Floating Point 13), **18** multi-core ([result 24746633](https://browser.geekbench.com/v5/cpu/24746633), [every subtest](workloads/gb5/result-2026-10-23.md)); the whole suite in 1 h 41 min at IPC 1.27 |
 | Memory, board, 2026-10-23 | a dependent load **3.0** cycles from the D$, **21.0** from the L2, 44.6 from DRAM with a second-level dTLB lookup (71.1 with a page walk); sequential reads 7.81 bytes a cycle in the D$, 3.68 from the L2, 2.88 from DRAM, writes 7.10, 5.81 and 5.10 (`tools/board/membench/summary.sh`, beside every Geekbench run) |
 | Geekbench 6.7.1, board (4 GiB), 2026-10-15 to 16 | **10** single-core, **10** multi-core ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041), [every subtest](workloads/gb6/result-2026-10-16.md)); the whole suite in 17 h 48 min at IPC 1.00 |
-| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-23 | **2.67** DMIPS/MHz: 213.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
-| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-23 | **4.73** CoreMark/MHz: 211,347 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; `make run B=coremark`) |
+| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-24 | **3.14** DMIPS/MHz: 181.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
+| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-24 | **5.33** CoreMark/MHz: 187,610 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; `make run B=coremark`) |
 | `sha256sum` of a 30 MB file, board, 2026-09-25 | IPC 1.56 to 1.63 over three runs, 43 cycles per byte |
-| Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed three-wide; DDR4 at 333 MHz |
+| Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed four-wide; DDR4 at 333 MHz |
 | Software | OpenSBI and mainline Linux; Ubuntu 25.04 boots over an NFS root through the core's own virtio-net |
 
 **Why three bars are so short.** Gaussian Blur, Structure from Motion and Machine Learning
@@ -40,56 +40,67 @@ looks like when every structure is chosen by what a Kintex LUT, LUTRAM or block 
 ([the specification](docs/SmolRV64-Spec.md) is the normative description, and every number below
 is read off the RTL or measured with the workload named):
 
-- **Three-wide dispatch and retire behind a decoupled fetch stream.** The fetch stream
-  reads one 16-byte pair per cycle from the instruction cache into a fetch ring, ahead of
-  decode; an aligner emits up to three RVC or 32-bit instructions per cycle into an 8-entry
-  decoupling queue; three ROB entries are allocated and up to three retired per cycle.
-- **A status-only reorder buffer.** 32 entries of 17 bits each: no values, no PCs, no
-  operands. A second, *irrevocable* pointer walks ahead of the head over completed entries
-  and commits stores early, so a store never holds retirement for the cache's write.
-  Squash is pointer-only; there is nothing to walk.
-- **A unified physical register file in four shards, one write port each.** Duplication
-  buys read ports; sharding by writer is what buys write ports. Each ALU owns a shard
-  alone; loads and the system queue share one, and the FP stage (the FPU and the one-cycle
-  FP operations beside it), the multiply/divide stage and the jump link share the last,
-  taking turns through one yield gate. So the integer
-  schedulers carry no unit-busy term at all.
-- **Four schedulers, no age matrix.** Two integer schedulers (one per ALU), one in-order
-  memory scheduler, and one for FP arithmetic, branches, jumps, multiplies and divides that
-  reorders them freely. Each has fixed-priority select and wake-at-select, so a dependent
-  issues the cycle after its producer. Entries hold only
-  physical register tags and ready bits; the execute payload sits in a separate LUTRAM
-  indexed by scheduler entry, never by ROB slot.
-- **Rename with one-cycle rollback.** Speculative and committed maps, per-shard free lists
-  with a speculative and a committed head; recovery is `head := committed head`, with no
-  walk, because rename never writes the free-list array.
-- **Loads that leave the pipeline.** A plain load or store only *translates* in stage M
-  and leaves; the load queue and the store queue reach memory later through one
-  pre-translated port, the store winning. A load with no older store in the queue starts
-  its access in the same cycle; the queue holds a load behind an older store only when the
-  addresses may alias. Up to eight loads are in flight to the data cache at once, matched
-  by the load-queue tag they carry. The store queue is senior to retirement: a committed
-  store's ROB slot retires while its bytes drain behind it, and a redirect flushes only the
-  uncommitted tail.
+- **Four-wide dispatch and retire behind a decoupled fetch stream.** The fetch stream
+  reads one 16-byte pair per cycle from the instruction cache into a 32-halfword fetch ring,
+  ahead of decode, whose instruction boundaries are found as the bytes arrive; up to six RVC or
+  32-bit instructions a cycle go from it into a 16-entry decoupling queue; up to four are
+  renamed and dispatched a cycle, consecutive instructions to consecutive lanes (the lanes
+  rotate, so each takes every fourth with no steering), and up to four retire.
+- **A status-only reorder buffer.** 64 rows of four, of which 228 entries are live at once
+  (the 9-bit sequence number that orders restarts bounds the window), 25 bits each: the
+  destination and its new and previous mappings -- no values, no PCs, no operands. A second,
+  *irrevocable* pointer walks ahead of the head over completed entries and commits stores
+  early, so a store never holds retirement for the cache's write. A mispredict recovers from
+  its resolve: a walk from the tail back to the branch restores each dead entry's previous
+  mapping and returns its register, and a kill by age drops the dead ops everywhere at once
+  while fetch restarts; a branch that reaches the head first squashes there.
+- **A physical register file sharded by writer.** Six shards of 64 registers, one write port
+  each: one per lane, written by that lane's write register alone (its ALU and multiply
+  results, and every load, divide, CSR and FP integer result it lands), and two for FP (the FP
+  loads', the FP stage's). Duplication buys read ports, nine per integer shard; sharding by
+  writer is what buys write ports.
+- **A scheduler per lane, no age matrix.** Four integer schedulers of ten entries, one per lane,
+  and an eight-entry FP scheduler behind an eight-entry FIFO. Each selects by fixed priority
+  with wake-at-select, so a dependent issues the cycle after its producer, and an op's operand
+  bypass is its scheduler's registered wake match, so the execute cycle compares no tag. An
+  address generator may issue on a load's data-cache lookup before it answers: a load's result
+  used as an address is three cycles away, any other use four. Entries hold only physical
+  register tags and ready bits; the execute payload sits in a separate LUTRAM indexed by
+  scheduler entry, never by ROB slot.
+- **Rename with a map copy per lane.** A speculative map in one copy per rename slot (a register
+  names the copy that holds its newest mapping) and a committed map, per-shard free lists with a
+  speculative and a committed head; the walk restores the map after a mispredict, and after a
+  squash at the head a sweep rewrites the registers renamed since from the committed map.
+- **Loads that leave the pipeline.** Loads and stores generate their address in their lane and
+  reach memory through a 16-entry load queue and a 32-entry store queue; stage M takes them in
+  the order their addresses arrive and starts a load's access in the same cycle when no older
+  store is in its way. A store that holds every byte of a younger load forwards them; a load
+  may go ahead of older stores whose addresses are unknown unless a 256-entry table of 2-bit
+  counters says it has collided before. Up to 16 loads are in flight to the data cache at once,
+  matched by the load-queue tag they carry. The store queue is senior to retirement: a
+  committed store's ROB slot retires while its bytes drain behind it, and a redirect flushes
+  only the uncommitted tail.
 - **System operations at the head, from flops.** CSR accesses, fences and the traps decided
   at dispatch (illegal instructions, fetch faults) wait in a one-entry system queue and fire
   when they reach the ROB head, from registers, so none of them sits in the memory stage's
   completion path; the memory stage holds only loads, stores, AMOs and cache operations.
-  Multiplies and divides run in their own stage and land by tag.
+  Each lane multiplies in three cycles; divides run in their own stage and land by tag.
 - **A tagged, four-deep FPU.** CVFPU (fpnew) with four operations in flight, results
   returned by tag and out of order, and its own scheduler and execute stage, so FP
   arithmetic never enters the memory stage and cannot block it; FP operations issue out of
   order among themselves.
-- **Prediction at the fetch stream.** A 2048-entry BTB and a 2048-entry YAGS corrector in
-  eight block-RAM banks, an 11-bit global history carried with each instruction, and an
-  8-entry return stack predict each 16-byte pair as it is fetched, keyed by a
-  control-transfer instruction's last halfword; an 8-entry prediction queue carries each
-  prediction's state to the instruction it names. Neither table has a valid bit: validity
-  is the tag match.
+- **Prediction at the fetch stream.** A 2048-entry BTB (eight halfword banks of two skewed
+  ways in block RAM, taken-only: a branch is allocated when it resolves taken), a 2048-entry
+  YAGS corrector in eight distributed-RAM banks, an 11-bit path history carried with each
+  instruction, and an 8-entry return stack predict each 16-byte pair as it is fetched, keyed by
+  a control-transfer instruction's last halfword; an 8-entry prediction queue carries each
+  prediction's state to the instruction it names, and a 32-entry training queue trains each
+  one once it can no longer be squashed. Neither table has a valid bit: validity is the tag
+  match.
 - **Caches built from what the part has.** A 128 KiB two-way instruction cache that is
   virtually indexed and hits on its virtual tag and an epoch, reconciling by physical tag
-  only on a miss, so a hit needs no translation; it reads a 16-byte pair every cycle, and its
-  valid bits are banked into 64-row LUTRAMs so `fence.i` clears them in 64 cycles; its 64-byte
+  only on a miss, so a hit needs no translation; it reads a 16-byte pair every cycle, stores
+  probe it, so `fence.i` keeps it unless a device has written memory since, and its 64-byte
   lines sit in even/odd 64-bit block-RAM banks. A 128 KiB, 32-way write-back data cache, its
   set inside the page offset so no line can have a synonym, that never blocks on a miss: two
   lookups a cycle, one for a load, answered by tag two cycles later, and one for a committed
@@ -107,11 +118,12 @@ is read off the RTL or measured with the workload named):
   beat by beat as they arrive), write-backs land in it, and a DMA master's line is cleaned or
   flushed in it after the data cache.
 - **Virtual memory as Linux expects it.** Sv39 with hardware page-table walkers, a
-  2048-entry direct-mapped dTLB (8 MiB of reach) and a 64-entry iTLB, superpages, Ssvnapot leaves, Svpbmt non-cacheable mappings plus Zicbom
+  64-entry dTLB and iTLB, each backed by a second level (2048 and 512 entries: 8 MiB and 2 MiB
+  of reach), superpages, Ssvnapot leaves, Svpbmt non-cacheable mappings plus Zicbom
   and Zicboz cache-management operations. Misaligned loads and stores are handled in hardware,
-  including across cache lines. The physical address space is 36 bits, capped at the
-  instance's top of DRAM: the MMU range-checks every resolved physical address and faults
-  rather than dropping the access.
+  including across cache lines. Every physical address the core holds is 33 bits, the
+  top of its 4 GiB DRAM window, and wider for a larger one: the MMUs range-check every resolved
+  physical address and fault rather than drop the access.
 - **Interrupts through the trap path.** An external or timer interrupt is injected as a
   pseudo-op that traps in stage M, so traps, faults and interrupts share one precise
   mechanism; a pending interrupt waits out a page-straddling fetch rather than abandoning
