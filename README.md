@@ -279,12 +279,14 @@ tools/gate.sh                                 # build, program, boot Ubuntu to l
 ```
 
 The board boots through the ROM monitor, which turns the VGA output on at reset (640x480, the
-device tree's framebuffer): a splash, and a console that shows everything it prints. It waits at
+device tree's framebuffer): a splash, and a console that shows everything it prints; `V` followed
+by an X11 modeline sets another mode, up to a 166.67 MHz pixel clock (`tools/vga-mode.py` prints
+the line and the device tree's matching framebuffer node). It waits at
 its prompt. `go [dir]`, or key[0], boots from the TFTP server on coffee (tftpd-hpa serving
 `/srv/tftp`): the monitor takes an address by DHCP and runs `dir/boot.txt`, monitor commands
 that load the OpenSBI+Linux payload and the device tree (`N<addr> <file>`) and jump to the
 payload; without `boot.txt` it loads `fw_payload.bin` at `0x8000_0000` and `smolrv64.dtb` at
-`0xffdf_f000`. `B` boots the same way from the SD card's EFI System Partition
+`0xfeff_f000`. `B` boots the same way from the SD card's EFI System Partition
 (`/smolrv64/boot.txt`, for demos; `workloads/sdboot/install-esp.sh` puts the files there), and
 `workloads/ubuntu/ubuntu-boot.sh` uploads over the serial console at 3 Mbaud. The device tree
 decides the root filesystem: `ubuntu-nfs.dtb` mounts NFS, `ubuntu-sd.dtb` the SD card's first

@@ -17,12 +17,13 @@
 //   X<addr> [a0 [a1]] - jump to address and execute
 //   P                - dump core debug counters; Pc clears them
 //   M [<addr> <len> [n]] - test DRAM, all of it by default, n passes or until a key (memtest.c)
+//   V [modeline]     - the screen's mode; with an X11 modeline, set it (video.c)
 //   ?                - help
 //
 // BOOT SCRIPTS: monitor command lines, one per line, '#' starts a comment; a failing line stops
 // the script at the prompt. The monitor never boots by itself: `go` (or key[0] pressed at the
 // prompt) runs boot.txt from the TFTP server, `B` runs /smolrv64/boot.txt from the SD card.
-// Without a boot.txt, either loads fw_payload.bin at 0x80000000 and smolrv64.dtb at 0xffdff000
+// Without a boot.txt, either loads fw_payload.bin at 0x80000000 and smolrv64.dtb at 0xfefff000
 // and jumps to the payload with the DTB.
 
 #include "mon.h"
@@ -441,7 +442,7 @@ static int run_default(char ld, const char *dir)
 {
     static char t[3 * LINE_MAX];
     int k = 0;
-    const char *lines[3] = { "80000000 fw_payload.bin", "ffdff000 smolrv64.dtb", 0 };
+    const char *lines[3] = { "80000000 fw_payload.bin", "fefff000 smolrv64.dtb", 0 };
     for (int i = 0; lines[i]; i++) {
         t[k++] = ld;
         for (const char *c = lines[i]; *c; c++) {
@@ -450,7 +451,7 @@ static int run_default(char ld, const char *dir)
         }
         t[k++] = '\n';
     }
-    for (const char *c = "X80000000 0 ffdff000\n"; *c; c++) t[k++] = *c;
+    for (const char *c = "X80000000 0 fefff000\n"; *c; c++) t[k++] = *c;
     puts_("no boot.txt: the default\n");
     return run_script(t, (uint64_t)k);
 }
@@ -730,6 +731,11 @@ static int run_cmd(const char *p)
         puts_("P                dump core debug counters; Pc clears them\n");
         puts_("E                integrity log: which invariant fired, and when\n");
         puts_("M [<addr> <len> [n]] test DRAM (all of it), n passes or until a key\n");
+        puts_("V [modeline]     the screen's mode; set it from an X11 modeline:\n");
+        puts_("                 V 162 1600 1664 1856 2160 1200 1201 1204 1250 +hsync +vsync\n");
+
+    } else if (*p == 'V' || *p == 'v') {
+        return video_cmd(p + 1);
 
     } else if (*p != 0) {
         puts_("unknown command (? for help)\n");

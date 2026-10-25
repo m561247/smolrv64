@@ -24,11 +24,11 @@ cd "$(dirname "$0")"
 DTB=${DTB:-ubuntu-nfs.dtb}
 FW=${FW:-fw_payload.bin}
 INITRD=${INITRD:-tiny128.cpio}
-# The DTB and initrd sit below the framebuffer at the top of DRAM (ubuntu-nfs.dts.in): 2 MiB
-# down, room for a framebuffer up to 1024x768.
-DTB_ADDR=${DTB_ADDR:-ffdff000}
+# The DTB and initrd sit just below the framebuffer region, the top 16 MiB of 2 GiB
+# (ubuntu-nfs.dts.in): the DTB in the 4 KiB under 0xFF00_0000, the initrd below it.
+DTB_ADDR=${DTB_ADDR:-fefff000}
 FW_ADDR=${FW_ADDR:-80000000}
-INITRD_ADDR=${INITRD_ADDR:-ff42b000}
+INITRD_ADDR=${INITRD_ADDR:-fe62b000}
 LOG=${LOG:-screenlog.0}
 TIMEOUT=${TIMEOUT:-900}   # seconds per xmodem transfer
 CHAR_DELAY=${CHAR_DELAY:-0.02}
@@ -131,7 +131,7 @@ if [[ -n "${INITRD:-}" && -f "$INITRD" ]]; then
     n=3
     send_file "$INITRD_ADDR" "$INITRD" $((base + 3))
 fi
-# The monitor turns the scanout on at reset in its reset mode, 640x480@60 at 0xFFF0_0000 -- the
+# The monitor turns the scanout on at reset in its reset mode, 640x480@60 at 0xFF00_0000 -- the
 # DTB's framebuffer -- and VGA=1 asks for that again. VGA=<mode> (tools/vga-mode.py --list)
 # programs another mode; the DTB's framebuffer node must then be the one the tool prints.
 if [[ "${VGA:-0}" == 1 ]]; then
@@ -144,7 +144,7 @@ elif [[ "${VGA:-0}" != 0 ]]; then
              "put tools/vga-mode.py $VGA's DTS lines in ubuntu-nfs.dts.in" >&2
         exit 1
     fi
-    while read -r cmd; do send_line "$cmd"; done < <(../../tools/vga-mode.py "$VGA" | grep '^WW')
+    send_line "$(../../tools/vga-mode.py "$VGA" | grep '^V ')"
 fi
 send_line "X${FW_ADDR} 0 ${DTB_ADDR}"
 echo "[ubuntu-boot] done"

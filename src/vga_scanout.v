@@ -27,8 +27,10 @@
 //   0x40 DRP          write {we[31], addr[22:16], data[15:0]} starts one access of the pixel
 //                     clock's MMCM; read gives {busy[31], last read data[15:0]}
 //   0x44 PIXCLK_CTRL  [0] hold the pixel-clock MMCM in reset
-// Reset values are VESA 640x480@60 (25 MHz, negative syncs) at FB_BASE 0xFFF0_0000, the top MiB
-// of 2 GiB, where simmerv places a framebuffer of that size; the board's MMCM comes up at 25 MHz.
+// Reset values are VESA 640x480@60 (negative syncs) at FB_BASE 0xFF00_0000, the base of the
+// framebuffer region, the top 16 MiB of 2 GiB. The board's MMCM comes up at 166.67 MHz, the clock
+// the pixel domain is timed at, so the ROM monitor sets each mode's clock over DRP -- its reset
+// mode's 25 MHz included -- before it enables the scan (workloads/monitor/video.c).
 //
 // Pixels are RGB565, little-endian, four to a 64-bit beat; the output is the top two bits of
 // each channel (RGB222, for the TinyVGA adapter).
@@ -96,7 +98,7 @@ module vga_scanout (
    always @(posedge clk) begin
       if (reset) begin
          en <= 1'b0;  hs_pol <= 1'b0;  vs_pol <= 1'b0;
-         fb_base <= 32'hFFF0_0000;  stride <= 13'd1280;
+         fb_base <= 32'hFF00_0000;  stride <= 13'd1280;
          h_active <= 12'd640;  h_sync_start <= 12'd656;  h_sync_end <= 12'd752;  h_total <= 12'd800;
          v_active <= 12'd480;  v_sync_start <= 12'd490;  v_sync_end <= 12'd492;  v_total <= 12'd525;
          pixclk_rst <= 1'b0;

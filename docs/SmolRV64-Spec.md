@@ -1805,7 +1805,7 @@ dTLB's one walker. A sequential stream of 8-byte loads is held by the load queue
 | CLINT | `0x0200_0000` | 64 KiB |
 | PLIC | `0x0c00_0000` | 64 MiB |
 | UART (NS16550) | `0x1000_0000` | 8 byte registers |
-| ui_clk device pages, one 4 KiB page each: virtio-blk `0x1000_2000`, virtio-net `0x1000_3000`, virtio keyboard and mouse `0x1000_4000` (fed by `tools/hid-bridge` on header J1 pin 4, IO1_P), VGA scanout `0x1000_5000` (not in the DTB; 640x480@60 from reset, RGB565 at `0xFFF0_0000`, the DTB's framebuffer, turned on by the monitor), the board's keys `0x1000_6000` (`[3:0]` held now, `[11:8]` pressed since the CPU's reset, write 1 to clear; key[0] pressed at the monitor's prompt boots over TFTP (`go`), key[1] steers UART RX); page `0x1000_7000` reads 0 | `0x1000_2000` | 24 KiB |
+| ui_clk device pages, one 4 KiB page each: virtio-blk `0x1000_2000`, virtio-net `0x1000_3000`, virtio keyboard and mouse `0x1000_4000` (fed by `tools/hid-bridge` on header J1 pin 4, IO1_P), VGA scanout `0x1000_5000` (not in the DTB; RGB565 at `0xFF00_0000`, the base of the DTB's 16 MiB framebuffer region; its pixel clock comes up at 166.67 MHz, the clock it is timed at, and the monitor sets each mode's over DRP -- 640x480@60 at reset, another from an X11 modeline with its `V` command -- and turns it on), the board's keys `0x1000_6000` (`[3:0]` held now, `[11:8]` pressed since the CPU's reset, write 1 to clear; key[0] pressed at the monitor's prompt boots over TFTP (`go`), key[1] steers UART RX); page `0x1000_7000` reads 0 | `0x1000_2000` | 24 KiB |
 
 **virtio-net offers `VIRTIO_NET_F_MAC`**: its config space holds the board's MAC, the FPGA's
 96-bit device DNA (`DNA_PORTE2`, read once after the memory controller's reset) folded to 32

@@ -21,7 +21,7 @@ typedef unsigned long      uint64_t;
 
 // The framebuffer, RGB565 in DDR (video.c): the device tree's framebuffer node.
 #ifndef FB_BASE
-#define FB_BASE 0xFFF00000ul
+#define FB_BASE 0xFF000000ul
 #endif
 
 // Integrity log (rv_soc_top.v, the window the fetch-buffer diagnostic used to own,
@@ -77,6 +77,7 @@ void net_quiesce(void);
 // video.c: the screen, a splash and a console mirroring the monitor's output
 void video_init(void);
 void video_putc(char c);
+int  video_cmd(const char *args);                // V: show or set the mode (an X11 modeline)
 
 // disk.c: the SD card's EFI System Partition, read-only
 int  disk_load(const char *path, uint64_t addr, uint64_t max, uint64_t *size);   // -2: no such file

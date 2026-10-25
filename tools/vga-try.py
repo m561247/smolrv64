@@ -23,14 +23,15 @@ and LOG (default ~/smolrv64/workloads/ubuntu/screenlog.0). The script
   5. reads STATUS back: pixel clock locked, and lines fetched late (the DRAM bandwidth check).
 
 The pattern's outermost pixels are a 1-pixel white border, so a monitor's auto-adjust has edges
-to lock onto and any cropping is plain to see. The framebuffer goes where simmerv's
-`--graphics WxH` would put it, and the script prints the matching DTS lines, so a mode that
-looks right can be booted (ubuntu-nfs.dts.in, then `VGA=1` after setting the mode).
+to lock onto and any cropping is plain to see. The pattern goes where simmerv's `--graphics WxH`
+would put its framebuffer, clear of the monitor's console at 0xFF00_0000 for a frame up to 8 MiB.
+A mode that looks right boots with the monitor's V command and the device-tree node the script
+prints (the fixed 16 MiB region at 0xFF00_0000, as tools/vga-mode.py prints it).
 
 Limits: the width must be a multiple of 32 (the stride, W*2, a multiple of 64), at most 2048;
 totals at most 4095. The pixel clock is 1000/D MHz, so the refresh rate moves a little from
-the modeline's (printed). The bitstream's pixel-clock logic was timed at 40 MHz; much faster
-clocks are untested, as is any clock change on the board at all (the DRP path, 2026-10-04).
+the modeline's (printed). The bitstream's pixel-clock logic is timed at 166.67 MHz (D = 6),
+the fastest clock it takes.
 """
 import argparse
 import os
@@ -84,9 +85,11 @@ def check(mhz, hs, vs):
     for name, t in (('horizontal', hs), ('vertical', vs)):
         if not (t[0] <= t[1] <= t[2] <= t[3]) or t[3] > 4095:
             bad.append(f'{name} timings {t} are not active <= sync start <= sync end <= total <= 4095')
+    d = round(VCO_MHZ / mhz)
+    if not 6 <= d <= 128:
+        bad.append(f'{mhz} MHz is outside 7.8 to 166.67 MHz (1000 / D, D = 6 to 128)')
     if bad:
         sys.exit('\n'.join(bad))
-    d = max(1, min(128, round(VCO_MHZ / mhz)))
     return d
 
 
@@ -289,8 +292,6 @@ def main():
           f'{(real / mhz - 1) * 100:+.1f}%), {real * 1e6 / hs[3] / 1e3:.2f} kHz, '
           f'{real * 1e6 / (hs[3] * vs[3]):.2f} Hz; {"+" if hpos else "-"}hsync {"+" if vpos else "-"}vsync')
     print(f'framebuffer {size // 1024} KiB at {base:#x}, stride {w * 2}')
-    if real > 40.5:
-        print(f'note: {real:.1f} MHz is above the 40 MHz the bitstream\'s pixel-clock logic was timed at')
     if not mon.at_prompt():
         sys.exit('the board is not at the monitor\'s ">" prompt (reprogram it)')
 
@@ -298,9 +299,9 @@ def main():
     mon.ww(CTRL, 0)
     mon.ww(PIXRST, 1)
     r1, r2 = drp(mon, 0x08), drp(mon, 0x09)
-    high, low = (1, 1) if d == 1 else (d // 2, d - d // 2)
+    high, low = d // 2 & 63, (d - d // 2) & 63                           # 64 is 0
     n1 = (r1 & 0xf000) | high << 6 | low                                 # keep phase mux, reserved
-    n2 = (r2 & 0xff3f) | (d & 1 and d > 1) << 7 | (d == 1) << 6           # edge, no_count
+    n2 = (r2 & 0xff3f) | (d & 1) << 7                                    # edge for an odd divider
     if not a.dry_run:
         print(f'DRP CLKOUT0: reg 0x08 {r1:#06x} -> {n1:#06x}, reg 0x09 {r2:#06x} -> {n2:#06x}')
     drp(mon, 0x08, n1)
@@ -334,9 +335,9 @@ def main():
     if not a.dry_run:
         print(f'pixel clock {"LOCKED" if st & 1 else "NOT LOCKED"}; lines fetched late: '
               f'{st2 >> 16} (+{(st2 >> 16) - (st >> 16)} in the last ~2 s)')
-    print('\n# to boot Linux in this mode -- ubuntu-nfs.dts.in, and simmerv --graphics '
-          f'{w}x{h}:\n/memreserve/ {base:#x} {size:#x};')
-    print(f'\tframebuffer@{base:x} {{ compatible = "simple-framebuffer"; reg = <0 {base:#x} 0 {size:#x}>; '
+    print(f'\n# to boot Linux in this mode: at the monitor,\nV {mhz:g} {" ".join(map(str, hs + vs))} '
+          f'{"+" if hpos else "-"}hsync {"+" if vpos else "-"}vsync\n# and in ubuntu-nfs.dts.in:')
+    print(f'\tframebuffer@ff000000 {{ compatible = "simple-framebuffer"; reg = <0 0xff000000 0 0x1000000>; '
           f'width = <{w}>; height = <{h}>; stride = <{w * 2}>; format = "r5g6b5"; }};')
 
 

@@ -23,8 +23,8 @@ cp "$DTB" "$MNT/smolrv64/smolrv64.dtb"
 {
    echo "# The smolrv64 ROM monitor runs these lines at autoboot; '#' starts a comment line."
    echo "L80000000 /smolrv64/fw_payload.bin"
-   echo "Lffdff000 /smolrv64/smolrv64.dtb"
-   echo "X80000000 0 ffdff000"
+   echo "Lfefff000 /smolrv64/smolrv64.dtb"
+   echo "X80000000 0 fefff000"
 } > "$MNT/smolrv64/boot.txt"
 sync
 echo "installed on $ESP:"; ls -la "$MNT/smolrv64"; cat "$MNT/smolrv64/boot.txt"

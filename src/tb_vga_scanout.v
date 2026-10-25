@@ -139,9 +139,9 @@ module tb_vga_scanout;
    initial begin
       repeat (10) @(posedge clk);
       reset = 1'b0;
-      if (dut.h_total != 12'd800 || dut.v_total != 12'd525 || dut.fb_base != 32'hFFF0_0000
-          || dut.hs_pol || dut.vs_pol)
-         $fatal(1, "reset values are not 640x480@60 at 0xFFF00000");
+      if (dut.h_active != 12'd640 || dut.h_total != 12'd800 || dut.v_active != 12'd480 || dut.v_total != 12'd525
+          || dut.stride != 13'd1280 || dut.fb_base != 32'hFF00_0000 || dut.hs_pol || dut.vs_pol)
+         $fatal(1, "reset values are not 640x480@60 at 0xFF000000");
       // One burst per line, then three; odd porches so an off-by-one shows.
       run_mode(32, 35, 39, 44, 6, 7, 9, 11, 32'd64);
       run_mode(96, 101, 110, 117, 5, 6, 8, 9, 32'd192);

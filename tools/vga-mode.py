@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
-"""Program vga_scanout for a video mode: the ROM-monitor commands and the matching device tree.
+"""A video mode for vga_scanout: the ROM monitor's V command and the matching device tree.
 
-    tools/vga-mode.py 1024x768@60      # monitor commands, then the DTS lines
+    tools/vga-mode.py 1024x768@60      # the V line, then the DTS lines
     tools/vga-mode.py --list
 
 The pixel clock is vga_mmcm_inst's CLKOUT0 = VCO / divider, with the VCO fixed at 1000 MHz
-(rk_xcku5p.v: ui_clk 333.33 MHz / 2 * 6). Only CLKOUT0's divider is rewritten over DRP: the
-VCO never moves, so the lock and filter settings, which depend only on M, stay valid. An
+(rk_xcku5p.v: ui_clk 333.33 MHz / 2 * 6), and the bitstream is timed at the divider it comes up
+at, 6 (166.67 MHz). The monitor's V command takes an X11 modeline, picks the integer divider
+nearest its clock and rewrites only CLKOUT0's divider over DRP (workloads/monitor/video.c). An
 integer divider cannot hit every VESA clock exactly; the refresh rate moves instead, and the
 table says by how much.
 
-The framebuffer is placed as simmerv's `--graphics WxH` places it (src/lib.rs
-setup_framebuffer): W*H*2 bytes rounded up to a power of two, at the top of 2 GiB of DRAM,
-aligned to that size. The DTS lines replace the 640x480 ones in workloads/ubuntu/ubuntu-nfs.dts.in,
-and the DTB and initrd must load below the framebuffer (ubuntu-boot.sh: DTB_ADDR, INITRD_ADDR).
-
-DRP layout (CLKOUT0, XAPP888's MMCME3/MMCME4 tables -- CHECK ON THE BOARD, untested so far):
-  0x08 ClkReg1: [15:13] phase mux  [12] reserved  [11:6] high time  [5:0] low time
-  0x09 ClkReg2: [15] reserved  [14:12] frac  [11] frac_en  [10] frac_wf_r  [9:8] mx
-                [7] edge  [6] no_count  [5:0] delay time
-XAPP888 read-modify-writes these, keeping the reserved bits; this writes them as the board
-reads them back (ClkReg1 bit 12 set), and tools/vga-try.py does the read-modify-write.
+The framebuffer is the base of a fixed 16 MiB region at the top of 2 GiB of DRAM (0xFF00_0000),
+whatever the mode: room for any mode up to 4K30 at 16 bpp, and one place for the monitor, the
+device tree and the boot script to agree on. The DTS lines replace the framebuffer node in
+workloads/ubuntu/ubuntu-nfs.dts.in, and the DTB and initrd load below the region (ubuntu-boot.sh:
+DTB_ADDR, INITRD_ADDR). (simmerv's `--graphics WxH` places its own framebuffer at the top of 2 GiB,
+aligned to its size rounded up to a power of two, and describes it in its own device tree.)
 """
 import argparse
 import sys
 
 VCO_MHZ = 1000.0
-PAGE = 0x1000_5000
 DRAM_TOP = 0x1_0000_0000
+FB_SIZE = 16 << 20                       # the framebuffer region, at DRAM_TOP - FB_SIZE
 
 # name: (VESA pixel clock MHz, h active/sync start/sync end/total, v ..., hsync+, vsync+)
 MODES = {
@@ -37,26 +33,19 @@ MODES = {
     '800x600@72':   (50.0,   (800, 856, 976, 1040),    (600, 637, 643, 666),   True,  True),
     '1024x768@60':  (65.0,   (1024, 1048, 1184, 1344), (768, 771, 777, 806),   False, False),
     '1280x1024@60': (108.0,  (1280, 1328, 1440, 1688), (1024, 1025, 1028, 1066), True, True),
+    # VESA's 1600x1200@60 timing (162 MHz) at the fastest clock, 166.67 MHz: 61.7 Hz
+    '1600x1200@60': (162.0,  (1600, 1664, 1856, 2160), (1200, 1201, 1204, 1250), True, True),
 }
 
 
 def divider(mhz):
-    return max(1, min(128, round(VCO_MHZ / mhz)))
-
-
-def clkout0_regs(d):
-    if d == 1:
-        return 0x1041, 0x0040                       # high = low = 1, no_count
-    high, low = d // 2, d - d // 2
-    # Bit 12 of ClkReg1 is reserved and reads back SET in this bitstream's MMCM (0x130d at /25,
-    # read over DRP on the board, 2026-10-04): written blind, it must stay set. tools/vga-try.py
-    # read-modify-writes instead.
-    return 0x1000 | (high << 6) | low, (d & 1) << 7  # edge for an odd divider
+    return round(VCO_MHZ / mhz)
 
 
 def placement(w, h):
-    size = max(4096, 1 << (w * h * 2 - 1).bit_length())
-    return (DRAM_TOP - size) & ~(size - 1), size
+    if w * h * 2 > FB_SIZE:
+        sys.exit(f'{w}x{h}: {w * h * 2} bytes do not fit the {FB_SIZE >> 20} MiB framebuffer region')
+    return DRAM_TOP - FB_SIZE, FB_SIZE
 
 
 def describe(name):
@@ -86,21 +75,12 @@ def main():
     if stride % 64:
         sys.exit(f'{a.mode}: stride {stride} is not a multiple of 64 bytes')
     base, size = placement(w, h)
-    reg1, reg2 = clkout0_regs(d)
 
     print(f'# {a.mode}: pixel clock {real:.3f} MHz (VCO {VCO_MHZ:.0f} / {d}), {refresh:.2f} Hz;'
           f' framebuffer {size // 1024} KiB at {base:#x}')
-    print('# monitor commands, before X (ubuntu-boot.sh sends these with VGA=<mode>):')
-    cmds = [(0x00, 0)]                                        # disable while the mode changes
-    cmds += [(0x44, 1)]                                       # hold the MMCM in reset
-    cmds += [(0x40, (1 << 31) | (0x08 << 16) | reg1), (0x40, (1 << 31) | (0x09 << 16) | reg2)]
-    cmds += [(0x44, 0)]                                       # release; wait for STATUS[0]
-    cmds += [(0x04, base), (0x08, stride)]
-    cmds += [(0x10 + 4 * i, x) for i, x in enumerate(hs)] + [(0x20 + 4 * i, x) for i, x in enumerate(vs)]
-    cmds += [(0x00, 1 | (hpos << 1) | (vpos << 2))]
-    for off, val in cmds:
-        print(f'WW{PAGE + off:08x} {val:x}')
-    print(f'# then R{PAGE + 0x30:08x}: bit 0 (pixel clock locked) must be 1')
+    print('# the monitor command, before X (ubuntu-boot.sh sends it with VGA=<mode>):')
+    sync = lambda pos, n: ('+' if pos else '-') + n
+    print('V', f'{mhz:g}', *hs, *vs, sync(hpos, 'hsync'), sync(vpos, 'vsync'))
     print()
     print('# device tree (ubuntu-nfs.dts.in):')
     print(f'/memreserve/ {base:#x} {size:#x};')

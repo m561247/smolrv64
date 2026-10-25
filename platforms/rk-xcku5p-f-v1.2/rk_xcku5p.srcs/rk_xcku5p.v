@@ -1281,11 +1281,13 @@ module rk_xcku5p(
    // header pins RGB222. Its registers are page 0x05 (0x1000_5000), programmed and enabled by the
    // ROM monitor at reset (its splash and console); Linux never touches them.
    //
-   // The pixel clock: an MMCM fed from ui_clk, VCO 1000 MHz (333.33 / 2 * 6), CLKOUT0 / 40 =
-   // 25 MHz -- VESA 640x480@60 (59.5 Hz at 25.0 MHz), vga_scanout's reset mode. Software changes the mode by
-   // rewriting CLKOUT0's divider over DRP (tools/vga-mode.py): the VCO never moves, so the
-   // MMCM's lock and filter settings, which depend only on M, stay valid. DCLK is ui_clk / 2
-   // (DRP's limit is below ui_clk), from a BUFGCE_DIV, so ui_clk <-> DCLK is synchronous.
+   // The pixel clock: an MMCM fed from ui_clk, VCO 1000 MHz (333.33 / 2 * 6), CLKOUT0 / 6 =
+   // 166.67 MHz at configuration -- the fastest clock any mode gets (1600x1200 at 61.7 Hz), so the
+   // pixel domain is timed at it and every slower mode is covered. The ROM monitor sets each mode,
+   // vga_scanout's 640x480 reset mode (/40) included, by rewriting CLKOUT0's divider over DRP (its
+   // V command, workloads/monitor/video.c): the VCO never moves, so the MMCM's lock and filter
+   // settings, which depend only on M, stay valid. DCLK is ui_clk / 2 (DRP's limit is below
+   // ui_clk), from a BUFGCE_DIV, so ui_clk <-> DCLK is synchronous.
    wire        vga_pixclk_rst, vga_pixclk_locked;
    wire        vga_drp_req, vga_drp_we;   wire [6:0] vga_drp_addr;   wire [15:0] vga_drp_di;
    wire        vga_mmcm_fb, vga_pix_unbuf, vga_pix_clk, vga_drp_clk;
@@ -1325,7 +1327,7 @@ module rk_xcku5p(
       .CLKIN1_PERIOD      (3.000),
       .DIVCLK_DIVIDE      (2),
       .CLKFBOUT_MULT_F    (6.000),
-      .CLKOUT0_DIVIDE_F   (40.000),             // 25 MHz: 640x480@60 (vga_scanout's reset mode)
+      .CLKOUT0_DIVIDE_F   (6.000),              // 166.67 MHz: the fastest mode, timed (the monitor sets each)
       .CLKOUT0_DUTY_CYCLE (0.5),
       .CLKOUT0_PHASE      (0.0)
    ) vga_mmcm_inst (
