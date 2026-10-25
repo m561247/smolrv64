@@ -1479,7 +1479,8 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   store holds them (its first byte at bit 0; the load's landing shift is its offset past the
   store's, recorded at the start), wait in the forward queue, two deep, and land by the load's tag, through the
   fast path's formatting, in the first cycle the D$ returns no response, the older first. A forward
-  starts while another waits; `fw_busy` says both slots are full. The queue is a ring: the free
+  starts while another waits; `fw_busy`, a register loaded with next cycle's count, says both slots
+  are full. The queue is a ring: the free
   slot `fw_wp` names takes each cycle's candidate whether it starts or not, a start moves `fw_wp`
   on and a landing `fw_rp`, so neither the start nor the D$'s response reaches a slot's write. The
   landing's tag is a register of its own (`fw_tag0`, the older forward's as the ring will stand next

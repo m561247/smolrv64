@@ -688,7 +688,16 @@ module smolrv64_lsu
    initial begin fw_n = 2'd0; fw_wp = 1'b0; fw_rp = 1'b0; end
    assign fw_any  = (fw_n != 2'd0);
    assign fw_inj  = fw_any & ~mem_rvalid_c;
-   assign fw_busy = (fw_n == 2'd2);
+   // both slots full, as a register loaded with next cycle's count: the queue's candidate pick masks
+   // a forwarding load with it, ahead of the start and every per-tag write it makes
+   reg             fw_busy_q;
+   initial fw_busy_q = 1'b0;
+   always @(posedge clk) begin
+      fw_busy_q <= ~reset & ((fw_n + {1'b0, fw_go} - {1'b0, fw_inj}) == 2'd2);
+      if (!reset && (fw_busy_q != (fw_n == 2'd2)))
+         $fatal(1, "smolrv64_lsu: the registered busy %b is not the forward count's (%0d waiting)", fw_busy_q, fw_n);
+   end
+   assign fw_busy = fw_busy_q;
    reg  [LDTW-1:0] fw_tag0;                               // the older's tag: it lands first
    initial fw_tag0 = {LDTW{1'b0}};
    wire [63:0]     fw_q0   = fw_q[fw_rp];
