@@ -211,8 +211,8 @@ module smolrv64_predictor
    // lag -- so this pair's direction never reaches the next pair's read index; the folded history
    // the rows were read with is registered (yh_q) and carried in the index training uses.
    wire [YB-1:0]   yh      = yfold(flush ? rs_ghr : ghr);
-   reg  [YB-1:0]   yh_q;
-   initial yh_q = {YB{1'b0}};
+   reg  [YB-1:0]   yh_q, yr_q;
+   initial begin yh_q = {YB{1'b0}};  yr_q = {YB{1'b0}}; end
 
    // ------------------------------------------------------------ this pair's prediction
    // bq[k]/yq[k] are bank k's rows read for sa_q: halfword k of the pair. Every position evaluates
@@ -296,7 +296,7 @@ module smolrv64_predictor
       wire [YEW-1:0] me_c = yq[gm];
       wire           me_y = ~me_e[TGTW+2] & hy[gm];
       assign pq_e8[gm] = {cut & (hk == gm) & dir, tgt, ras_ptr, ghr, me_y, me_y ? me_c[1:0] : 2'b01,
-                          sa_q[YB+3:4] ^ yh_q, gm[2:0], bw[gm], me_e[TGTW +: 2]};
+                          yr_q ^ yh_q, gm[2:0], bw[gm], me_e[TGTW +: 2]};
    end endgenerate
 
    // the pair's entries in mark order (nmk <= M = 2), and the bank each lands in
@@ -397,7 +397,10 @@ module smolrv64_predictor
    wire [PCW-1:0]  na    = flush ? rst_a : p_nx;
    wire [PCW-1:0]  ra    = {na[PCW-1:4], 4'b0000};
    wire [2:0]      rk    = na[3:1];
-   wire [YB-1:0]   yr    = ra[YB+3:4];
+   // The corrector's row for the next pair is read AHEAD, at this pair's address (the restart's on a
+   // flush): the next pair's address waits on the BTB's read and pick, which put the corrector's read
+   // in the predictor's loop. The row read is registered (yr_q) and carried for training.
+   wire [YB-1:0]   yr    = flush ? rst_a[YB+3:4] : sa_q[YB+3:4];
    genvar gb, gw;
    // Way w's row for the next pair, each candidate skewed before the pick rather than the picked
    // address after it: the restart's; the ending CTI's target, the RAS top for a return, else its
@@ -489,7 +492,7 @@ module smolrv64_predictor
 
    always @(posedge clk) begin
       if (reset | mv) begin
-         sa_q <= ra;  sk_q <= rk;  yh_q <= yh;
+         sa_q <= ra;  sk_q <= rk;  yh_q <= yh;  yr_q <= yr;
          np_q <= flush & rst_np;
       end
       if (tw_v & ~tr_hit) vrot <= vrot + 1'b1;

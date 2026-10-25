@@ -363,8 +363,10 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
 fetch stream: it holds the stream's address (a registered 16-byte pair and the halfwords of it to
 skip), looks the pair up as the fetch ring asks the I$ for it, and steers the stream to the next
 pair. A BTB entry belongs to its CTI's last halfword; a pair covers eight halfwords, so the BTB and
-the corrector are each eight banks, one per halfword position, and all eight read the same row,
-the next pair's address above its 16 bytes, whenever the stream moves. No two CTIs share an entry
+the corrector are each eight banks, one per halfword position, and all eight read the same row
+whenever the stream moves: the BTB the next pair's address above its 16 bytes, the corrector the
+pair the stream is leaving (the restart's on a restart) -- read ahead, so the BTB's read and pick
+are not in front of its read address. No two CTIs share an entry
 (rule B10). Every position evaluates its own hit, corrector hit and direction from registers, and
 the hits in order mark the known CTIs. **A pair ends at its first known CTI predicted taken, or
 at its second known CTI** (`M`=2): the stream goes on at the target (the RAS top for a return) or
