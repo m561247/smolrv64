@@ -16,8 +16,8 @@ change has to boot Ubuntu to a login prompt on the board with zero faults before
 
 | | |
 |---|---|
-| Geekbench 5.4.1, board, 2026-10-23 | **18** single-core (Integer 22, Crypto 2, Floating Point 13), **18** multi-core ([result 24746633](https://browser.geekbench.com/v5/cpu/24746633), [every subtest](workloads/gb5/result-2026-10-23.md)); the whole suite in 1 h 41 min at IPC 1.27 |
-| Memory, board, 2026-10-23 | a dependent load **3.0** cycles from the D$, **21.0** from the L2, 44.6 from DRAM with a second-level dTLB lookup (71.1 with a page walk); sequential reads 7.81 bytes a cycle in the D$, 3.68 from the L2, 2.88 from DRAM, writes 7.10, 5.81 and 5.10 (`tools/board/membench/summary.sh`, beside every Geekbench run) |
+| Geekbench 5.4.1, board, 2026-10-24 | **20** single-core (Integer 24, Crypto 2, Floating Point 13), **19** multi-core ([result 24751535](https://browser.geekbench.com/v5/cpu/24751535), [every subtest](workloads/gb5/result-2026-10-24.md)); the whole suite in 1 h 36 min at IPC 1.32 |
+| Memory, board, 2026-10-24 | a dependent load **3.0** cycles from the D$, **21.2** from the L2, 44.3 from DRAM with a second-level dTLB lookup (71.1 with a page walk); sequential reads 7.93 bytes a cycle in the D$, 3.70 from the L2, 2.88 from DRAM, writes 7.91, 5.64 and 4.92 (`tools/board/membench/summary.sh`, beside every Geekbench run) |
 | Geekbench 6.7.1, board (4 GiB), 2026-10-15 to 16 | **10** single-core, **10** multi-core ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041), [every subtest](workloads/gb6/result-2026-10-16.md)); the whole suite in 17 h 48 min at IPC 1.00 |
 | Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-24 | **3.14** DMIPS/MHz: 181.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
 | CoreMark 1.0, the RTL in lockstep simulation, 2026-10-24 | **5.33** CoreMark/MHz: 187,610 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; `make run B=coremark`) |
