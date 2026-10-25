@@ -35,6 +35,8 @@ MODES = {
     '1280x1024@60': (108.0,  (1280, 1328, 1440, 1688), (1024, 1025, 1028, 1066), True, True),
     # VESA's 1600x1200@60 timing (162 MHz) at the fastest clock, 166.67 MHz: 61.7 Hz
     '1600x1200@60': (162.0,  (1600, 1664, 1856, 2160), (1200, 1201, 1204, 1250), True, True),
+    # at the fastest clock, 52.0 Hz: the BenQ Q24W5 on the TinyVGA adapter takes it (Tommy, 2026-10-25)
+    '1920x1200@52': (166.67, (1920, 2032, 2232, 2560), (1200, 1203, 1213, 1252), False, True),
 }
 
 
