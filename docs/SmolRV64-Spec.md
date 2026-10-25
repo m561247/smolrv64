@@ -610,15 +610,16 @@ Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard belo
   the head's row from its first uncommitted position; a row may take several cycles, and the
   head moves to the next row when the row's last valid position commits.
 
-**Entry format — 16 bits.** `ent[]` is `{noret, rd, prd}`, plus `v` and `done` as separate
+**Entry format — 25 bits.** `ent[]` is `{pold, noret, rd, prd}`, plus `v` and `done` as separate
 bit vectors.
 
 | field | bits | meaning |
 |---|---|---|
+| `pold` | `PBITS`=9 | the destination's previous mapping: the walk restores it, commit frees it |
 | `noret` | 1 | commits but must not be counted (see below) |
 | `rd` | 6 | architectural destination, unified numbering (0–31 int, 32–63 FP) |
 | `prd` | `PBITS`=9 | physical register allocated; **0 when none** |
-| | **16** | × 64 rows × `IW` columns = **4,096 bits** at IW=4 |
+| | **25** | × 64 rows × `IW` columns = **6,400 bits** at IW=4 |
 | `v`, `done` | 2 × 64 × 2^⌈log2 `IW`⌉ | separate flops — `v` is bulk-cleared by the flush and the kill; `done` is read only under `v`, so its allocation alone clears it |
 
 **Three fields are deliberately absent**, each recoverable from state the design already
@@ -1852,7 +1853,7 @@ shipping configuration (`SIZE_KB`=64, `SMOLRV64_HW`=8, `PAW`=64 into the caches)
 | `cp[0..IW-1].rmap` | `smolrv64_rename` | 64 each | 10 | 1 920 | LUTRAM | one copy per commit port (1W each, `rnewer` picks), 2*IW reads (the commits' displaced mappings, the sweep) |
 | `dirty` | `smolrv64_rename` | 64 | 1 | 64 | flops | the registers the sweep rewrites after a squash |
 | `fl[*].u.bank[*].mem` | `smolrv64_rename` | 64 per shard | 7 | 448 per shard | LUTRAM | one free list per shard in use (lanes 0..IW-1, SH_FL, SH_FF), `next_pow2(IW)` banks each |
-| `col[0..IW-1].mem` | `smolrv64_rob` | 64 each | 27 | 5 184 | LUTRAM | column k, lane k's entries `{pold, noret, rd, prd}`: 1W (lane k's dispatch), 2R (the head's row, the walk's row; the ports rotate them into program order) |
+| `col[0..IW-1].mem` | `smolrv64_rob` | 64 each | 25 | 6 400 | LUTRAM | column k, lane k's entries `{pold, noret, rd, prd}`: 1W (lane k's dispatch), 2R (the head's row, the walk's row; the ports rotate them into program order) |
 | `fc` | `smolrv64_rob` | 64 | 2 | 128 | LUTRAM | each row's first column: 1W (dispatch), read at the next head row, `irr`'s, the walk's and the walked-to branch's rows (`hfc`, the head row's, is a flop) |
 | *(two-wide dispatch and retire)* | | | | | | items 10b/10c: on the board since 2026-09-06 (gate W2F, 319cd248), after four silent bitstreams whose renamer Vivado had folded (docs/rtl-rules.md F4/F5) |
 | `v`, `done` | `smolrv64_rob` | 256 | 1 each | 512 | flops | by storage index; `v` bulk-cleared, `done` cleared at allocation |
