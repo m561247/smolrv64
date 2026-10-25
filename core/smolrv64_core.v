@@ -420,8 +420,17 @@ module smolrv64_core
    // between M-mode's bare translation and a translating satp (ft: the iMMU translates, satp's MODE
    // Sv39 outside M, its own test). It empties the fetch ring and advances the I$ epoch. A privilege
    // change alone does not: the iMMU checks permissions on every fetch. mstatus.SUM/MXR gate data
-   // accesses, not fetch.
-   wire ft = (mmu_priv != 2'd3) & (mmu_satp[63:60] == 4'd8);
+   // accesses, not fetch. ft is a register beside the front end, loaded from csr_file's next values
+   // (o_ifx_d), so the CSR file's registers are no part of the fetch freeze's cone.
+   wire csr_ifx_d;
+   reg  ft;
+   initial ft = 1'b0;
+   always @(posedge clk) begin
+      ft <= csr_ifx_d;
+      if (!reset && (ft != ((mmu_priv != 2'd3) & (mmu_satp[63:60] == 4'd8))))
+         $fatal(1, "smolrv64_core: the registered fetch regime %b is not priv %0d / satp MODE %0d's",
+                ft, mmu_priv, mmu_satp[63:60]);
+   end
    reg  ft_q;
    initial ft_q = 1'b0;
    always @(posedge clk) ft_q <= ft;
@@ -3118,8 +3127,9 @@ module smolrv64_core
    reg  [PDW-1:0]      lr_pdet [0:NL-1];
    reg  [5:0]          lr_rd   [0:NL-1];
    reg                 lr_lks  [0:NL-1];
+   reg  [NL-1:0]       lr_old  [0:NL-1];   // lr_old[j][k]: lane j's op is older than lane k's (older(lr_seq))
    initial lr_v = {NL{1'b0}};
-   integer lrk;
+   integer lrk, lrj;
    always @(posedge clk)
       for (lrk = 0; lrk < NL; lrk = lrk + 1) begin
          lr_v[lrk] <= ~reset & ~redirect & l_cti[lrk] & ~dead(l_rob[lrk]);
@@ -3130,7 +3140,15 @@ module smolrv64_core
          lr_pc[lrk]  <= l_pc[lrk];    lr_tgt[lrk] <= pcpack(l_tgt[lrk]);
          lr_ttgt[lrk] <= pcpack(l_ttgt[lrk]);  lr_pdet[lrk] <= l_pdet[lrk];
          lr_rd[lrk]  <= l_rd[lrk];    lr_lks[lrk] <= l_lks[lrk];
+         for (lrj = 0; lrj < NL; lrj = lrj + 1) lr_old[lrk][lrj] <= older(l_seq[lrk], l_seq[lrj]);
       end
+   // the lanes' ages, each pair compared a cycle early from the registers lr_seq is loaded from:
+   // the restart's oldest mispredict and the training queue's ranks read flops, not subtractors
+   always @(posedge clk) if (!reset)
+      for (lrk = 0; lrk < NL; lrk = lrk + 1) for (lrj = 0; lrj < NL; lrj = lrj + 1)
+         if (lr_old[lrk][lrj] != older(lr_seq[lrk], lr_seq[lrj]))
+            $fatal(1, "smolrv64_core: lanes %0d and %0d: the registered age %b is not older(lr_seq) %b",
+                   lrk, lrj, lr_old[lrk][lrj], older(lr_seq[lrk], lr_seq[lrj]));
    function older(input [SEQW-1:0] a, input [SEQW-1:0] b);   // wrap-safe: a is older than b
       older = $signed(a - b) < 0;
    endfunction
@@ -3145,7 +3163,7 @@ module smolrv64_core
       for (lwi = 0; lwi < NL; lwi = lwi + 1) begin
          lw[lwi] = lm[lwi];
          for (lwj = 0; lwj < NL; lwj = lwj + 1)
-            if (lwj != lwi) lw[lwi] = lw[lwi] & (~lm[lwj] | older(lr_seq[lwi], lr_seq[lwj]));
+            if (lwj != lwi) lw[lwi] = lw[lwi] & (~lm[lwj] | lr_old[lwi][lwj]);
       end
       for (lwi = NL - 1; lwi > 0; lwi = lwi - 1) if (lw[lwi]) wl = lwi[NLB-1:0];
    end
@@ -3467,7 +3485,7 @@ module smolrv64_core
       .raddr(sy_addr), .rdata(csr_rdata),
       .redir_target(csr_redir_tgt), .redir_valid(csr_redir_v),
       .redir_is_trap(csr_redir_trap), .csr_illegal(csr_illegal),
-      .o_satp(mmu_satp), .o_priv(mmu_priv), .o_dpriv(mmu_dpriv),
+      .o_satp(mmu_satp), .o_priv(mmu_priv), .o_ifx_d(csr_ifx_d), .o_dpriv(mmu_dpriv),
       .o_sum(mmu_sum), .o_mxr(mmu_mxr), .o_frm(csr_frm), .o_fs_off(fs_off),
       .fp_fflags_we(|ret_fflags), .fp_fflags(ret_fflags),
       // mstatus.FS -> Dirty when an op that changes FP state RETIRES, on ANY commit port: one
@@ -3903,7 +3921,7 @@ module smolrv64_core
    always @* for (tqi = 0; tqi < NL; tqi = tqi + 1) begin
       rk[tqi] = {RKB{1'b0}};
       for (tqj = 0; tqj < NL; tqj = tqj + 1)
-         if (tqj != tqi) rk[tqi] = rk[tqi] + {{(RKB-1){1'b0}}, tr_ok[tqj] & older(lr_seq[tqj], lr_seq[tqi])};
+         if (tqj != tqi) rk[tqi] = rk[tqi] + {{(RKB-1){1'b0}}, tr_ok[tqj] & lr_old[tqj][tqi]};
    end
    reg  [TQB-1:0] tq_h, tq_t;
    reg  [TQB:0]   tq_n;

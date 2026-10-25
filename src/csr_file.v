@@ -36,6 +36,7 @@ module csr_file
     // ---- translation context for the iMMU/dMMU (combinational) ----
     output wire [63:0] o_satp,        // satp (MODE/ASID/PPN)
     output wire [1:0]  o_priv,        // current privilege (instruction-fetch priv)
+    output wire        o_ifx_d,       // fetch translates NEXT cycle (priv not M, satp MODE Sv39): a flop's D
     output wire [1:0]  o_dpriv,       // effective data-access priv (honors MPRV/MPP)
     output wire        o_sum,         // mstatus.SUM
     output wire        o_mxr,         // mstatus.MXR
@@ -831,10 +832,28 @@ module csr_file
    // A wrap with OF clear sets OF and LCOFIP; an mhpmeventN write that cycle wins.
    wire hpm_lcof = |(hpm_wrap & ~hpm_wev & ~hpm_of);
 
+   // THE PRIVILEGE'S ONE UPDATE: a trap's target, an xret's previous mode, M at reset. With satp's
+   // MODE as the write below leaves it, it says whether fetch translates next cycle, so the front
+   // end registers that (o_ifx_d) and its regime test reads a flop, not this file's registers.
+   wire [1:0] priv_d = reset ? M
+                     : trap_v ? (trap_to_s ? S : M)
+                     : (upd_valid & ~upd_is_csr & is_mret) ? mstatus[12:11]
+                     : (upd_valid & ~upd_is_csr & is_sret) ? {1'b0, mstatus[SPP_B]} : priv;
+   wire [3:0] satp_mode_d = reset ? 4'd0
+                          : (~trap_v & upd_valid & upd_is_csr & (upd_addr == SATP)) ? newv[63:60] : satp[63:60];
+   assign o_ifx_d = (priv_d != M) & (satp_mode_d == 4'd8);
+   always @(posedge clk) priv <= priv_d;
+   reg [3:0] satp_mode_q;
+   always @(posedge clk) begin
+      satp_mode_q <= satp_mode_d;
+      if (!reset && (satp_mode_q != satp[63:60]))
+         $fatal(1, "csr_file: satp's MODE %0d is not the %0d its next-value wire said", satp[63:60], satp_mode_q);
+   end
+
    integer i;
    always @(posedge clk) begin
       if (reset) begin
-         priv<=M; mstatus<=0; mtvec<=0; mepc<=0; mcause<=0; mtval<=0; mscratch<=0;
+         mstatus<=0; mtvec<=0; mepc<=0; mcause<=0; mtval<=0; mscratch<=0;
          mie<=0; mip<=0; medeleg<=0; mideleg<=0; mcounteren<=0; satp<=0;
          mnstatus<=0;
          stvec<=0; sepc<=0; scause<=0; stval<=0; sscratch<=0; scounteren<=0;
@@ -848,14 +867,12 @@ module csr_file
             stval  <= `VA_PACK40(trap_tval);
             mstatus[SPIE_B] <= mstatus[SIE_B]; mstatus[SIE_B] <= 1'b0;
             mstatus[SPP_B]  <= priv[0];
-            priv <= S;
          end else begin
             mepc   <= trap_epc;
             mcause <= trap_cause;
             mtval  <= `VA_PACK40(trap_tval);
             mstatus[MPIE_B] <= mstatus[MIE_B]; mstatus[MIE_B] <= 1'b0;
             mstatus[12:11]  <= priv;
-            priv <= M;
          end
       end else if (upd_valid) begin
          if (upd_is_csr) begin
@@ -916,11 +933,9 @@ module csr_file
               default:    ;
             endcase
          end else if (is_mret) begin
-            priv <= mstatus[12:11];
             mstatus[MIE_B]  <= mstatus[MPIE_B]; mstatus[MPIE_B] <= 1'b1;
             mstatus[12:11]  <= U;
          end else if (is_sret) begin
-            priv <= {1'b0, mstatus[SPP_B]};
             mstatus[SIE_B]  <= mstatus[SPIE_B]; mstatus[SPIE_B] <= 1'b1;
             mstatus[SPP_B]  <= 1'b0;
          end
