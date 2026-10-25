@@ -2454,8 +2454,14 @@ failing family within 0.03 ns of the worst, so area went first, then the deepest
 | 3b1b81d3 | + the geometry header, 9-bit physical registers, the state review (lane write tags, the ROB's done clears, the FP wake ports, the waiter table, the translate flag, ...) | −0.412 | −516 | 151 696 |
 | 9ec51393 | + FW 6, `PABITS` 33 for every PA the core holds, TLB tags without their index bits, the queues' banked allocation writes, the divider's one rotation, the PRF's shard select | −0.167 | −81 | 147 239 |
 | 325e5341 | + the lanes' operand bypass selected by the scheduler's registered wake match | **+0.001** | 0 | 146 097 |
+| 71796044 | + nine cycle-identical cuts (the walk's first column, the D$'s doubleword unshifted, a forward's one shift; a landing from registers and its kill looked up a cycle ahead; the translation regime and the lanes' ages as registers; three queues writing a cycle late) and the corrector read ahead | **0.000** | 0 | 146 537 |
 
-The board gate passes on 325e5341 (the 2g board, 2026-10-24): login, 900 s of Geekbench, zero faults.
+The board gate passes on 325e5341 (the 2g board, 2026-10-24): login, 900 s of Geekbench, zero faults,
+and on 71796044 (2g, 2026-10-25). The margin is a draw's, not the design's: the same netlist family
+missed by 0.15 to 0.62 ns in other draws (6ca128ca -0.615, 23ae98a9 -0.335, 5f3fdaca -0.208,
+2f791a83 -0.249, b06455d0 -0.152), each cut taking its family off the failing list (5,593 endpoints
+under 0 at -0.615, 1,367 at -0.208); what remains is a plateau of the core's loops -- the lane's
+execute and completion, the predictor's and the fetch ring's next address, the commit count.
 
 ## 14. Known limits
 
