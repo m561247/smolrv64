@@ -606,7 +606,8 @@ Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard belo
 - Column k is one array, written only by lane k. Inside, the pointers are positions `{ring
   wrap, row, p}`. Commit port p is the head row's position p: the ports read every column of
   the head's row and rotate the records into program order by `hfc`, the head row's first column
-  (a flop that follows the head), and the walk's ports likewise by its row's. Commit runs along
+  (a flop that follows the head), and the walk's ports likewise by its row's (a flop loaded with
+the walk's row: rows are written only at allocation, and nothing allocates while the walk runs). Commit runs along
   the head's row from its first uncommitted position; a row may take several cycles, and the
   head moves to the next row when the row's last valid position commits.
 

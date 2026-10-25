@@ -248,13 +248,15 @@ module smolrv64_rob
    // branch walks on from exactly the entries not yet walked, the old branch included.
    reg            wl_run, wl_end;
    reg [RB-1:0]   wl_row;
+   reg [CB-1:0]   wl_fc;                       // fc[wl_row], loaded with it (fc is written only at
+                                               // allocation, and nothing allocates while the walk runs)
    reg [CB:0]     wl_lim;
    reg [RB-1:0]   k_row;
    reg [CB-1:0]   k_p;
    reg [CB:0]     k_wc;                        // the branch's {wrap, column} (the order check's)
    wire [RB-1:0]  kn_row = k_idx[IDXB-1:CB+1];
    wire [CB-1:0]  kn_fc  = fc[kn_row];
-   initial begin wl_run = 1'b0; wl_end = 1'b0; wl_row = 0; wl_lim = 0; k_row = 0; k_p = 0; k_wc = 0; end
+   initial begin wl_run = 1'b0; wl_end = 1'b0; wl_row = 0; wl_fc = 0; wl_lim = 0; k_row = 0; k_p = 0; k_wc = 0; end
    assign wl_done = wl_end & ~wl_run & ~k_v;      // not in a cycle that names a new, older branch
    localparam [CB:0] NCOL_S = NCOL;
    always @(posedge clk) begin
@@ -263,11 +265,11 @@ module smolrv64_rob
       end else begin
          if (wl_run) begin
             if (wl_row == k_row) begin wl_run <= 1'b0;  wl_end <= 1'b1;  wl_lim <= {1'b0, k_p} + 1'b1; end
-            else begin wl_row <= wl_row - 1'b1;  wl_lim <= NCOL_S; end
+            else begin wl_row <= wl_row - 1'b1;  wl_fc <= fc[wl_row - 1'b1];  wl_lim <= NCOL_S; end
          end
          if (k_v) begin
             k_row <= kn_row;  k_p <= pos_of(kn_fc, k_idx[CB:0]);  k_wc <= k_idx[CB:0];  wl_run <= 1'b1;
-            if (~wl_run & ~wl_end) begin wl_row <= trow - 1'b1;  wl_lim <= NCOL_S; end
+            if (~wl_run & ~wl_end) begin wl_row <= trow - 1'b1;  wl_fc <= fc[trow - 1'b1];  wl_lim <= NCOL_S; end
          end
       end
    end
@@ -320,7 +322,9 @@ module smolrv64_rob
    // and never in a flush cycle: a mispredicted branch COMMITS and redirects in the same cycle,
    // and the entry behind it is the wrong path.
    wire [EW-1:0] he [0:IW-1], we [0:IW-1];      // column k's entry in the head's row, the walk's row
-   wire [CB-1:0] wfc = fc[wl_row];
+   wire [CB-1:0] wfc = wl_fc;
+   always @(posedge clk) if (!reset && wl_run && wl_fc != fc[wl_row])
+      $fatal(1, "smolrv64_rob: the walk's row %0d starts at column %0d, its register says %0d", wl_row, fc[wl_row], wl_fc);
    generate for (gk = 0; gk < IW; gk = gk + 1) begin: col
       reg [EW-1:0] mem [0:ROWS-1];
       integer bi; initial for (bi = 0; bi < ROWS; bi = bi + 1) mem[bi] = {EW{1'b0}};
