@@ -1222,7 +1222,11 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   up to two waiting reads, the one presented and the one behind it, so a read starts every
   cycle the D$ takes one) and the tag not outstanding (`~o_v[tag]`); a store needs neither. A redirect kills every fast load in flight, INCLUDING one starting in that
   cycle (`o_kill`; the slow path's `ld_sq` does the same) -- the response still comes and is
-  dropped. Straddles, uncached and device loads, AMOs and LR/SC keep the FSM path and its one
+  dropped. The landing's kill is a flop: the D$ names, from registers, the tags its next answer can
+  carry -- its lookup's and its NC slot's (`rd_pre_a`, `rd_pre_b`) -- and with the answer which it
+  was (`rd_src_b`); the LSU registers each candidate's kill as it will stand, and the forward ring's
+  next oldest's, so no 16-way lookup of `o_kill` stands in front of the wake (asserted equal to it),
+  and a landing is the D$'s valid or a waiting forward, registers alone. Straddles, uncached and device loads, AMOs and LR/SC keep the FSM path and its one
   slow landing (`ld_inflight_idx`), which yields its cycle to a fast landing (one PRF and one
   ROB port). Re-done from the retired da28895b. tiny128 at 60 M, measured DDR shape: IW=2
   13,490,465 -> 13,975,979 (+3.6%), IW=3 13,371,386 -> 13,835,891 (+3.5%). ldbench (L1-resident):

@@ -125,6 +125,11 @@ module rv_dcache #(
    output reg  [63:0]       rd_data,     // the addressed doubleword as stored (a read names one: below)
    output reg  [RTW-1:0]    rd_resp_tag,
    output reg  [63:0]       rd_resp_addr,// the PA the response answers
+   // the tags next cycle's answer can carry, from registers -- the lookup's (a) and the NC slot's
+   // (b) -- and, with the answer, which it was: the LSU looks up a landing's state a cycle ahead
+   output wire [RTW-1:0]    rd_pre_a,
+   output wire [RTW-1:0]    rd_pre_b,
+   output reg               rd_src_b,
    // ---- M's load in M's own cycle: taken whenever presented, so it never waits at a door. The
    // index comes from a register, the page number from the dTLB this cycle; an older store that
    // blocks the load voids its lookup a cycle later.
@@ -489,6 +494,8 @@ module rv_dcache #(
 
    // the answer: a hit
    wire        ans = l1_v & hit & k_ld;
+   assign rd_pre_a = tg(s1_tag);
+   assign rd_pre_b = nc_tag;
    // the arrays as read: bk_q[a] is way (a - c)'s chunk c; the hit rotated by c selects one
    wire [64*WAYS-1:0] bk_q;
    reg  [63:0] ans_chunk;
@@ -754,6 +761,7 @@ module rv_dcache #(
          ox_w    <= (ox_pend & ~ox_take) ? ((ox_w == 3'd7) ? ox_w : ox_w + 3'd1) : 3'd0;
          // a load's answer: from the lookup, else the NC slot's -- the doubleword, unshifted
          rd_valid <= ans | nc_rdy;
+         rd_src_b <= ~ans & nc_rdy;
          rd_f     <= ans & s1_f;
          if (ans) begin
             rd_data      <= ans_chunk;

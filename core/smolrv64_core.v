@@ -116,6 +116,9 @@ module smolrv64_core
     output wire [LQ_IB-1:0]        dmem_rtag,       // its tag: the load-queue index
     input  wire                    dmem_rvalid_c,   // a fast-tagged response, one cycle
     input  wire [LQ_IB-1:0]        dmem_rtag_resp,
+    input  wire [LQ_IB-1:0]        dmem_pre_a,      // the tags next cycle's fast answer can carry: the
+    input  wire [LQ_IB-1:0]        dmem_pre_b,      // cache's lookup (a) and NC slot (b), registers ...
+    input  wire                    dmem_src_b,      // ... and which this cycle's answer came from
     input  wire [63:0]             dmem_rdata_c,
     input  wire                    dmem_rbusy,      // the last read awaits the cache's accept
     output wire                    dmem_fv,         // M's load, presented to the D$ in M's own cycle
@@ -2506,6 +2509,7 @@ module smolrv64_core
       .mem_rdata(dmem_rdata), .mem_rvalid(dmem_rvalid),
       .mem_rfast(dmem_rfast), .mem_rtag(dmem_rtag), .mem_rvalid_c(dmem_rvalid_c),
       .mem_rtag_resp(dmem_rtag_resp), .mem_rdata_c(dmem_rdata_c), .mem_rbusy(dmem_rbusy),
+      .mem_pre_a(dmem_pre_a), .mem_pre_b(dmem_pre_b), .mem_src_b(dmem_src_b),
       .mem_wen(dmem_wen), .mem_wfsm(dmem_wfsm), .mem_waddr(dmem_waddr), .mem_wabase(dmem_wabase), .mem_wdata(dmem_wdata),
       .mem_wmask(dmem_wmask), .mem_wuncached(dmem_wuncached),
       .mem_cbo(dmem_cbo), .mem_cbo_zero(dmem_cbo_zero), .mem_cbo_keep(dmem_cbo_keep),

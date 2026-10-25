@@ -153,7 +153,8 @@ module rv_soc_top #(
    wire                dmem_rvalid, dmem_wready, dmem_waccept, dmem_idle, ifence;
    wire                dc_wr_room;
    wire                dmem_rfast, dmem_rvalid_c, dmem_rbusy;      // the tagged fast load path (C4a)
-   wire [LQ_IB-1:0]    dmem_rtag, dmem_rtag_resp;
+   wire [LQ_IB-1:0]    dmem_rtag, dmem_rtag_resp, dmem_pre_a, dmem_pre_b;
+   wire                dmem_src_b;
    wire [63:0]         dmem_rdata_c;
    wire                dmem_fv, dmem_fhint, dmem_fcancel, dmem_fok, dmem_fans;   // M's load in M's cycle, straight to the D$
    wire [63:0]         dmem_fpa;
@@ -176,6 +177,7 @@ module rv_soc_top #(
       .dmem_rdata(dmem_rdata), .dmem_rvalid(dmem_rvalid),
       .dmem_rfast(dmem_rfast), .dmem_rtag(dmem_rtag), .dmem_rvalid_c(dmem_rvalid_c),
       .dmem_rtag_resp(dmem_rtag_resp), .dmem_rdata_c(dmem_rdata_c), .dmem_rbusy(dmem_rbusy),
+      .dmem_pre_a(dmem_pre_a), .dmem_pre_b(dmem_pre_b), .dmem_src_b(dmem_src_b),
       .dmem_fv(dmem_fv), .dmem_fpa(dmem_fpa), .dmem_ftag(dmem_ftag), .dmem_fhint(dmem_fhint),
       .dmem_fcancel(dmem_fcancel), .dmem_fok(dmem_fok), .dmem_fans(dmem_fans),
       .dmem_wen(dmem_wen), .dmem_wfsm(dmem_wfsm), .dmem_waddr(dmem_waddr), .dmem_wabase(dmem_wabase),
@@ -546,11 +548,13 @@ module rv_soc_top #(
    localparam [DRTW-1:0] TAG_SLOW = TAG_PTW + 2;
    localparam integer    DC_NRQ   = (1 << LQ_IB) + 3;
    wire [DRTW-1:0] lsu_tag_req = dmem_rfast ? {1'b0, dmem_rtag} : TAG_SLOW;   // -> the cache
-   wire [DRTW-1:0] dc_rd_resp_tag;
+   wire [DRTW-1:0] dc_rd_resp_tag, dc_rd_pre_a, dc_rd_pre_b;
    wire         dc_rv_ok   = dc_rd_valid & (dc_rd_resp_tag == TAG_SLOW);       // the FSM's
    wire         dc_rv_fast = dc_rd_valid & ~dc_rd_resp_tag[DRTW-1];          // a queued load's
    assign       dmem_rvalid_c  = dc_rv_fast;
    assign       dmem_rtag_resp = dc_rd_resp_tag[LQ_IB-1:0];
+   assign       dmem_pre_a     = dc_rd_pre_a[LQ_IB-1:0];   // next cycle's fast answer's tag, by its source
+   assign       dmem_pre_b     = dc_rd_pre_b[LQ_IB-1:0];
    assign       dmem_rdata_c   = dc_rd_data;
    assign       dmem_rbusy     = rq_hv;
 `ifdef LSUDBG
@@ -725,6 +729,7 @@ module rv_soc_top #(
       // when c_rd_req is low). The store's NC bit qualifies the write port.
       .rd_nc(c_rd_req & c_rd_unc),
       .rd_valid(dc_rd_valid), .rd_data(dc_rd_data), .rd_resp_tag(dc_rd_resp_tag), .rd_resp_addr(dc_rd_resp_addr),
+      .rd_pre_a(dc_rd_pre_a), .rd_pre_b(dc_rd_pre_b), .rd_src_b(dmem_src_b),
       // ~dc_wr_cpl: a CBO or uncached write holds its request through the cycle its completion
       // is registered, and the D$ is idle again in that cycle -- without this it is taken twice.
       .wr_req(dmem_wen & ~dc_wr_cpl & ~(dmem_wfsm & is_dev_w)), .wr_pa(dmem_waddr),

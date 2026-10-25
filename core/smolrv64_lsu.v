@@ -164,6 +164,9 @@ module smolrv64_lsu
     output wire [LDTW-1:0] mem_rtag,
     input  wire            mem_rvalid_c,   // a fast-tagged cache response, ONE cycle
     input  wire [LDTW-1:0] mem_rtag_resp,
+    input  wire [LDTW-1:0] mem_pre_a,      // the tags next cycle's fast response can carry (registers):
+    input  wire [LDTW-1:0] mem_pre_b,      // the cache's two sources ...
+    input  wire            mem_src_b,      // ... and which this cycle's response came from
     input  wire [63:0]     mem_rdata_c,
     input  wire            mem_rbusy,      // a read before this cycle's is not yet accepted by the cache
     output wire            mem_wen,
@@ -727,7 +730,32 @@ module smolrv64_lsu
    // or the slow path's yield (rule I6).
    wire ld_fast_ret = mem_rvalid_c | fw_any;
    assign pt_rtag       = r_tag;
-   wire        r_kill = mem_rvalid_c ? o_kill[mem_rtag_resp] : o_kill[fw_tag0];
+   // THE LANDING'S KILL, LOOKED UP A CYCLE AHEAD. A landing's kill was a 16-way lookup of o_kill
+   // by the response's tag in front of the wake. Every tag the next landing can carry is known a
+   // cycle early -- the cache's two sources (mem_pre_a/b) and the forward ring's next oldest -- so
+   // each one's kill as it will stand next cycle is registered and the response's source picks one.
+   // A tag that lands next is in flight and not starting, so its kill is o_kill's or this cycle's
+   // flush or kill; a forward starting now becomes the oldest with only the latter.
+   function k_next(input [LDTW-1:0] x);
+      k_next = o_kill[x] | ((flush | kill[x]) & o_v[x]);
+   endfunction
+   reg k_a_q, k_b_q, k_f_q;
+   always @(posedge clk) begin
+      k_a_q <= k_next(mem_pre_a);
+      k_b_q <= k_next(mem_pre_b);
+      k_f_q <= fw_nx_new ? (flush | kill[ld_tag]) : k_next(fw_nx_snd ? fw_tg[~fw_rp] : fw_tag0);
+   end
+   wire        r_kill = mem_rvalid_c ? (mem_src_b ? k_b_q : k_a_q) : k_f_q;
+   reg  [LDTW-1:0] pre_a_q, pre_b_q;
+   always @(posedge clk) begin pre_a_q <= mem_pre_a;  pre_b_q <= mem_pre_b; end
+   always @(posedge clk) if (!reset) begin
+      if (mem_rvalid_c && (mem_rtag_resp != (mem_src_b ? pre_b_q : pre_a_q)))
+         $fatal(1, "smolrv64_lsu: a fast response with tag %0d that its source %0d did not name a cycle ahead (%0d, %0d)",
+                mem_rtag_resp, mem_src_b, pre_a_q, pre_b_q);
+      if ((mem_rvalid_c | fw_any) && (r_kill != (mem_rvalid_c ? o_kill[mem_rtag_resp] : o_kill[fw_tag0])))
+         $fatal(1, "smolrv64_lsu: the landing's kill %b, looked up a cycle ahead, is not o_kill's %b (tag %0d, %s)",
+                r_kill, mem_rvalid_c ? o_kill[mem_rtag_resp] : o_kill[fw_tag0], r_tag, mem_rvalid_c ? "cache" : "forward");
+   end
    assign pt_fast_done  = ld_fast_ret & ~r_kill;   // a squashed load's data is dropped
    wire [2:0]  r_boff = mem_rvalid_c ? o_boff[mem_rtag_resp] : o_boff[fw_tag0];
    wire [5:0]  f_sh  = {r_boff, 3'b000};

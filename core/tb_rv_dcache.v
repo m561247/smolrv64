@@ -79,6 +79,7 @@ module tb;
       .rd_req(rd_req), .rd_pa(rd_pa), .rd_tag(rd_tag), .rd_nc(rd_nc), .rd_ack(rd_ack),
       .rd_quiet(rd_quiet), .f_hint(f_hint), .f_req(f_req), .f_pa(f_pa), .f_tag(f_tag), .f_ok(f_ok), .f_cancel(f_cancel), .rd_f(),
       .rd_valid(rd_valid), .rd_data(rd_data), .rd_resp_tag(rd_resp_tag), .rd_resp_addr(rd_resp_addr),
+      .rd_pre_a(), .rd_pre_b(), .rd_src_b(),
       .wr_req(wr_req), .wr_pa(wr_pa), .wr_data(wr_data), .wr_mask(wr_mask),
       .wr_nc(wr_nc), .cbo_req(cbo_req), .cbo_zero(cbo_zero), .cbo_keep(cbo_keep),
       .wr_room(wr_room), .wr_acc(wr_acc), .wr_cpl(wr_cpl),

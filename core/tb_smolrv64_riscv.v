@@ -71,10 +71,12 @@ module tb;
       .hpm_dc_access(1'b0), .hpm_dc_miss(1'b0), .hpm_ic_access(1'b0), .hpm_ic_miss(1'b0),
       .dmem_raddr(dmem_raddr), .dmem_ren(dmem_ren), .dmem_runcached(),
       .dmem_rdata(dmem_rdata), .dmem_rvalid(1'b1),
-      // the tagged fast path against this always-valid memory: a fast read is answered in
-      // the cycle it is presented, with the tag it carries
-      .dmem_rfast(dmem_rfast), .dmem_rtag(dmem_rtag), .dmem_rvalid_c(dmem_ren & dmem_rfast),
-      .dmem_rtag_resp(dmem_rtag), .dmem_rdata_c(dmem_rdata), .dmem_rbusy(1'b0),
+      // the tagged fast path against this always-valid memory: a fast read is answered the cycle
+      // after it is presented, from a register, with the tag it carries -- which is the tag that
+      // cycle's answer can carry, named a cycle ahead as a cache names it
+      .dmem_rfast(dmem_rfast), .dmem_rtag(dmem_rtag), .dmem_rvalid_c(fv_q),
+      .dmem_rtag_resp(ftag_q), .dmem_rdata_c(fdata_q), .dmem_rbusy(1'b0),
+      .dmem_pre_a(dmem_rtag), .dmem_pre_b({`SMOLRV64_LQB{1'b0}}), .dmem_src_b(1'b0),
       // M's own start needs a memory that answers two cycles on and drops a cancelled read; this
       // one answers in the request's cycle, so every load goes the queue's way here
       .dmem_fv(), .dmem_fpa(), .dmem_ftag(), .dmem_fhint(), .dmem_fcancel(), .dmem_fok(1'b0), .dmem_fans(1'b0),
@@ -110,6 +112,13 @@ module tb;
    always @(ic_pa_q or wtick)
       for (m=0;m<16;m=m+1) ic_data[m*8 +: 8] = mem[(ic_pa_q-BASE)+m];
    always @(dmem_raddr or wtick) dmem_rdata = rd64(dmem_raddr);
+   reg                       fv_q;
+   reg [`SMOLRV64_LQB-1:0]   ftag_q;
+   reg [63:0]                fdata_q;
+   initial fv_q = 1'b0;
+   always @(posedge clk) begin
+      fv_q <= ~reset & dmem_ren & dmem_rfast;  ftag_q <= dmem_rtag;  fdata_q <= dmem_rdata;
+   end
 
    // page-table walkers (instruction side + data side): registered PTE reads
    always @(posedge clk) begin
