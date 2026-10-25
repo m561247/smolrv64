@@ -390,8 +390,13 @@ module smolrv64_core
    wire [63:0] satp_fetch = (mmu_priv  == 2'd3) ? 64'd0 : mmu_satp;
    wire [63:0] satp_data  = (mmu_dpriv == 2'd3) ? 64'd0 : mmu_satp;
    // M's access is untranslated (M-mode, or satp Bare): the queues keep it beside the page for
-   // forwarding, which needs the regime as well as the VA to name the same memory
-   wire        m_bare     = (satp_data[63:60] != 4'd8);
+   // forwarding, which needs the regime as well as the VA to name the same memory. A register: the
+   // regime changes only at a system op that redirects (a trap, an xret, satp, MPRV/MPP), so no
+   // access is in M the cycle it changes nor the next (asserted beside M's fills).
+   wire        m_bare_c   = (satp_data[63:60] != 4'd8);
+   reg         m_bare;
+   initial     m_bare = 1'b1;
+   always @(posedge clk) m_bare <= m_bare_c;
 
    mmu #(.AW(PABITS), .DRAM_TOP(DRAM_TOP), .TLBN(64), .TLBI(6), .L2N(512), .L2I(9)) u_immu
      (.clk(clk), .reset(reset),
@@ -412,10 +417,11 @@ module smolrv64_core
    // ---- a mapping change ------------------------------------------------------------
    // What a VA maps to changes with a satp write or an sfence.vma -- both raise the TLB flush
    // (csr_file's o_tlb_flush: mmu_flush_q, in the cycle the new satp shows) -- or with a switch
-   // between M-mode's bare translation and a translating satp (ft: satp_fetch is not 0). It empties
-   // the fetch ring and advances the I$ epoch. A privilege change alone does not: the iMMU checks
-   // permissions on every fetch. mstatus.SUM/MXR gate data accesses, not fetch.
-   wire ft = (mmu_priv != 2'd3) & (|mmu_satp);
+   // between M-mode's bare translation and a translating satp (ft: the iMMU translates, satp's MODE
+   // Sv39 outside M, its own test). It empties the fetch ring and advances the I$ epoch. A privilege
+   // change alone does not: the iMMU checks permissions on every fetch. mstatus.SUM/MXR gate data
+   // accesses, not fetch.
+   wire ft = (mmu_priv != 2'd3) & (mmu_satp[63:60] == 4'd8);
    reg  ft_q;
    initial ft_q = 1'b0;
    always @(posedge clk) ft_q <= ft;
@@ -659,6 +665,9 @@ module smolrv64_core
    wire m_dead    = dead(m_rob_idx);             // the kill: M's op is younger than a mispredict
    wire m_sq_fill = m_valid & m_st_nb & lsu_xo_v & ~m_dead;
    wire m_lq_fill = m_valid & m_ld_nb & lsu_xo_v & ~m_dead;
+   always @(posedge clk) if (!reset && (m_sq_fill | m_lq_fill) && (m_bare != m_bare_c))
+      $fatal(1, "smolrv64_core: an access fills a queue in M the cycle the translation regime changes (bare %b -> %b)",
+             m_bare, m_bare_c);
    wire rob_w_valid = (m_valid & m_done & ~m_ld_nb & ~m_st_nb) | ld_land;
    wire [ROB_IDXB-1:0] rob_w_idx = ld_land ? lq_l_rob : m_rob_idx;
 
