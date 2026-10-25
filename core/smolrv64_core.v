@@ -1394,7 +1394,7 @@ module smolrv64_core
       assign ft_wv[gfb] = ft_v[gfb];  assign ft_wp[gfb*FSQB +: FSQB] = ft_ix[gfb];
       assign ft_wd[gfb*FSQW +: FSQW] = s_fpl[gfb];
    end endgenerate
-   smolrv64_bankq #(.W(FSQW), .DEPTH(1 << FSQB), .NW(IW), .NR(1), .NB(FBN), .PICK(1), .AB(FSQB)) u_fsq
+   smolrv64_bankq #(.W(FSQW), .DEPTH(1 << FSQB), .NW(IW), .NR(1), .NB(FBN), .PICK(1), .AB(FSQB), .WLATE(1)) u_fsq
      (.clk(clk), .reset(reset), .wv(ft_wv), .wp(ft_wp), .wd(ft_wd), .rp(fsq_hd), .ro({$clog2(FBN){1'b0}}), .rd(fsq_o));
    // every entry's sources against the registered wakes, then the pushed entries' dispatch state
    integer fse;
@@ -4015,7 +4015,7 @@ module smolrv64_core
       assign tq_wd[tqg*TQW +: TQW] = {lr_pc[tqg], lr_rvc[tqg], lr_ttgt[tqg], lr_pdet[tqg],
                                       lr_br[tqg], l_call[tqg], l_ret[tqg], lr_taken[tqg]};
    end endgenerate
-   smolrv64_bankq #(.W(TQW), .DEPTH(TQN), .NW(NL), .NR(1), .NB(1 << RKB)) u_tq
+   smolrv64_bankq #(.W(TQW), .DEPTH(TQN), .NW(NL), .NR(1), .NB(1 << RKB), .WLATE(1)) u_tq
      (.clk(clk), .reset(reset), .wv(tq_w & {NL{~reset}}), .wp(tq_wp), .wd(tq_wd), .rp(tq_h), .ro({RKB{1'b0}}), .rd(tq_hd));
    wire [PCW-1:0] tq_hpc;
    wire           tq_hrvc;
