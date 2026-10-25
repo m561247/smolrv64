@@ -1469,8 +1469,9 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   the load stands forwarded (latched as the forward starts, dropped with a replay). The flag clears in the edge its store drains, so the store it names never outlives it.
   `smolrv64_lq` offers a forwardable held load like a clear one (`x_fwd`); it takes the port like
   any queued load and starts as a fast load in the LSU, which asks the D$ for nothing: the store's
-  bytes, read in the start cycle through the same landing bypass as the drain's and placed as the D$
-  write places them, wait in the forward queue, two deep, and land by the load's tag, through the
+  bytes, read in the start cycle through the same landing bypass as the drain's and kept as the
+  store holds them (its first byte at bit 0; the load's landing shift is its offset past the
+  store's, recorded at the start), wait in the forward queue, two deep, and land by the load's tag, through the
   fast path's formatting, in the first cycle the D$ returns no response, the older first. A forward
   starts while another waits; `fw_busy` says both slots are full. The queue is a ring: the free
   slot `fw_wp` names takes each cycle's candidate whether it starts or not, a start moves `fw_wp`

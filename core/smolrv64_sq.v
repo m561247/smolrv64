@@ -178,7 +178,8 @@ module smolrv64_sq
     output wire [LQN-1:0]        l_fwd,       // per entry, REGISTERED: it can take its bytes from a store (below)
     input  wire                  f_go,        // a forward starts this cycle...
     input  wire [LQIB-1:0]       f_lix,       // ...for this load...
-    output wire [63:0]           f_data,      // ...and these are its store's bytes, placed as the D$ holds them
+    output wire [63:0]           f_data,      // ...and these are its store's bytes as it holds them (its first at bit 0)...
+    output wire [2:0]            f_sbo,       // ...which is this byte of the doubleword
 
     // ---- the walker: the first uncommitted entry, when it has no translation yet ----
     output wire                  k_v,
@@ -434,7 +435,8 @@ module smolrv64_sq
    // doubleword offset as the D$ write places it (smolrv64_lsu's mem_wdata).
    wire [IDXB-1:0] f_s  = fws_w[f_lix*IDXB +: IDXB];
    wire [63:0]     f_dw = (ln_v & (ln_idx == f_s)) ? ln_data : data[f_s];
-   assign f_data = f_dw << {va[f_s][2:0], 3'b000};
+   assign f_data = f_dw;
+   assign f_sbo  = va[f_s][2:0];
    always @(posedge clk)
       if (!reset && f_go && !(l_fwd[f_lix] && v[f_s] && dv[f_s] && conf[f_lix][f_s] && cov[f_lix][f_s]))
          $fatal(1, "smolrv64_sq: forward for load %0d from store %0d, not its forwarding store (fwd=%b v=%b dv=%b conf=%b cov=%b)",

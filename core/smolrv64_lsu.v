@@ -83,7 +83,8 @@ module smolrv64_lsu
     // covers them (fw_data, read in the start cycle), not from the D$. It starts as a fast load
     // and lands as one, in the first cycle the D$ returns nothing; two wait at most (fw_busy).
     input  wire            pt_fwd,
-    input  wire [63:0]     fw_data,        // the store's doubleword as the D$ would hold it
+    input  wire [63:0]     fw_data,        // the store's bytes, its first at bit 0...
+    input  wire [2:0]      fw_sbo,         // ...which is this byte of the doubleword
     output wire            fw_busy,
     output wire            fw_inj,         // the forward lands this cycle (on pt_rtag)
     output wire            fw_any,         // a forward waits: it lands in the next cycle the D$ returns none...
@@ -675,6 +676,8 @@ module smolrv64_lsu
    // ring will stand next cycle: six bits the D$'s response may steer, so the tag a landing names
    // (and every lookup by it) starts at a flop.
    wire            fw_go = ld_fast_ok & pt_start & pt_fwd;
+   always @(posedge clk) if (!reset & fw_go & (boff < fw_sbo))
+      $fatal(1, "smolrv64_lsu: a forward's load begins at byte %0d, before its store's %0d", boff, fw_sbo);
    reg  [1:0]      fw_n;                                  // forwards waiting
    reg             fw_wp, fw_rp;                          // the slot a start writes, the one that lands
    reg  [LDTW-1:0] fw_tg [0:1];
@@ -742,7 +745,9 @@ module smolrv64_lsu
          for (kt = 0; kt < NLD; kt = kt + 1)       // the cancel: no response will come
             if (f_cancel[kt]) o_v[kt] <= 1'b0;
          if (ld_fast_ok) begin
-            o_v[ld_tag] <= 1'b1;  o_kill[ld_tag] <= 1'b0;  o_nb[ld_tag] <= nb;  o_boff[ld_tag] <= boff;
+            // a forward's bytes are its store's, not the doubleword's: they begin at the store's byte,
+            // so the landing's shift is the load's offset past it (the store holds every byte: >= 0)
+            o_v[ld_tag] <= 1'b1;  o_kill[ld_tag] <= 1'b0;  o_nb[ld_tag] <= nb;  o_boff[ld_tag] <= fw_go ? boff - fw_sbo : boff;
             o_sgn[ld_tag] <= eff_signed;  o_fp[ld_tag] <= eff_fp;
          end
          if (f_go) begin

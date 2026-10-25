@@ -1921,7 +1921,7 @@ module smolrv64_core
       .ld_tag(lq_q_tag), .ld_older(sq_ld_older),
       .l_block_unk_q(sq_l_block_unk_q),
       .l_vpn(lq_e_vpn), .l_fill_vpn({m_bare, m_addr[38:12]}), .a_bare(m_bare), .l_fwd(sq_l_fwd),
-      .f_go(lq_x_take & lq_x_fwd), .f_lix(lq_x_idx), .f_data(sq_f_data),
+      .f_go(lq_x_take & lq_x_fwd), .f_lix(lq_x_idx), .f_data(sq_f_data), .f_sbo(sq_f_sbo),
       .k_v(sq_k_v), .k_idx(sq_k_idx), .k_va(sq_k_va),
       .w_v(lsu_wk_done & wk_st), .w_idx(sq_k_idx), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
@@ -1935,7 +1935,7 @@ module smolrv64_core
    wire [LQ_N*28-1:0]  lq_e_vpn;
    wire                lq_x_fwd, lsu_fw_busy, lsu_fw_inj, lsu_fw_any;
    wire [LQ_IB-1:0]    lsu_fw_lt;
-   wire [63:0]         sq_f_data;
+   wire [63:0]         sq_f_data;  wire [2:0] sq_f_sbo;
    wire [LQ_IB-1:0]    lq_x_idx;
    wire [QNB*(LQ_IB-$clog2(QNB)+1)-1:0] lq_bfree;   // the LQ's free entries by bank, and its bank pointer
    wire [$clog2(QNB)-1:0] lq_bp;
@@ -2466,7 +2466,7 @@ module smolrv64_core
       .pt_ack(lsu_pt_ack), .pt_is_store(lsu_pt_is_store), .pt_ld_done(lsu_pt_ld_done), .pt_ld_kill(lsu_pt_ld_kill),
       .pt_tag(lq_x_idx), .req_tag(m_lq_idx), .pt_rtag(lsu_pt_rtag), .pt_fast_done(lsu_pt_fast_done),
       .f_ok(dmem_fok), .f_v(dmem_fv), .f_pa(lsu_f_pa), .f_cancel(sq_l_cancel),
-      .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj), .fw_any(lsu_fw_any), .fw_lt(lsu_fw_lt),
+      .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_sbo(sq_f_sbo), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj), .fw_any(lsu_fw_any), .fw_lt(lsu_fw_lt),
       .req_store(m_is_store & ~m_is_amo), .req_amo(m_is_amo),
       .req_amo_func(m_amo_func), .req_cbo(m_is_cbo), .req_cbo_zero(m_cbo_zero),
       .req_cbo_keep(m_cbo_keep),

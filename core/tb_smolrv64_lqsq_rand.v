@@ -52,6 +52,7 @@ module tb;
    wire [NENT*28-1:0] e_vpn;
    wire             lq_x_fwd;                 // ...the candidate taking its bytes from a store...
    wire [63:0]      sq_f_data;                // ...and those bytes
+   wire [2:0]       sq_f_sbo;                 // ...from this byte of the doubleword
    wire [NW*IDXB-1:0] lq_d_idx;  wire [IDXB-1:0] lq_x_idx;  wire [IDXB:0] lq_q_tag;
    wire [PAW-1:0]   lq_x_pa, lq_l_pa;  wire [1:0] lq_x_size;
    wire [PBITS-1:0] lq_l_prd;  wire [5:0] lq_l_rd;  wire [ROBB-1:0] lq_l_rob;  wire [IDXB:0] lq_occ;
@@ -116,7 +117,7 @@ module tb;
       .kc_v(sq_kc_v),.kc_rob(sq_kc_rob),.kc_addr(sq_kc_addr),.kc_data(sq_kc_data),.kc_size(sq_kc_size),.k_take(sq_k_take),
       .l_off(e_off),.l_size(e_size),.l_tag(e_tag),.l_av(e_av),.l_wt(e_wt),.l_acc(e_acc),.l_unk_q(sq_unk_q),.l_viol(sq_viol),.l_res_c(sq_res_c),.l_res_a(sq_res_a),
       .l_fill(lq_a_v),.l_fill_ix(lq_a_idx),.l_fill_go(lq_a_v & lq_a_sent),.l_cancel(sq_l_cancel),.l_fill_off(lq_a_pa[11:0]),.l_fill_size(lq_a_size), .l_fill_flt(1'b0),
-      .l_vpn(e_vpn),.l_fill_vpn({1'b0, lq_a_pa[38:12]}),.a_bare(1'b0),.l_fwd(sq_l_fwd),.f_go(lq_x_take & lq_x_fwd),.f_lix(lq_x_idx),.f_data(sq_f_data),
+      .l_vpn(e_vpn),.l_fill_vpn({1'b0, lq_a_pa[38:12]}),.a_bare(1'b0),.l_fwd(sq_l_fwd),.f_go(lq_x_take & lq_x_fwd),.f_lix(lq_x_idx),.f_data(sq_f_data),.f_sbo(sq_f_sbo),
       .l_block(e_block),.l_block_unk_q(sq_l_block_unk_q),.l_block_q(l_block_q),.l_older(l_older),.ld_tag(lq_q_tag),.ld_older(ld_older),
       .k_v(sk_v),.k_idx(sk_idx),.k_va(sk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b1),.w_flt(1'b0),.w_fc(4'd0),.f_v(sf_v),.f_rob(sf_rob),.f_fc(sf_fc),.f_pc(sf_pc),.f_seq(sf_seq),.occupancy(sq_occ),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.kmask(sq_kmask_nc));
 
@@ -302,7 +303,7 @@ module tb;
                                && ({1'b0, addr[op][2:0]} + (4'd1 << sz[op])) <= ({1'b0, addr[fw_op][2:0]} + (4'd1 << sz[fw_op]))
                                && ({1'b0, addr[fw_op][2:0]} + (4'd1 << sz[fw_op])) <= 4'd8))
                        fail("forwarded from a store that does not hold all its bytes", op);
-                    else if (sq_f_data !== ({32'hDA7A, fw_op[31:0]} << {addr[fw_op][2:0], 3'b000}))
+                    else if (sq_f_data !== {32'hDA7A, fw_op[31:0]} || sq_f_sbo !== addr[fw_op][2:0])
                        fail("forwarded bytes are not the store's", op);
                     n_fwd = n_fwd + 1;
                  end
