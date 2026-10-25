@@ -722,7 +722,10 @@ module smolrv64_lsu
    // stood in front of every 16-way lookup, and the landing's wake behind them (rule I6).
    wire [LDTW-1:0] r_tag  = mem_rvalid_c ? mem_rtag_resp : fw_tag0;
    wire [63:0]     r_data = mem_rvalid_c ? mem_rdata_c   : fw_q0;
-   wire ld_fast_ret = (mem_rvalid_c & o_v[mem_rtag_resp]) | fw_inj;
+   // A fast response always names a tag that is waiting (e_tag_orphan asserts it), so a landing is
+   // the D$'s valid or a waiting forward: registers alone, no per-tag lookup in front of the wake
+   // or the slow path's yield (rule I6).
+   wire ld_fast_ret = mem_rvalid_c | fw_any;
    assign pt_rtag       = r_tag;
    wire        r_kill = mem_rvalid_c ? o_kill[mem_rtag_resp] : o_kill[fw_tag0];
    assign pt_fast_done  = ld_fast_ret & ~r_kill;   // a squashed load's data is dropped
