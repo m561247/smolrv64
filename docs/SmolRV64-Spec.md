@@ -84,9 +84,12 @@ That split is what makes the rest unnecessary rather than merely deferred:
 | deadlock avoidance | an op head-blocked in M cannot starve an older one: the only things that can be older and un-issued are an ALU op or an FP op, and **neither ever enters M** |
 
 **Operands are read at ISSUE**, addressed by the selected entry's physical registers — doc 1's
-"values live in one place". The old M→X bypass is gone; a writeback→issue forward (`fwd`)
-replaces it, matching the same ports the scheduler wakes on, so readiness and data agree by
-construction.
+"values live in one place". The old M→X bypass is gone; a writeback→issue forward
+replaces it, and its select is the scheduler's own wake match: an op picked in the cycle a
+source's register is written back reads it from that cycle's write register, which is the
+source's shard's lane's (a lane writes only its own shard; a stream lands a register in the lane
+of its shard). The scheduler registers every entry's matches (`iss_hq`), so the execute cycle
+selects by two flops and compares no tag, and readiness and data agree by construction.
 
 Wakeup is split in two. **Fast** wakeups are writebacks whose value can be forwarded in the
 same cycle, and none of them may depend on which entry was selected or readiness becomes a

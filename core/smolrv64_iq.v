@@ -84,6 +84,7 @@ module smolrv64_iq
     output wire [IDXB-1:0]       iss_ent,
     output wire [ROBB-1:0]       iss_rob,
     output wire                  iss_spec,   // SPEC: the issue is on the speculative wake alone
+    output wire [NENT*NSRC-1:0]  iss_hq,     // each entry's sources' wake matches, a cycle late (see hq)
     input  wire                  iss_take,
 
     // The entry still held downstream. Its slot must not be reallocated: the payload array
@@ -166,6 +167,7 @@ module smolrv64_iq
    // Flat, not inside the generate block: a procedural loop cannot index a generate
    // instance with a runtime variable, and the stall attribution below needs exactly that.
    wire [NENT*NSRC-1:0] srdy;
+   wire [NENT*NSRC-1:0] shit;           // the source's register is written back this cycle
    wire [NENT-1:0]      rdy;
    wire [NENT-1:0]      sp_only;        // ready through the speculative wake alone
    genvar g, gs;
@@ -175,9 +177,10 @@ module smolrv64_iq
          // beside the writeback ports' from flops (s_v, s_preg)
          wire sw = (SPEC != 0) & e_ag[g] & s_v & (e_ps[g][0 +: PBITS] == s_preg);
          for (gs = 0; gs < NSRC; gs = gs + 1) begin : g_src
-            assign srdy[g*NSRC + gs] = e_r[g][gs] | hit(e_ps[g][gs*PBITS +: PBITS]) | ((gs == 0) & sw);
+            assign shit[g*NSRC + gs] = hit(e_ps[g][gs*PBITS +: PBITS]);
+            assign srdy[g*NSRC + gs] = e_r[g][gs] | shit[g*NSRC + gs] | ((gs == 0) & sw);
          end
-         assign sp_only[g] = sw & ~e_r[g][0] & ~hit(e_ps[g][0 +: PBITS]);
+         assign sp_only[g] = sw & ~e_r[g][0] & ~shit[g*NSRC];
          // In order: only the head is a candidate. No age compare, just a pointer match.
          // unit_busy is NOT here. It is the unit's completion this cycle -- for the memory
          // class, M's advance, which is the dTLB compare and the LSU's done -- and putting
@@ -214,6 +217,14 @@ module smolrv64_iq
    assign iss_ent = isel;
    assign iss_rob = e_rob[isel];
    assign iss_spec = (SPEC != 0) & iss_v & sp_only[isel];
+   // THE BYPASS IS A REGISTER. An entry picked this cycle executes the next, and a source whose
+   // register is written back now is then in its producer's write register, not yet the file. hq
+   // holds every entry's matches as they stood, so the op's operand select is a flop at its entry,
+   // not a tag compare in its execute cycle (the watched writebacks are exactly those loads).
+   reg [NENT*NSRC-1:0] hq;
+   initial hq = {(NENT*NSRC){1'b0}};
+   always @(posedge clk) hq <= shit;
+   assign iss_hq = hq;
 
    reg [IDXB:0] occ;
    always @* begin

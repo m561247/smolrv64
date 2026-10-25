@@ -1095,7 +1095,7 @@ module smolrv64_core
       .d_rob(stg_rob_f),
       .d_ps(stg_ps_f),.d_r(stg_r_f | wkq_f),
       .d_prd(stg_prd_f),.d_long(1'b0),.d_hx(1'b0),.d_ag(1'b0),.d_ent(rf_d_ent),
-      .wb_v(wkv_fp),.wb_preg(wkp_fp),.s_v(1'b0),.s_preg({RN_PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(),
+      .wb_v(wkv_fp),.wb_preg(wkp_fp),.s_v(1'b0),.s_preg({RN_PBITS{1'b0}}),.sv_v(1'b0),.sv_ok(1'b0),.iss_spec(),.iss_hq(),
       .unit_busy(j_v & ~j_adv),.hx_busy(1'b0),.ag_only(1'b0),   // j_* can't take: occupied and its op not draining
       .iss_v(rf_iss_v),.iss_ent(rf_iss_ent),.iss_rob(rf_iss_rob),
      .iss_take(rf_take),
@@ -1459,6 +1459,7 @@ module smolrv64_core
       initial stg_v = 1'b0;
       wire                 ready, iss_v, iss_spec, blk_v;
       wire [IBI-1:0]       d_ent, iss_ent;
+      wire [2*NI-1:0]      iss_hq;
       wire [ROB_IDXB-1:0]  iss_rob;
       wire [RN_PBITS-1:0]  blk_pr;
       wire [IBI:0]         occ, free;
@@ -1491,7 +1492,7 @@ module smolrv64_core
          .d_valid(mv),.d_ready(ready),.d_rob(stg_rob),
          .d_ps(stg_ps[2*RN_PBITS-1:0]),.d_r(stg_r),.d_prd(stg_prd),.d_long(stg_late),.d_hx(stg_hx),
          .d_ag(is_lmem(sg_insn)),.d_ent(d_ent),
-         .wb_v(wkv_i),.wb_preg(wkp),.s_v(sw_v),.s_preg(sw_p),.sv_v(sv_v),.sv_ok(sv_ok),.iss_spec(iss_spec),
+         .wb_v(wkv_i),.wb_preg(wkp),.s_v(sw_v),.s_preg(sw_p),.sv_v(sv_v),.sv_ok(sv_ok),.iss_spec(iss_spec),.iss_hq(iss_hq),
          // busy: the multiply's reserved slot, a waiting landing, and in lane 0 a system op at the ROB head
          .unit_busy(m1 | ((gl == 0) & sy_at_head)),.hx_busy(hx_busy),.ag_only(lb_any[gl]),
          .iss_v(iss_v),.iss_ent(iss_ent),.iss_rob(iss_rob),
@@ -1528,16 +1529,35 @@ module smolrv64_core
       `LPL_DECL(q_)
       assign `LPL_REC(q_) = pl;
       // ---- operands: the PRF, or a lane's write register landing this cycle ----
-      reg [63:0] rs1, rs2;
+      // A source written back in the op's pick cycle is in its producer's write register now, and
+      // that is its shard's lane's: a lane writes only its own shard, and a stream lands a register
+      // in the lane of its shard. So the select is the scheduler's registered match at the op's
+      // entry (iss_hq) and the source's shard bits, both flops: no tag compare here.
+      wire       hq1 = iss_hq[2*ent], hq2 = iss_hq[2*ent + 1];
+      wire [1:0] sh1 = ps1[RN_IDXB +: 2], sh2 = ps2[RN_IDXB +: 2];
+      reg [63:0] rs1, rs2, q1, q2;
       integer f;
       always @* begin
-         rs1 = l_rd1[gl];  rs2 = l_rd2[gl];
-         for (f = NL - 1; f >= 0; f = f - 1) begin
-            if (l_qv[f] & (ps1 == l_qprd[f])) rs1 = l_qval[f];
-            if (l_qv[f] & (ps2 == l_qprd[f])) rs2 = l_qval[f];
+         q1 = 64'd0;  q2 = 64'd0;
+         for (f = 0; f < NL; f = f + 1) begin
+            if (sh1 == f[1:0]) q1 = l_qval[f];
+            if (sh2 == f[1:0]) q2 = l_qval[f];
          end
+         rs1 = hq1 ? q1 : l_rd1[gl];  rs2 = hq2 ? q2 : l_rd2[gl];
          if (sp1) rs1 = dmem_rdata_c;   // the speculated load's doubleword, landing this very cycle
       end
+      // the select against the write registers' tags, every executing op's sources
+      reg        bq1, bq2;
+      always @* begin
+         bq1 = 1'b0;  bq2 = 1'b0;
+         for (f = 0; f < NL; f = f + 1) begin
+            if (l_qv[f] & (ps1 == l_qprd[f])) bq1 = 1'b1;
+            if (l_qv[f] & (ps2 == l_qprd[f])) bq2 = 1'b1;
+         end
+      end
+      always @(posedge clk) if (!reset & v & ((hq1 != bq1) | (hq2 != bq2) | (hq1 & (l_qprd[sh1] != ps1)) | (hq2 & (l_qprd[sh2] != ps2))))
+         $fatal(1, "core: lane %0d's bypass (rs1 %b rs2 %b) is not its write registers' (%b %b) for p%0d p%0d (rob=%0d pc=%h)",
+                gl, hq1, hq2, bq1, bq2, ps1, ps2, rob, q_pc);
       wire [63:0] result, addr, target, taken_tgt;
       wire        red, taken;
       smolrv64_exec u_x
@@ -1675,6 +1695,9 @@ module smolrv64_core
       end
       always @(posedge clk) if (!reset & ((we & (wa_src[RN_PBITS-1:RN_IDXB] != SHK)) | (bs & (q_src[RN_PBITS-1:RN_IDXB] != SHK))))
          $fatal(1, "smolrv64_core: lane %0d writes p%h / lands p%h, outside its shard", gl, wa_src, q_src);
+      // the write register takes one: the lane's own write wakes its consumers, as a stream's does
+      always @(posedge clk) if (!reset & we & bs)
+         $fatal(1, "smolrv64_core: lane %0d writes p%h and lands p%h in one cycle", gl, wa_src, q_src);
       // the lane's ROB completion port: its op at issue (a load or store never; a mispredicting
       // CTI at its squash), its multiply in the reserved slot, its landing at the drain
       // -- in its own ROB column: every op a lane runs or lands is its slot's (an integer register
