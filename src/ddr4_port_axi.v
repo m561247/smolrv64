@@ -103,7 +103,7 @@ module ddr4_port_axi (
    wire [2:0]    l_left = rs_on ? r_left : s_n[rs_p];
    wire [25:0]   r_line = s_line[sn_p];          // the line the read engine snoops
 
-   // ---- the write engine: idle, beats, snoop, request, wait for the PHY to take it, B ----
+   // ---- the write engine: idle, beats, snoop, into the request register, wait for the PHY to take it, B ----
    localparam [2:0] WI = 3'd0, WD = 3'd1, WS = 3'd2, WQ = 3'd3, WW = 3'd4, WB = 3'd5;
    reg  [2:0]   w_st;
    reg  [25:0]  w_line;
@@ -127,15 +127,20 @@ module ddr4_port_axi (
    wire r_snack = sn_ack & ~sn_w;
    wire w_snack = sn_ack &  sn_w;
 
-   // ---- requests: the read engine's first ----
+   // ---- requests: from a register, the read engine's first, so the controller's queue compares a
+   // flop's line, not the slots' pick (a fill when it is empty or being taken) ----
    wire r_rq = s_v[rq_p] & s_sn[rq_p] & ~s_rq[rq_p];
    wire w_rq = (w_st == WQ);
-   assign rq_valid = r_rq || w_rq;
-   assign rq_we    = !r_rq;
-   assign rq_line  = r_rq ? s_line[rq_p] : w_line;
-   assign rq_buf   = r_rq ? rbuf(rq_p) : WBUF;
-   wire rq_go = rq_valid && rq_ready;
-   assign sn_rel = (w_st == WQ) && rq_go && !r_rq;   // the controller has the flushed line's write
+   reg  q_v, q_we;
+   reg  [25:0] q_line;
+   reg  [3:0]  q_buf;
+   assign rq_valid = q_v;
+   assign rq_we    = q_we;
+   assign rq_line  = q_line;
+   assign rq_buf   = q_buf;
+   wire rq_go  = q_v & rq_ready;
+   wire q_fill = (~q_v | rq_go) & (r_rq | w_rq);
+   assign sn_rel = rq_go & q_we;                // the controller has the flushed line's write
 
    wire       rd_mine = rdDataEn && (rdDataAddr[4:3] == 2'b11) && (rdDataAddr[2:1] != 2'b10);   // 12, 13, 15
    wire [1:0] rd_s    = (rdDataAddr[2:1] == 2'b11) ? 2'd2 : {1'b0, rdDataAddr[1]};          // its slot
@@ -151,7 +156,7 @@ module ddr4_port_axi (
       wd_mask <= ~w_strb[wrDataAddr[0]*32 +: 32];
       w_sent  <= wr_mine && wrDataAddr[0];
       if (reset) begin
-         s_v <= {NR{1'b0}};  s_sn <= {NR{1'b0}};  s_rq <= {NR{1'b0}};  a_p <= 2'd0;  sn_p <= 2'd0;  rq_p <= 2'd0;  rs_p <= 2'd0;  rs_on <= 1'b0;  r_vq <= 1'b0;
+         q_v <= 1'b0;  s_v <= {NR{1'b0}};  s_sn <= {NR{1'b0}};  s_rq <= {NR{1'b0}};  a_p <= 2'd0;  sn_p <= 2'd0;  rq_p <= 2'd0;  rs_p <= 2'd0;  rs_on <= 1'b0;  r_vq <= 1'b0;
          w_st <= WI;  w_sent <= 1'b0;  sn_own <= 1'b0;  sn_w <= 1'b0;  sn_lastw <= 1'b0;
       end else begin
          if (sn_ack) begin sn_own <= 1'b0;  sn_lastw <= sn_w; end
@@ -164,7 +169,10 @@ module ddr4_port_axi (
             a_p <= nx(a_p);
          end
          if (r_snack) begin s_sn[sn_p] <= 1'b1;  sn_p <= nx(sn_p); end
-         if (rq_go & r_rq) begin s_rq[rq_p] <= 1'b1;  rq_p <= nx(rq_p); end
+         if (q_fill) begin
+            q_v <= 1'b1;  q_we <= ~r_rq;  q_line <= r_rq ? s_line[rq_p] : w_line;  q_buf <= r_rq ? rbuf(rq_p) : WBUF;
+         end else if (rq_go) q_v <= 1'b0;
+         if (q_fill & r_rq) begin s_rq[rq_p] <= 1'b1;  rq_p <= nx(rq_p); end
          if (rd_mine) s_got[rd_s][rdDataAddr[0]] <= 1'b1;
          if (r_load) begin
             r_vq <= 1'b1;
@@ -185,7 +193,7 @@ module ddr4_port_axi (
                    if (s_axi_wlast) w_st <= WS;
                 end
             WS: if (w_snack) w_st <= WQ;
-            WQ: if (rq_go && !r_rq) w_st <= WW;
+            WQ: if (q_fill & ~r_rq) w_st <= WW;
             WW: if (w_sent) w_st <= WB;
             WB: if (s_axi_bready) w_st <= WI;
             default: w_st <= WI;
