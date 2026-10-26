@@ -12,7 +12,10 @@
 // the line as it stood then. The bench answers the DMA port's snoops after a random wait, as the D$
 // would, and checks that each DMA line goes to the controller only after its own snoop's answer (a
 // clean for a read, a flush for a write) and that a flushed write's release comes as the controller
-// takes it. At the end every request has completed: PASS.
+// takes it. The DMA port keeps up to four reads asked at once, so its reads overlap, answered in
+// order. At the end every request has completed: PASS. A last phase streams line reads alone with a
+// fixed snoop wait (+snoop_wait=N, default 30 cycles: the crossing, the D$ and the L2) and reports
+// the port's line rate.
 module tb_ddr4_mem;
    reg clk = 0, reset = 1;
    always #1.5 clk = ~clk;
@@ -83,11 +86,14 @@ module tb_ddr4_mem;
    longint     l_t0 [0:31];
    int         n_l_rd, n_l_wr, n_a_rd, n_a_wr, lat_sum, lat_n, lat_min, lat_max;
    // ---- the DMA port's transactions ----
-   bit [511:0] a_exp;  int a_k, a_left;  bit a_rd_busy, a_wr_busy;
+   typedef struct { bit [2:0] id; int k, left; } a_ar_t;
+   a_ar_t      a_ars [$];                  // the reads asked, in order: their beats come in this order
+   bit [511:0] a_exps [$];                 // ...and their lines, as each entered the controller
+   int         a_k, a_left;  bit a_wr_busy;
    bit [63:0]  a_wstrb_line;  bit [511:0] a_wdata_line;
 
    // traffic shape
-   int  phase;                              // 0 mixed, 1 streams, 2 writes only, 3 idle, 4 one bank's rows
+   int  phase;                              // 0 mixed, 1 streams, 2 writes only, 3 idle, 4 one bank's rows, 5 DMA line reads alone
    bit  [25:0] stream_l;
    function automatic bit [25:0] pick_line();
       bit [25:0] l;
@@ -151,60 +157,71 @@ module tb_ddr4_mem;
 
    // ---- the snoops: answered after 0..15 cycles; each DMA line enters behind its own answer (one
    // answered snoop an engine: a clean is the read engine's, a flush the write engine's) ----
-   int  sn_wait = -1, n_sn = 0;
-   bit  sn_r_v = 0, sn_w_v = 0;  bit [25:0] sn_r_line, sn_w_line;
+   int  sn_wait = -1, n_sn = 0, sn_fixed = 30;
+   bit  sn_w_v = 0;  bit [25:0] sn_w_line;
+   bit  [25:0] sn_r_q [$];                  // the read engine's lines snooped and not yet in the controller
+   initial void'($value$plusargs("snoop_wait=%d", sn_fixed));
    always @(posedge clk) if (!reset) begin
       sn_ack <= 1'b0;
       if (sn_valid && !sn_ack) begin
-         if (sn_wait < 0) sn_wait = $urandom % 16;
+         if (sn_wait < 0) sn_wait = (phase == 5) ? sn_fixed : $urandom % 16;
          else if (sn_wait == 0) begin
             sn_ack <= 1'b1;  sn_wait = -1;  n_sn++;
-            if (sn_keep ? sn_r_v : sn_w_v) $fatal(1, "tb: an engine's second snoop before its line entered");
-            if (sn_keep) begin sn_r_v = 1;  sn_r_line = sn_line; end else begin sn_w_v = 1;  sn_w_line = sn_line; end
+            if (!sn_keep && sn_w_v) $fatal(1, "tb: the write engine's second snoop before its line entered");
+            if (sn_keep && sn_r_q.size() >= 3) $fatal(1, "tb: the read engine snooped a fourth line ahead");
+            if (sn_keep) sn_r_q.push_back(sn_line); else begin sn_w_v = 1;  sn_w_line = sn_line; end
          end else sn_wait--;
       end
       if (sn_rel != (dut.a_rq_valid && dut.rq_ready && dut.a_rq_we))
          $fatal(1, "tb: sn_rel %0d as a DMA write enters %0d", sn_rel, dut.a_rq_valid && dut.rq_ready && dut.a_rq_we);
       if (dut.a_rq_valid && dut.rq_ready) begin
-         if (dut.a_rq_we ? !(sn_w_v && sn_w_line == dut.a_rq_line) : !(sn_r_v && sn_r_line == dut.a_rq_line))
+         if (dut.a_rq_we ? !(sn_w_v && sn_w_line == dut.a_rq_line) : !(sn_r_q.size() != 0 && sn_r_q[0] == dut.a_rq_line))
             $fatal(1, "tb: DMA line %h (we %0d) entered without its snoop", dut.a_rq_line, dut.a_rq_we);
-         if (dut.a_rq_we) sn_w_v = 0; else sn_r_v = 0;
+         if (dut.a_rq_we) sn_w_v = 0; else void'(sn_r_q.pop_front());
       end
    end
 
-   // ---- the DMA port: one read and one write at a time, like the bridge ----
+   // ---- the DMA port: up to four reads asked and one write at a time ----
+   int  str_n = 0;  longint str_t0 = 0, str_t1 = 0;
    always @(posedge clk) if (!reset) begin
       // the bridge's requests enter the controller: the reference memory moves then
       if (dut.a_rq_valid && dut.rq_ready) begin
          if (dut.a_rq_we) begin
             ref_write(dut.a_rq_line, dut.u_axi.w_buf, dut.u_axi.w_strb);  n_a_wr++;
-         end else begin a_exp = ref_line(dut.a_rq_line); n_a_rd++; end
+         end else begin a_exps.push_back(ref_line(dut.a_rq_line)); n_a_rd++; end
       end
       if (arvalid && arready) arvalid <= 0;
       if (awvalid && awready) awvalid <= 0;
       if (rvalid && rready) begin
-         if (!a_rd_busy) $fatal(1, "tb: AXI read data with no read");
-         if (rdata !== a_exp[a_k*64 +: 64]) $fatal(1, "tb: AXI read beat at %0d: %h, expected %h", a_k, rdata, a_exp[a_k*64 +: 64]);
+         if (a_ars.size() == 0 || a_exps.size() == 0) $fatal(1, "tb: AXI read data with no read in the controller");
+         a_k = a_ars[0].k;  a_left = a_ars[0].left;
+         if (rdata !== a_exps[0][a_k*64 +: 64]) $fatal(1, "tb: AXI read beat at %0d: %h, expected %h", a_k, rdata, a_exps[0][a_k*64 +: 64]);
          if (rlast != (a_left == 0)) $fatal(1, "tb: AXI rlast with %0d beats left", a_left);
-         if (rid != arid) $fatal(1, "tb: AXI rid %0d, expected %0d", rid, arid);
-         a_k++;  a_left--;
-         if (rlast) a_rd_busy = 0;
+         if (rid != a_ars[0].id) $fatal(1, "tb: AXI rid %0d, expected %0d", rid, a_ars[0].id);
+         a_ars[0].k++;  a_ars[0].left--;
+         if (rlast) begin
+            void'(a_ars.pop_front());  void'(a_exps.pop_front());
+            if (phase == 5) begin str_n++;  str_t1 = cyc; end
+         end
       end
       if (wvalid && wready) wvalid <= 0;
       if (bvalid && bready) begin
          if (!a_wr_busy || bid != awid) $fatal(1, "tb: AXI B for id %0d with no write", bid);
          a_wr_busy = 0;
       end
-      rready <= ($urandom % 4) != 0;
+      rready <= (phase == 5) || ($urandom % 4) != 0;
       bready <= ($urandom % 4) != 0;
-      if (!a_rd_busy && !draining && phase != 3 && phase != 2 && ($urandom % 40) == 0) begin
-         automatic bit [25:0] l = pick_line();
-         automatic bit line = ($urandom % 2) == 0;
+      if ((!arvalid || arready) && a_ars.size() < 4 && !draining && phase != 3 && phase != 2
+          && (phase == 5 || ($urandom % 40) == 0)) begin
+         automatic bit [25:0] l = (phase == 5) ? stream_l + str_n + a_ars.size() + 1 : pick_line();
+         automatic bit line = (phase == 5) || ($urandom % 2) == 0;
          automatic bit [2:0] k = line ? 3'd0 : $urandom;
-         arvalid <= 1;  arid <= $urandom;  araddr <= {l, k, 3'b000};  arlen <= line ? 8'd7 : 8'd0;
-         a_rd_busy = 1;  a_k = k;  a_left = line ? 7 : 0;
+         automatic bit [2:0] id = $urandom;
+         arvalid <= 1;  arid <= id;  araddr <= {l, k, 3'b000};  arlen <= line ? 8'd7 : 8'd0;
+         a_ars.push_back('{id: id, k: k, left: line ? 7 : 0});
+         if (phase == 5 && str_t0 == 0) str_t0 = cyc;
       end
-      if (!a_wr_busy && !draining && phase != 3 && ($urandom % 40) == 0) begin
+      if (!a_wr_busy && !draining && phase != 3 && phase != 5 && ($urandom % 40) == 0) begin
          automatic bit [25:0] l = pick_line();
          awvalid <= 1;  awid <= $urandom;  awaddr <= {l, 3'($urandom), 3'b000};  awlen <= 8'd0;
          wvalid <= 1;  wdata <= {$urandom, $urandom};  wstrb <= $urandom;  wlast <= 1;
@@ -214,11 +231,11 @@ module tb_ddr4_mem;
 
    // ---- the run ----
    function automatic int busy_n();
-      int n = 0; for (int k = 0; k < 32; k++) n += l_busy[k]; return n + a_rd_busy + a_wr_busy + q_valid;
+      int n = 0; for (int k = 0; k < 32; k++) n += l_busy[k]; return n + a_ars.size() + a_wr_busy + q_valid;
    endfunction
    initial begin
       for (int k = 0; k < 32; k++) begin l_busy[k] = 0; l_beat[k] = 0; end
-      a_rd_busy = 0; a_wr_busy = 0; n_l_rd = 0; n_l_wr = 0; n_a_rd = 0; n_a_wr = 0;
+      a_wr_busy = 0; n_l_rd = 0; n_l_wr = 0; n_a_rd = 0; n_a_wr = 0;
       lat_sum = 0; lat_n = 0; lat_min = 1 << 30; lat_max = 0; phase = 0; stream_l = 26'h12340;
       repeat (10) @(posedge clk);
       reset = 0;
@@ -231,6 +248,14 @@ module tb_ddr4_mem;
       draining = 1;
       repeat (3000) @(posedge clk);
       if (busy_n() != 0) $fatal(1, "tb: %0d requests still in flight after draining", busy_n());
+      // the DMA port's line rate: line reads alone, back to back, each snoop answered after sn_fixed
+      draining = 0;  phase = 5;  stream_l = 26'h23456;
+      wait (str_n == 400);
+      phase = 3;  draining = 1;
+      repeat (3000) @(posedge clk);
+      if (busy_n() != 0) $fatal(1, "tb: %0d requests still in flight after the stream", busy_n());
+      $display("tb_ddr4_mem: DMA line reads, snoop wait %0d: %0d lines in %0d cycles, %0d.%02d cycles a line",
+               sn_fixed, str_n, str_t1 - str_t0, (str_t1 - str_t0) / str_n, ((str_t1 - str_t0) * 100 / str_n) % 100);
       u_phy.report();
       $display("tb_ddr4_mem: line port %0d reads %0d writes, DMA %0d reads %0d writes (%0d snoops); read latency %0d..%0d, mean %0d.%0d cycles",
                n_l_rd, n_l_wr, n_a_rd, n_a_wr, n_sn, lat_min, lat_max, lat_sum / lat_n, (lat_sum * 10 / lat_n) % 10);

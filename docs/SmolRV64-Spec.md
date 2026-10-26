@@ -1765,9 +1765,13 @@ The L2's misses and write-backs go out on the `ddr_*` port: the testbench's mode
   the row (`line[0]` group, `[6:1]` column, `[25:9]` row, bank `[8:7] ^ row[1:0] ^ row[3:2]`: a stream's
   D$ victim, 128 KiB back, never shares its fill's bank). Refresh every tREFI,
   ZQCS, ODT on writes and the PHY's VT tracking are its own. The DMA masters' AXI port
-  (`ddr4_port_axi`: one transaction, within one line, at a time; register slices on AW/W and R
-  before it; each line snooped in the D$ before it goes, a read's cleaned, a write's flushed and
-  released as the controller takes it) goes first.
+  (`ddr4_port_axi`: transactions within one line; up to three reads in flight in slots of their
+  own -- the controller's buffers 12, 13 and 15 -- snooped, asked and answered in AR order, so a
+  line's snoop overlaps the DRAM reads before it, and one write at a time (buffer 14); register
+  slices on AW/W and R before it; each line snooped in the D$ before it goes, a read's cleaned, a
+  write's flushed and released as the controller takes it) goes first. `tb_ddr4_mem` streams line
+  reads with a fixed snoop wait: 48.5 `ui_clk` cycles a line at 30 (134 one at a time), 41 at 15,
+  68 at 60; past ~40 the snoop channel, one snoop at a time, is the bound.
 
 The testbench model keeps 8 transactions in flight. Each draws the measured latency at
 acceptance, and they are answered in request order; `+ddr_reorder` answers in any order.

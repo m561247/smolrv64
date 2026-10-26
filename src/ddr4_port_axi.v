@@ -4,11 +4,15 @@
 //
 // Every transaction the masters make lies within one 64-byte line: dma_master's one 8-byte beat or
 // eight-beat line (virtio-blk, virtio-net, virtio-input) and vga_scanout's eight-beat line. So a
-// transaction is one line request, and anything else asserts. A read engine and a write engine
-// each take one transaction at a time, each with its line buffer (tag 12: the read's, 14: the
-// write's): a read's line lands in its buffer and its beats go back on R; a write's beats gather
-// with their strobes into its buffer, the line goes as one masked write, and B goes back once the
-// PHY has taken both halves.
+// transaction is one line request, and anything else asserts. The read engine keeps up to NR = 3
+// reads in flight, each in a slot with a line buffer of its own (the controller's buffers 12, 13
+// and 15), in the order their ARs came: the oldest unsnooped slot has the snoop, the oldest snooped
+// one goes to the controller, a line lands in its slot as the PHY names the buffer, and the oldest
+// slot whose line is in sends its beats on R, in order, through a beat register. So a line's snoop
+// and the lines before it in DRAM overlap, where one read at a time paid them one after another
+// (a 1920x1200 scan needs a line every 267 ns). The write engine takes one transaction at a time
+// (buffer 14): its beats gather with their strobes, the line goes as one masked write, and B goes
+// back once the PHY has taken both halves.
 //
 // COHERENCE. Before its line goes to the controller each engine has the D$ snoop it (sn_*, through
 // ddr_port_sync's snoop channel, the engines taking turns): a read has it cleaned, so memory holds
@@ -71,22 +75,33 @@ module ddr4_port_axi (
    output reg  [255:0]  wd_data,
    output reg  [31:0]   wd_mask                 // 1: the byte is not written
 );
-   localparam [3:0] RBUF = 4'd12, WBUF = 4'd14;
+   localparam [3:0] WBUF = 4'd14;
    assign s_axi_bresp = 2'b00;
    assign s_axi_rresp = 2'b00;
 
-   // ---- the read engine: idle, snoop, request, wait for the line, beats ----
-   localparam [2:0] I = 3'd0, RS = 3'd1, Q = 3'd2, W = 3'd3, S = 3'd4;
-   reg  [2:0]   r_st;
-   reg  [25:0]  r_line;
-   reg  [2:0]   r_k;                            // the next beat's place in the line
-   reg  [2:0]   r_left;                         // beats after this one
-   reg  [511:0] r_buf;
-   reg  [1:0]   r_got;
-   assign s_axi_arready = (r_st == I);
-   assign s_axi_rvalid  = (r_st == S);
-   assign s_axi_rdata   = r_buf[r_k*64 +: 64];
-   assign s_axi_rlast   = (r_left == 3'd0);
+   // ---- the read engine: NR slots in a ring, in AR order ----
+   localparam integer NR = 3;
+   function [1:0] nx(input [1:0] p); nx = (p == NR - 1) ? 2'd0 : p + 2'd1; endfunction
+   function [3:0] rbuf(input [1:0] p); rbuf = (p == 2'd0) ? 4'd12 : (p == 2'd1) ? 4'd13 : 4'd15; endfunction
+   reg  [NR-1:0] s_v, s_sn, s_rq;                // per slot: in use, snooped, asked of the controller
+   reg  [1:0]    s_got [0:NR-1];                 // ...the line's halves in
+   reg  [25:0]   s_line [0:NR-1];
+   reg  [2:0]    s_k0 [0:NR-1], s_n [0:NR-1], s_id [0:NR-1];   // first beat, beats after it, id
+   reg  [511:0]  s_buf [0:NR-1];
+   reg  [1:0]    a_p, sn_p, rq_p, rs_p;          // the slot an AR takes, snoops, asks, answers next
+   reg           rs_on;                          // rs_p's beats have begun: r_k, r_left are its
+   reg  [2:0]    r_k, r_left;                    // the beat the register takes next, the beats after it
+   reg           r_vq, r_lq;                     // the beat register, R's
+   reg  [63:0]   r_dq;
+   assign s_axi_arready = ~s_v[a_p];
+   assign s_axi_rvalid  = r_vq;
+   assign s_axi_rdata   = r_dq;
+   assign s_axi_rlast   = r_lq;
+   wire          r_take = r_vq & s_axi_rready;
+   wire          r_load = (~r_vq | r_take) & s_v[rs_p] & (s_got[rs_p] == 2'b11);
+   wire [2:0]    l_k    = rs_on ? r_k : s_k0[rs_p];
+   wire [2:0]    l_left = rs_on ? r_left : s_n[rs_p];
+   wire [25:0]   r_line = s_line[sn_p];          // the line the read engine snoops
 
    // ---- the write engine: idle, beats, snoop, request, wait for the PHY to take it, B ----
    localparam [2:0] WI = 3'd0, WD = 3'd1, WS = 3'd2, WQ = 3'd3, WW = 3'd4, WB = 3'd5;
@@ -101,7 +116,7 @@ module ddr4_port_axi (
 
    // ---- the snoop: the engines take turns; an engine owns the channel from its first cycle to the
    // answer ----
-   wire r_sn = (r_st == RS);
+   wire r_sn = s_v[sn_p] & ~s_sn[sn_p];
    wire w_sn = (w_st == WS);
    reg  sn_own, sn_w, sn_lastw;                 // the channel is owned, by the write engine, which had it last
    wire sn_pick = w_sn & (~r_sn | ~sn_lastw);
@@ -113,48 +128,51 @@ module ddr4_port_axi (
    wire w_snack = sn_ack &  sn_w;
 
    // ---- requests: the read engine's first ----
-   wire r_rq = (r_st == Q);
+   wire r_rq = s_v[rq_p] & s_sn[rq_p] & ~s_rq[rq_p];
    wire w_rq = (w_st == WQ);
    assign rq_valid = r_rq || w_rq;
    assign rq_we    = !r_rq;
-   assign rq_line  = r_rq ? r_line : w_line;
-   assign rq_buf   = r_rq ? RBUF : WBUF;
+   assign rq_line  = r_rq ? s_line[rq_p] : w_line;
+   assign rq_buf   = r_rq ? rbuf(rq_p) : WBUF;
    wire rq_go = rq_valid && rq_ready;
    assign sn_rel = (w_st == WQ) && rq_go && !r_rq;   // the controller has the flushed line's write
 
-   wire rd_mine = rdDataEn && (rdDataAddr[4:1] == RBUF);
+   wire       rd_mine = rdDataEn && (rdDataAddr[4:3] == 2'b11) && (rdDataAddr[2:1] != 2'b10);   // 12, 13, 15
+   wire [1:0] rd_s    = (rdDataAddr[2:1] == 2'b11) ? 2'd2 : {1'b0, rdDataAddr[1]};          // its slot
    wire wr_mine = wrDataEn && (wrDataAddr[4:1] == WBUF);
    reg  w_sent;                                 // the PHY asked for the second half last cycle
    integer b;
 
    always @(posedge clk) begin
-      if (rd_mine) r_buf[rdDataAddr[0]*256 +: 256] <= rdData;
+      if (rd_mine) s_buf[rd_s][rdDataAddr[0]*256 +: 256] <= rdData;
+      if (r_load) begin r_dq <= s_buf[rs_p][l_k*64 +: 64];  r_lq <= (l_left == 3'd0);  s_axi_rid <= s_id[rs_p]; end
       wd_mine <= wr_mine;
       wd_data <= w_buf[wrDataAddr[0]*256 +: 256];
       wd_mask <= ~w_strb[wrDataAddr[0]*32 +: 32];
       w_sent  <= wr_mine && wrDataAddr[0];
       if (reset) begin
-         r_st <= I;  w_st <= WI;  w_sent <= 1'b0;  sn_own <= 1'b0;  sn_w <= 1'b0;  sn_lastw <= 1'b0;
+         s_v <= {NR{1'b0}};  s_sn <= {NR{1'b0}};  s_rq <= {NR{1'b0}};  a_p <= 2'd0;  sn_p <= 2'd0;  rq_p <= 2'd0;  rs_p <= 2'd0;  rs_on <= 1'b0;  r_vq <= 1'b0;
+         w_st <= WI;  w_sent <= 1'b0;  sn_own <= 1'b0;  sn_w <= 1'b0;  sn_lastw <= 1'b0;
       end else begin
          if (sn_ack) begin sn_own <= 1'b0;  sn_lastw <= sn_w; end
          else if (sn_valid & ~sn_own) begin sn_own <= 1'b1;  sn_w <= sn_pick; end
-         case (r_st)
-            I: if (s_axi_arvalid) begin
-                  r_st <= RS;  r_line <= s_axi_araddr[31:6];  r_k <= s_axi_araddr[5:3];
-                  r_left <= s_axi_arlen[2:0];  s_axi_rid <= s_axi_arid;  r_got <= 2'b00;
-               end
-            RS: if (r_snack) r_st <= Q;
-            Q: if (rq_go) r_st <= W;
-            W: begin
-                  if (rd_mine) r_got[rdDataAddr[0]] <= 1'b1;
-                  if (rd_mine && rdDataAddr[0]) r_st <= S;
-               end
-            S: if (s_axi_rready) begin
-                  r_k <= r_k + 3'd1;  r_left <= r_left - 3'd1;
-                  if (r_left == 3'd0) r_st <= I;
-               end
-            default: r_st <= I;
-         endcase
+         // a read: a slot, its snoop, its request, its line's halves, its beats
+         if (s_axi_arvalid & s_axi_arready) begin
+            s_v[a_p] <= 1'b1;  s_sn[a_p] <= 1'b0;  s_rq[a_p] <= 1'b0;  s_got[a_p] <= 2'b00;
+            s_line[a_p] <= s_axi_araddr[31:6];  s_k0[a_p] <= s_axi_araddr[5:3];
+            s_n[a_p] <= s_axi_arlen[2:0];  s_id[a_p] <= s_axi_arid;
+            a_p <= nx(a_p);
+         end
+         if (r_snack) begin s_sn[sn_p] <= 1'b1;  sn_p <= nx(sn_p); end
+         if (rq_go & r_rq) begin s_rq[rq_p] <= 1'b1;  rq_p <= nx(rq_p); end
+         if (rd_mine) s_got[rd_s][rdDataAddr[0]] <= 1'b1;
+         if (r_load) begin
+            r_vq <= 1'b1;
+            if (l_left == 3'd0) begin
+               s_v[rs_p] <= 1'b0;  s_sn[rs_p] <= 1'b0;  s_rq[rs_p] <= 1'b0;  rs_p <= nx(rs_p);  rs_on <= 1'b0;
+            end
+            else begin r_k <= l_k + 3'd1;  r_left <= l_left - 3'd1;  rs_on <= 1'b1; end
+         end else if (r_take) r_vq <= 1'b0;
          case (w_st)
             WI: if (s_axi_awvalid) begin
                    w_st <= WD;  w_line <= s_axi_awaddr[31:6];  w_k <= s_axi_awaddr[5:3];
@@ -175,7 +193,6 @@ module ddr4_port_axi (
       end
    end
 
-`ifndef SYNTHESIS
    always @(posedge clk) if (!reset) begin
       if (s_axi_arvalid && s_axi_arready &&
           (s_axi_arsize != 3'd3 || s_axi_arburst != 2'b01 || {1'b0, s_axi_araddr[5:3]} + s_axi_arlen[3:0] > 4'd7 || s_axi_arlen[7:3] != 5'd0))
@@ -185,14 +202,17 @@ module ddr4_port_axi (
           (s_axi_awsize != 3'd3 || s_axi_awburst != 2'b01 || {1'b0, s_axi_awaddr[5:3]} + s_axi_awlen[3:0] > 4'd7 || s_axi_awlen[7:3] != 5'd0))
          $fatal(1, "ddr4_port_axi: a write (addr %h len %0d size %0d burst %0d) that is not within one line",
                 s_axi_awaddr, s_axi_awlen, s_axi_awsize, s_axi_awburst);
-      if (rd_mine && r_st != W)               $fatal(1, "ddr4_port_axi: read data for a line not asked for");
-      if (rd_mine && rdDataAddr[0] && !r_got[0]) $fatal(1, "ddr4_port_axi: the second burst before the first");
+      if (rd_mine && !(s_v[rd_s] && s_rq[rd_s]) || rd_mine && s_got[rd_s][rdDataAddr[0]])
+         $fatal(1, "ddr4_port_axi: read data in buffer %0d for no line asked of it", rdDataAddr[4:1]);
+      if (rd_mine && rdDataAddr[0] && !s_got[rd_s][0]) $fatal(1, "ddr4_port_axi: the second burst before the first");
       if (wr_mine && w_st != WW)              $fatal(1, "ddr4_port_axi: the PHY asked for write data not queued");
-      if (r_st > S || w_st > WB)              $fatal(1, "ddr4_port_axi: engine states %0d %0d", r_st, w_st);
+      if (w_st > WB || a_p >= NR || sn_p >= NR || rq_p >= NR || rs_p >= NR)
+         $fatal(1, "ddr4_port_axi: write state %0d, slot pointers %0d %0d %0d %0d", w_st, a_p, sn_p, rq_p, rs_p);
+      if ((s_sn & ~s_v) != 0 || (s_rq & ~s_sn) != 0)
+         $fatal(1, "ddr4_port_axi: a slot asked of the controller before its snoop (v %b sn %b rq %b)", s_v, s_sn, s_rq);
       if (sn_ack && !sn_own)                  $fatal(1, "ddr4_port_axi: a snoop answer with no snoop asked");
       if (sn_own && !(sn_w ? w_sn : r_sn) && !sn_ack) $fatal(1, "ddr4_port_axi: a snoop's engine moved on before its answer");
    end
-`endif
 endmodule
 
 `default_nettype wire
