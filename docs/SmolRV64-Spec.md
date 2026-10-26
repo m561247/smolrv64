@@ -1767,11 +1767,12 @@ The L2's misses and write-backs go out on the `ddr_*` port: the testbench's mode
   ZQCS, ODT on writes and the PHY's VT tracking are its own. The DMA masters' AXI port
   (`ddr4_port_axi`: transactions within one line; up to three reads in flight in slots of their
   own -- the controller's buffers 12, 13 and 15 -- snooped, asked and answered in AR order, so a
-  line's snoop overlaps the DRAM reads before it, and one write at a time (buffer 14); register
+  line's snoop overlaps the DRAM reads before it, and one write at a time (buffer 14); the
+  request to the controller leaves from a register, a read's before the write's; register
   slices on AW/W and R before it; each line snooped in the D$ before it goes, a read's cleaned, a
   write's flushed and released as the controller takes it) goes first. `tb_ddr4_mem` streams line
-  reads with a fixed snoop wait: 48.5 `ui_clk` cycles a line at 30 (134 one at a time), 41 at 15,
-  68 at 60; past ~40 the snoop channel, one snoop at a time, is the bound.
+  reads with a fixed snoop wait: 48.0 `ui_clk` cycles a line at 30 (134 one at a time), 41.7 at
+  15, 68.3 at 60; past ~40 the snoop channel, one snoop at a time, is the bound.
 
 The testbench model keeps 8 transactions in flight. Each draws the measured latency at
 acceptance, and they are answered in request order; `+ddr_reorder` answers in any order.
@@ -2461,9 +2462,10 @@ failing family within 0.03 ns of the worst, so area went first, then the deepest
 | 325e5341 | + the lanes' operand bypass selected by the scheduler's registered wake match | **+0.001** | 0 | 146 097 |
 | 71796044 | + nine cycle-identical cuts (the walk's first column, the D$'s doubleword unshifted, a forward's one shift; a landing from registers and its kill looked up a cycle ahead; the translation regime and the lanes' ages as registers; three queues writing a cycle late) and the corrector read ahead | **0.000** | 0 | 146 537 |
 | 7a3b6c95 | + the forward ring's busy flag a register (the scanout's 16-bit line counts and the monitor's device-tree rewrite beside it) | **0.000** | 0 | 146 975 |
+| 0446b9de | + the DMA port's three reads in flight and its request from a register | **0.000** | 0 | 147 932 |
 
 The board gate passes on 325e5341 (the 2g board, 2026-10-24): login, 900 s of Geekbench, zero faults,
-and on 71796044 (2g, 2026-10-25) and 7a3b6c95 (4g; 2g's flash since). The margin is a draw's, not the design's: the same netlist family
+and on 71796044 (2g, 2026-10-25), 7a3b6c95 (4g) and 0446b9de (4g; 2g's flash since). The margin is a draw's, not the design's: the same netlist family
 missed by 0.15 to 0.62 ns in other draws (6ca128ca -0.615, 23ae98a9 -0.335, 5f3fdaca -0.208,
 2f791a83 -0.249, b06455d0 -0.152), each cut taking its family off the failing list (5,593 endpoints
 under 0 at -0.615, 1,367 at -0.208); what remains is a plateau of the core's loops -- the lane's
