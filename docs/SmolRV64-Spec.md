@@ -183,7 +183,10 @@ pending table would give, in the same cycle, with no port on the table and no lo
 buses (a check compares them at every move into the head). The head also pops nothing while dispatch is frozen
 (`redirect_q`, `fr_v`, `dec_red_q`: what the IR holds then is the wrong path and is dropped),
 while a rename shard is below its low-water mark (a lane's shard 4, two groups of one
-register each; an FP shard 2 x `IW`, two groups of a full row) or rename's map is being swept after a total squash (§5), or while a
+register each; an FP shard 2 x `IW`, two groups of a full row) -- the flag a register computed from
+registers only: the list's free count after the cycle's registered frees and BEFORE its allocation,
+against the mark plus the most one cycle allocates (one register for a lane's shard, `IW` for an FP
+shard), so neither the dispatch take nor the commit-and-flush cone stands in front of it -- or rename's map is being swept after a total squash (§5), or while a
 serialising op is in the IR or in flight. A CBO, which waits
 in M for the ROB head, pops only once every older load and store has its address (`CR_CBO`:
 no LQ or SQ entry unfilled, none in the IR), and no load or store pops while a CBO is in the
@@ -580,7 +583,8 @@ path: `m_addr -> lsu -> m_done -> m_wb_ie -> u_iq_i/e_r[9][1]`, 24 logic levels,
 A physical register's shard is encoded in its number and never changes, so a commit's
 `c_pold` is returned to **its own** shard's free list, not to `c_shard`.
 
-Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard below 2 x `IW`.
+Fetch stalls when a lane's shard has fewer than `LOWAT`+1 = 5 free before the cycle's allocation,
+or an FP shard fewer than 3 x `IW` (smolrv64_rename `low_n`).
 
 ---
 
@@ -852,7 +856,7 @@ moves the wall.
 | sources (`NSRC`) | 2 | 3 |
 | holds | slot A's, B's, C's ALU ops, multiplies, divides, branches, jumps, loads, stores and head ops; slot A's system ops | FP arithmetic |
 | ordering | **reorders freely** | **reorders freely** |
-| unit | completes at issue (a mispredict at its squash), writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8), a divide its operands to the MD stage, a system op its record and rs1 to the SYSQ | stage F |
+| unit | completes at issue -- a CTI the next cycle, from registers, on a port of its own (a mispredict at its squash) -- writes IE, IE2, IE3; a load, store or head op hands its VA to M (§8), a divide its operands to the MD stage, a system op its record and rs1 to the SYSQ | stage F |
 | `unit_busy` | the lane's multiply slot; lane A's, a system op at the ROB head | `j_v & ~j_adv`: the FP select register is full and not draining |
 | `ag_only` | the lane's landing buffer holds an entry: only address generators issue (§8) | 0 |
 
@@ -1236,7 +1240,11 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
   carry -- its lookup's and its NC slot's (`rd_pre_a`, `rd_pre_b`) -- and with the answer which it
   was (`rd_src_b`); the LSU registers each candidate's kill as it will stand, and the forward ring's
   next oldest's, so no 16-way lookup of `o_kill` stands in front of the wake (asserted equal to it),
-  and a landing is the D$'s valid or a waiting forward, registers alone. Straddles, uncached and device loads, AMOs and LR/SC keep the FSM path and its one
+  and a landing is the D$'s valid or a waiting forward, registers alone. The landing's destination
+  likewise: the LQ registers `{rdv, prd}` a cycle ahead at the D$'s two pre-tags, the forward ring's
+  next oldest (`fw_lt_n`) and the slow path's start, and a landing picks by flags (`LDPRE`, asserted
+  equal to the direct read), so no 32-way read of the queue stands in front of the wake, the store
+  queue's snoop or the lanes' straight-through choice. Straddles, uncached and device loads, AMOs and LR/SC keep the FSM path and its one
   slow landing (`ld_inflight_idx`), which yields its cycle to a fast landing (one PRF and one
   ROB port). Re-done from the retired da28895b. tiny128 at 60 M, measured DDR shape: IW=2
   13,490,465 -> 13,975,979 (+3.6%), IW=3 13,371,386 -> 13,835,891 (+3.5%). ldbench (L1-resident):
@@ -1916,8 +1924,11 @@ low on `ld_land`/`fp_land`, and an assertion fires the moment that stops being t
 landing load and M's CSR result, and FE's are the FPU, the CTF link and the MD stage, muxed
 before the shard with M yielding.)
 
-The **ROB completion port** is `NW`=5 wide since 10d-ii (M, the ALU, the FPU, the store
-queue's commit, the second ALU); the only yield left is M's, to a landing load or FP result.
+The **ROB completion ports** are `NW` = 2 x `NL` + 5 (13 at IW=4): M's, the FPU's landing, the store
+queue's commit, the MD stage's, the restart's, each lane's own (its column only), and each lane's CTI
+port, a cycle after the CTI executes (a CTI's compare and target decide whether it completes now or
+at its squash, so they stay out of every entry's done). The only yield left is M's, to a landing
+load or FP result.
 
 ### 10.2 Front end
 
@@ -2471,9 +2482,10 @@ failing family within 0.03 ns of the worst, so area went first, then the deepest
 | 71796044 | + nine cycle-identical cuts (the walk's first column, the D$'s doubleword unshifted, a forward's one shift; a landing from registers and its kill looked up a cycle ahead; the translation regime and the lanes' ages as registers; three queues writing a cycle late) and the corrector read ahead | **0.000** | 0 | 146 537 |
 | 7a3b6c95 | + the forward ring's busy flag a register (the scanout's 16-bit line counts and the monitor's device-tree rewrite beside it) | **0.000** | 0 | 146 975 |
 | 0446b9de | + the DMA port's three reads in flight and its request from a register | **0.000** | 0 | 147 932 |
+| e51bbfee | + the schedulers' oldest-first pick (alone it missed by 0.497 and, with `ExtraTimingOpt`, 0.480 -- the LQ's commit cone, the lanes' completion, the landing's wake, ~3,000 endpoints), and three cycle-identical-or-nearly cuts: rename's low-water flag from registers, a CTI's completion a cycle late on a port of its own, the landing's destination read a cycle ahead | **+0.001** | 0 | 148 748 |
 
 The board gate passes on 325e5341 (the 2g board, 2026-10-24): login, 900 s of Geekbench, zero faults,
-and on 71796044 (2g, 2026-10-25), 7a3b6c95 (4g) and 0446b9de (4g; 2g's flash since). The margin is a draw's, not the design's: the same netlist family
+and on 71796044 (2g, 2026-10-25), 7a3b6c95 (4g), 0446b9de (4g; 2g's flash since) and e51bbfee (4g, 2026-10-27). The margin is a draw's, not the design's: the same netlist family
 missed by 0.15 to 0.62 ns in other draws (6ca128ca -0.615, 23ae98a9 -0.335, 5f3fdaca -0.208,
 2f791a83 -0.249, b06455d0 -0.152), each cut taking its family off the failing list (5,593 endpoints
 under 0 at -0.615, 1,367 at -0.208); what remains is a plateau of the core's loops -- the lane's
