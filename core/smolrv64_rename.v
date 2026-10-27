@@ -495,15 +495,13 @@ module smolrv64_rename
       // a lane's shard gets one register a group, an FP shard up to IW: two groups' worth
       localparam integer LW = (gL >= SH_FL) ? ((LOWAT > 2*IW) ? LOWAT : 2*IW) : LOWAT;
       // THE LOW-WATER FLAG READS REGISTERS ONLY (see `stall`): the list's tail after this cycle's
-      // frees (registered a cycle ago) and its head BEFORE this cycle's allocation, against the
-      // mark plus the most one cycle allocates (a lane's shard one, an FP shard IW). The allocation
-      // is the dispatch take's, and the flush and the walk only return registers, so leaving all
-      // three out errs toward the stall: not low here is at least LW free after this cycle.
-      localparam integer LA  = (gL >= SH_FL) ? IW : 1;
-      localparam integer LWI = LW + LA;
-      localparam [PW-1:0] LWA = LWI[PW-1:0];
-      wire [PW-1:0] fr_a = t_n - h;                  // modulo the pointers' width: they wrap
-      assign low_n[gL] = fr_a < LWA;
+      // frees (registered a cycle ago) and its head after the allocation of the group the IR holds
+      // (sel_r: its slots' destinations, from the IR's registers), against the mark. The group
+      // dispatches this cycle or is dropped, so counting it without the dispatch take errs toward
+      // the stall, and the flush and the walk only return registers: not low here is at least LW free
+      // after this cycle, as with the allocation itself.
+      wire [PW-1:0] fr_a = t_n - h - cnt(sel_r);     // modulo the pointers' width: they wrap
+      assign low_n[gL] = fr_a < LW[PW-1:0];
 
       wire [IDXB-1:0]  flrd [0:FLNB-1];
       wire [FLNB-1:0]  behind = ~({FLNB{1'b1}} << h[FLLB-1:0]);   // behind[g] = (g < h's bank): the banks that wrapped

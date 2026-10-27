@@ -184,9 +184,9 @@ buses (a check compares them at every move into the head). The head also pops no
 (`redirect_q`, `fr_v`, `dec_red_q`: what the IR holds then is the wrong path and is dropped),
 while a rename shard is below its low-water mark (a lane's shard 4, two groups of one
 register each; an FP shard 2 x `IW`, two groups of a full row) -- the flag a register computed from
-registers only: the list's free count after the cycle's registered frees and BEFORE its allocation,
-against the mark plus the most one cycle allocates (one register for a lane's shard, `IW` for an FP
-shard), so neither the dispatch take nor the commit-and-flush cone stands in front of it -- or rename's map is being swept after a total squash (§5), or while a
+registers only: the list's free count after the cycle's registered frees and after the allocation
+of the group the IR holds, counted from the IR's own registers (`sel_r`) whether or not it
+dispatches, so neither the dispatch take nor the commit-and-flush cone stands in front of it -- or rename's map is being swept after a total squash (§5), or while a
 serialising op is in the IR or in flight. A CBO, which waits
 in M for the ROB head, pops only once every older load and store has its address (`CR_CBO`:
 no LQ or SQ entry unfilled, none in the IR), and no load or store pops while a CBO is in the
@@ -583,8 +583,8 @@ path: `m_addr -> lsu -> m_done -> m_wb_ie -> u_iq_i/e_r[9][1]`, 24 logic levels,
 A physical register's shard is encoded in its number and never changes, so a commit's
 `c_pold` is returned to **its own** shard's free list, not to `c_shard`.
 
-Fetch stalls when a lane's shard has fewer than `LOWAT`+1 = 5 free before the cycle's allocation,
-or an FP shard fewer than 3 x `IW` (smolrv64_rename `low_n`).
+Fetch stalls when a lane's shard drops below `LOWAT`=4 free, or an FP shard below 2 x `IW`, counting
+the allocation of the group in the IR (smolrv64_rename `low_n`).
 
 ---
 
