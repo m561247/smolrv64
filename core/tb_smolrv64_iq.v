@@ -8,6 +8,7 @@
 //   6. full, and flush
 //   7. in order (the INORDER instance), and an entry that hands itself on (d_hx) waits while its
 //      handoff register is taken (hx_busy) while the others issue past it
+//   8. the oldest live entry goes first when it is ready, past a younger one at a lower index (OLDEST)
 module tb;
    localparam NENT=8, IDXB=3, NSRC=2, ROBB=4, PBITS=9, NWB=3;
    reg clk=0; always #5 clk=~clk;
@@ -32,7 +33,7 @@ module tb;
    wire [NENT*NSRC-1:0] iss_hq, io_iss_hq;   // the registered wake matches (the core's operand select)
    always @(posedge clk) if (iss_spec | io_iss_spec) $fatal(1, "tb: a speculative issue with SPEC=0");
    smolrv64_iq #(.NENT(NENT),.IDXB(IDXB),.NSRC(NSRC),.ROBB(ROBB),.PBITS(PBITS),.NWB(NWB),
-             .FIXEDL(1)) dut
+             .FIXEDL(1),.OLDEST(1)) dut
      (.clk(clk),.reset(reset),
       .d_valid(d_valid),.d_ready(d_ready),.d_rob(d_rob),.d_ps(d_ps),.d_r(d_r),
       .d_prd(d_prd),.d_long(1'b0),.d_hx(d_hx),.d_ag(1'b0),.d_ent(d_ent),
@@ -133,6 +134,18 @@ module tb;
       if (occupancy!==0 || iss_v!==1'b0 || free_n!==NENT) begin
          $display("FAIL flush: occ=%0d iss_v=%b free_n=%0d", occupancy, iss_v, free_n); errs=errs+1;
       end else $display("  ok  flush clears");
+
+      // 8. oldest first: a young op in a freed low slot does not pass an older ready one above it
+      disp(4'd8, 9'd0,  1'b1, 9'd0);            // entry 0, ready
+      disp(4'd9, 9'd60, 1'b0, 9'd0);            // entry 1, waits on p60
+      @(negedge clk); chk("the only ready entry", 1'b1, 4'd8);
+      take;                                      // entry 0 frees
+      disp(4'd10, 9'd0, 1'b1, 9'd0);            // entry 0 again, younger than entry 1
+      wake(9'd60);
+      @(negedge clk); chk("the oldest ready entry before a younger one at a lower index", 1'b1, 4'd9);
+      take;
+      @(negedge clk); chk("then the younger one", 1'b1, 4'd10);
+      take;
 
       // 1b. every dispatched entry issues exactly once (order unconstrained)
       begin : allissue

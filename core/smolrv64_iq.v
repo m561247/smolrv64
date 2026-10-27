@@ -4,17 +4,19 @@
 // to what is actually load-bearing: N pairs of (physical register, ready), a wakeup that
 // compares each source against the writeback ports, and a pick among the ready ones.
 //
-// NOTHING HERE SCALES WITH N^2, AND NOTHING COMPARES AGE. An earlier version did both and
-// both were mistakes. Age-ordered select was written as "is this older than the best so
-// far", which synthesises to a CHAIN of N comparators -- depth linear in the window, and it
-// was the critical path at 8.3ns. An is-oldest MATRIX then replaced it to enforce "ordered
-// ops issue only when oldest", which fixed the depth and cost N^2 comparators instead.
+// NO TAG COMPARES AGE, AND NO AGE IS ON THE PICK'S PATH. A chain of "is this older than the best
+// so far" is depth linear in the window, and an is-oldest test of every candidate is N^2
+// comparators; both were tried and both set the clock. The ordering that must be preserved --
+// memory ops against each other, until there is disambiguation -- is a property of ONE class,
+// so it belongs to that class's scheduler as a head pointer (O(1)).
 //
-// Neither is needed. Which ready entry goes first does not matter; what matters is how much
-// independent work the window HOLDS. And the ordering that genuinely must be preserved --
-// memory ops against each other, until there is disambiguation -- is a property of ONE
-// class, so it belongs to that class's scheduler as a head pointer (O(1)), not to every
-// scheduler as an age comparison.
+// What age buys is the critical path: a lowest-index pick hands a freed low slot's young op
+// priority over every older one, and an old op on the chain everything waits for can sit ready
+// for many cycles. So the pick prefers ONE entry, the oldest live one (OLDEST): which entry that
+// is comes from an order matrix written at dispatch (a new op is younger than every live one,
+// flops, no compare) and is registered a cycle ahead, so the pick sees an index and a ready bit,
+// and takes the lowest-index ready entry when that one is not ready. (GB5's 77 SimPoints at IW=4,
+// 4645a122: -0.56% cycles, every subtest; the ideal oldest-ready pick -0.94%.)
 //
 // Split by class, each instance is small and their select trees are independent:
 //   integer  ~12 entries, 2 sources
@@ -48,7 +50,9 @@ module smolrv64_iq
     // 1: an address generator (d_ag) may issue on a load's SPECULATIVE wake (s_v/s_preg, its address
     // source only): it keeps its entry, issued and no candidate (e_sp), until the next cycle's verdict
     // (sv_v) frees it (sv_ok) or makes it a candidate again, its source still waiting for the landing
-    parameter SPEC = 0)
+    parameter SPEC = 0,
+    // 1: the pick takes the oldest live entry when it is ready (see the header)
+    parameter OLDEST = 0)
    (input  wire                  clk,
     input  wire                  reset,
 
@@ -194,16 +198,45 @@ module smolrv64_iq
       end
    endgenerate
 
-   // FIXED PRIORITY. Deterministic, and starvation is bounded by the ROB rather than by the
-   // policy: if a low-priority entry never wins, its ROB slot never completes, commit is in
-   // order, the ROB fills, dispatch stops, every other entry drains, and it is all that is
-   // left. The in-order commit point is what makes a cheap pick safe.
+   // THE ORDER: od[i][j] says entry j holds an older op than entry i. A dispatch writes its entry's
+   // row (every live entry is older) and clears its column (it is older than none); a freed entry's
+   // bits go stale and v masks them. The oldest live entry is the one with no live older entry,
+   // registered (o_q, o_ix) for the next cycle's pick, which reads only the registers.
+   reg  [NENT-1:0]  od [0:NENT-1];
+   reg  [NENT-1:0]  o_q;
+   reg  [IDXB-1:0]  o_ix;
+   reg  [NENT-1:0]  o_oh;
+   reg  [IDXB-1:0]  o_n;
+   reg  [IDXB:0]    o_cnt;                         // the oldest entries named (the invariant's)
+   integer          oi;
+   initial begin
+      for (oi = 0; oi < NENT; oi = oi + 1) od[oi] = {NENT{1'b0}};
+      o_q = {NENT{1'b0}};  o_ix = {IDXB{1'b0}};
+   end
+   always @* begin
+      o_n = {IDXB{1'b0}};  o_cnt = {(IDXB+1){1'b0}};
+      for (oi = 0; oi < NENT; oi = oi + 1) begin
+         o_oh[oi] = (OLDEST != 0) & v[oi] & ~|(od[oi] & v);
+         if (o_oh[oi]) o_n = oi[IDXB-1:0];
+         o_cnt = o_cnt + {{IDXB{1'b0}}, o_oh[oi]};
+      end
+   end
+   always @(posedge clk) begin
+      o_q  <= reset ? {NENT{1'b0}} : o_oh;
+      o_ix <= o_n;
+   end
+   // FIXED PRIORITY behind the oldest. Deterministic, and starvation is bounded by the ROB rather
+   // than by the policy: if a low-priority entry never wins, its ROB slot never completes, commit is
+   // in order, the ROB fills, dispatch stops, every other entry drains, and it is all that is left.
+   // The in-order commit point is what makes a cheap pick safe.
+   wire             o_rdy = |(rdy & o_q);          // last cycle's oldest live entry, ready now
    reg              sel_v;
    reg [IDXB-1:0]   sel;
    always @* begin
       sel_v = (|rdy) & ~unit_busy;
       sel   = {IDXB{1'b0}};
       for (k = NENT-1; k >= 0; k = k - 1) if (rdy[k]) sel = k[IDXB-1:0];
+      if (o_rdy) sel = o_ix;
    end
    // THE IN-ORDER QUEUE'S ISSUE INDEX IS ITS HEAD POINTER, A REGISTER. rdy is nonzero only
    // at qhead when INORDER, so `sel` equals qhead whenever iss_v -- but written as the
@@ -299,6 +332,8 @@ module smolrv64_iq
             if (INORDER != 0) qhead <= (qhead == (NENT-1)) ? {IDXB{1'b0}} : qhead + 1'b1;
          end
          if (do_disp) begin
+            od[fsel] <= v;
+            for (k = 0; k < NENT; k = k + 1) od[k][fsel] <= 1'b0;
             if (INORDER != 0) qtail <= (qtail == (NENT-1)) ? {IDXB{1'b0}} : qtail + 1'b1;
             v[fsel]     <= 1'b1;
             e_rob[fsel] <= d_rob;
@@ -344,6 +379,9 @@ module smolrv64_iq
                 && (dep[ak*NSRC+aq][isel] != (~e_long[isel] & (e_prd[isel] == e_ps[ak][aq*PBITS +: PBITS]))))
                $fatal(1, "smolrv64_iq: dependency matrix disagrees with the tag compare (entry %0d src %0d, producer %0d)", ak, aq, isel);
    end
+   // the order names at most one oldest live entry, and one whenever an entry is live
+   always @(posedge clk) if (!reset && (OLDEST != 0) && ((o_cnt > 1) || ((o_cnt == 0) && (|v))))
+      $fatal(1, "smolrv64_iq: the order names %0d oldest entries among live %b", o_cnt, v);
    always @(posedge clk) if (!reset) begin
       if ((REGRDY != 0) & (INORDER == 0) & d_ready_q & ~|freem)
          $fatal(1, "smolrv64_iq: the registered ready promised a free entry and there is none");

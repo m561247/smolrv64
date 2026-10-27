@@ -60,8 +60,9 @@ in flight.
 
 **X is no longer a single slot that everything funnels through.** Dispatch renames,
 allocates a ROB slot and a scheduler entry, and moves on; it does **not** wait for operands.
-The scheduler holds the instruction until its sources are ready and then issues by
-**fixed priority, lowest entry index** — there is no age anywhere (§6.1).
+The scheduler holds the instruction until its sources are ready and then issues its **oldest
+live entry when that one is ready, else by fixed priority, lowest entry index** — no tag is ever
+compared for age (§6.1).
 
 What may reorder is deliberately narrow, but it is no longer only the ALU. **Pure ALU ops
 and FP arithmetic both reorder freely**, in the lanes' schedulers (`ln[k].u_iq`) and `u_iq_f`
@@ -933,9 +934,16 @@ only `fmadd` has: 20 bits/entry against 29.
   an address generator's address source matches (`e_ag`, a load or store, written at dispatch). An
   entry picked on it alone keeps its slot, issued and no candidate (`e_sp`), until the next
   cycle's verdict frees it or makes it a candidate again (§8).
-- **Select**: **fixed priority**, lowest entry index first. Age is not stored, not
-  compared, and not needed — an age matrix is `O(N²)` and buys nothing a free list does not
-  already give. Starvation is impossible because an entry is only freed by issuing.
+- **Select**: the scheduler's **oldest live entry** when it is ready, else **fixed priority**,
+  lowest entry index first (`OLDEST`, the lanes' and the FP scheduler). Which entry is oldest
+  comes from an order matrix of flops written at dispatch (`od`: a new op is younger than every
+  live one; no compare) and is registered a cycle ahead, so the pick reads an index and one ready
+  bit beside its priority encoder; out of context the lane scheduler times at +1.609 ns against
+  +1.500 without it. A lowest-index pick alone hands a freed low slot's young op priority over
+  every older one, and an old op on the critical chain can sit ready for many cycles: the oldest
+  first takes GB5's 77 SimPoints -0.56% (every subtest), the 60 M boot +1.25% retires, pi -4.0%,
+  CoreMark -1.6% (4645a122); the ideal, oldest READY first, -0.94%. Starvation is impossible
+  because an entry is only freed by issuing.
 - **Wake-at-select**, not wake-at-writeback (`FIXEDL`): a fixed-latency producer broadcasts
   its destination in the cycle it is *selected*, so a dependent issues the very next cycle.
   Back-to-back dependent issue is non-negotiable and is check 7 of the module TB.

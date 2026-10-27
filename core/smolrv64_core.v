@@ -1110,7 +1110,7 @@ module smolrv64_core
    // it ran at exactly its critical path (39.50 cyc/px against 5 levels x 8 cycles) because
    // in-order issue would not let the NEXT iteration's multiplies start early.
    smolrv64_iq #(.NENT(NF),.IDXB(IBF),.NSRC(3),.ROBB(ROB_IDXB),.PBITS(RN_PBITS),.NWB(2),
-             .FIXEDL(0),.INORDER(0)) u_iq_f
+             .FIXEDL(0),.INORDER(0),.OLDEST(1)) u_iq_f
      (.clk(clk),.reset(reset),
       .d_valid(mv_f),.d_ready(rf_ready),
       .d_rob(stg_rob_f),
@@ -1508,7 +1508,7 @@ module smolrv64_core
       reg                  v;
       reg [IBI-1:0]        ent;
       smolrv64_iq #(.NENT(NI),.IDXB(IBI),.NSRC(2),.ROBB(ROB_IDXB),.PBITS(RN_PBITS),.NWB(NWB_C),
-                .FIXEDL(1),.INORDER(0),.SPEC(1)) u_iq
+                .FIXEDL(1),.INORDER(0),.SPEC(1),.OLDEST(1)) u_iq
         (.clk(clk),.reset(reset),
          .d_valid(mv),.d_ready(ready),.d_rob(stg_rob),
          .d_ps(stg_ps[2*RN_PBITS-1:0]),.d_r(stg_r),.d_prd(stg_prd),.d_long(stg_late),.d_hx(stg_hx),
