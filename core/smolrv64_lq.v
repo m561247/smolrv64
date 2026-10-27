@@ -54,6 +54,8 @@ module smolrv64_lq
     parameter PCHB  = 8,               // bits of the load's PC the wait table is indexed by (PC[PCHB:1])
     parameter NW    = 1,               // loads allocated a cycle: a dispatch group's row
     parameter NB    = 4,               // banks: the entry's low bits; a row's loads take one each
+    parameter LDPRE = 1,               // the landing's destination from registers read a cycle ahead (l_pre_a);
+                                       // 0 reads it at the landing (the unit benches, which pick it then)
     parameter RKB   = (NW > 1) ? $clog2(NW) : 1,   // derived: a rank among a row's loads
     parameter BL    = $clog2(NB),                  // derived: the bank bits
     parameter BRB   = IDXB - BL,                   // derived: the row bits
@@ -159,6 +161,16 @@ module smolrv64_lq
     input  wire [IDXB-1:0]       l_tg,
     input  wire [IDXB-1:0]       l_alt,
     input  wire                  l_rsp,
+    // THE LANDING'S DESTINATION IS READ A CYCLE AHEAD at every entry the next landing can be: the
+    // tags the D$'s next answer can carry (l_pre_a, l_pre_b: its lookup and its NC slot, registers)
+    // and which one it carries (l_src_b), the forward ring's next oldest (l_fwn) and whether a
+    // forward waits (l_fw), and the slow path's entry, the one x_take starts. A landing picks its
+    // register by those flags alone, so no index mux or 32-way read stands in front of the wake.
+    input  wire [IDXB-1:0]       l_pre_a,
+    input  wire [IDXB-1:0]       l_pre_b,
+    input  wire                  l_src_b,
+    input  wire                  l_fw,
+    input  wire [IDXB-1:0]       l_fwn,
     output wire [PBITS-1:0]      l_prd,
     output wire [5:0]            l_rd,
     output wire                  l_rd_v,
@@ -454,10 +466,25 @@ module smolrv64_lq
    assign x_fp    = isfp[xi];
    assign x_unc   = unc[xi];
 
-   // The landing entry's payload, read at both candidates and picked by l_rsp.
-   assign l_prd  = l_rsp ? prd[l_tg] : prd[l_alt];
+   // The landing entry's payload, read at both candidates and picked by l_rsp; its destination and
+   // whether it writes one, from the registers read a cycle ahead (see l_pre_a). An entry the next
+   // landing can be is in flight, so nothing rewrites its destination between the read and the landing.
+   reg  [PBITS:0] ld_a_q, ld_b_q, ld_f_q, ld_s_q;
+   initial begin ld_a_q = {(PBITS+1){1'b0}}; ld_b_q = {(PBITS+1){1'b0}}; ld_f_q = {(PBITS+1){1'b0}}; ld_s_q = {(PBITS+1){1'b0}}; end
+   always @(posedge clk) begin
+      ld_a_q <= {rdv[l_pre_a], prd[l_pre_a]};
+      ld_b_q <= {rdv[l_pre_b], prd[l_pre_b]};
+      ld_f_q <= {rdv[l_fwn], prd[l_fwn]};
+      if (x_v & x_take) ld_s_q <= {rdv[x_idx], prd[x_idx]};
+   end
+   wire [PBITS:0] ld_d = l_rsp ? {rdv[l_tg], prd[l_tg]} : {rdv[l_alt], prd[l_alt]};
+   wire [PBITS:0] ld_q = (LDPRE == 0) ? ld_d : l_rsp ? (l_src_b ? ld_b_q : ld_a_q) : (l_fw ? ld_f_q : ld_s_q);
+   assign l_prd  = ld_q[PBITS-1:0];
    assign l_rd   = l_rsp ? rdn[l_tg] : rdn[l_alt];
-   assign l_rd_v = l_rsp ? rdv[l_tg] : rdv[l_alt];
+   assign l_rd_v = ld_q[PBITS];
+   always @(posedge clk) if (!reset && l_v && (ld_q != ld_d))
+      $fatal(1, "smolrv64_lq: the landing's destination read a cycle ahead (%b p%0d) is not entry %0d's (%b p%0d)",
+             ld_q[PBITS], ld_q[PBITS-1:0], l_rsp ? l_tg : l_alt, ld_d[PBITS], ld_d[PBITS-1:0]);
    assign l_rob  = l_rsp ? rob[l_tg] : rob[l_alt];
    assign l_pa   = l_rsp ? pa_rd[PAW +: PAW] : pa_rd[2*PAW +: PAW];
 

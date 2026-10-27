@@ -89,6 +89,7 @@ module smolrv64_lsu
     output wire            fw_inj,         // the forward lands this cycle (on pt_rtag)
     output wire            fw_any,         // a forward waits: it lands in the next cycle the D$ returns none...
     output wire [LDTW-1:0] fw_lt,          // ...on this tag (a register)
+    output wire [LDTW-1:0] fw_lt_n,        // ...and the tag that register takes next
     output wire            pt_done,
     output wire            pt_ack,         // accepted this cycle -- the requester may advance
     output wire            pt_is_store,    // direction of the access IN FLIGHT
@@ -704,9 +705,10 @@ module smolrv64_lsu
    // next cycle's older: this cycle's start when none waits behind the one landing, else that one
    wire            fw_nx_new = (fw_n == 2'd0) | ((fw_n == 2'd1) & fw_inj);
    wire            fw_nx_snd = (fw_n == 2'd2) & fw_inj;
-   always @(posedge clk)
-      fw_tag0 <= fw_nx_new ? ld_tag : fw_nx_snd ? fw_tg[~fw_rp] : fw_tag0;
-   assign fw_lt = fw_tag0;
+   wire [LDTW-1:0] fw_tag0_n = fw_nx_new ? ld_tag : fw_nx_snd ? fw_tg[~fw_rp] : fw_tag0;
+   always @(posedge clk) fw_tag0 <= fw_tag0_n;
+   assign fw_lt   = fw_tag0;
+   assign fw_lt_n = fw_tag0_n;
    always @(posedge clk) begin
       if (~fw_busy) begin fw_tg[fw_wp] <= ld_tag;  fw_q[fw_wp] <= fw_data; end
       if (reset) begin fw_n <= 2'd0;  fw_wp <= 1'b0;  fw_rp <= 1'b0; end
