@@ -132,16 +132,21 @@ if [ -n "$cf_runs" ]; then
 fi
 echo "exp $tag: running on M5, fastmac and mercury$([ -n "$cf_runs" ] && echo ' and coffee') ($(date +%H:%M))"
 
-# wait for both, never silently (tools/watch-remote.sh), then fetch the logs and print the table
-"$here/tools/watch-remote.sh" M5 "test -f $M5_ROOT/$tag.out/done && echo DONE" 10800 60 > /dev/null ||
+# wait for all, never silently (tools/watch-remote.sh), then fetch the logs and print the table. A
+# host gives up after 3 hours in which none of its runs finished: the probes print the count of
+# finished runs, and several experiments sharing the hosts take far longer than one alone.
+done_or_count() { echo "test -f $1/done && echo DONE || grep -l '^rc=' $1/*.log 2>/dev/null | wc -l"; }
+"$here/tools/watch-remote.sh" M5 "$(done_or_count $M5_ROOT/$tag.out)" 10800 60 > /dev/null ||
    { echo "exp $tag: M5 did not finish"; exit 1; }
-"$here/tools/watch-remote.sh" fastmac "test -f $FM_ROOT/$tag.out/done && echo DONE" 10800 60 > /dev/null ||
+"$here/tools/watch-remote.sh" fastmac "$(done_or_count $FM_ROOT/$tag.out)" 10800 60 > /dev/null ||
    { echo "exp $tag: fastmac did not finish"; exit 1; }
-"$here/tools/watch-remote.sh" mercury "test -f $MC_ROOT/$tag.out/done && echo DONE" 10800 60 > /dev/null ||
+"$here/tools/watch-remote.sh" mercury "$(done_or_count $MC_ROOT/$tag.out)" 10800 60 > /dev/null ||
    { echo "exp $tag: mercury did not finish"; exit 1; }
-if [ -n "$cf_runs" ]; then   # coffee's own, by its done file
-   end=$(( $(date +%s) + 10800 ))
+if [ -n "$cf_runs" ]; then   # coffee's own, by its done file, on the same terms
+   end=$(( $(date +%s) + 10800 )); last=""
    until [ -f "$CF_ROOT/$tag.out/done" ]; do
+      n=$(grep -l '^rc=' "$CF_ROOT/$tag.out"/*.log 2>/dev/null | wc -l)
+      [ "$n" != "$last" ] && { last=$n; end=$(( $(date +%s) + 10800 )); }
       [ $(date +%s) -gt $end ] && { echo "exp $tag: coffee did not finish"; exit 1; }
       sleep 60
    done
