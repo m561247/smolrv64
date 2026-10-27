@@ -616,13 +616,13 @@ module smolrv64_core
    // mispredicting CTI at its squash; a load or store never), the FP and MD landings, the store
    // queue, M's port (which carries the landing loads). Lanes 1.. take ports 4.. (the lane
    // generate assigns them).
-   localparam integer ROB_NW = NL + 5;
+   localparam integer ROB_NW = 2*NL + 5;    // ...and each lane's CTI port, a cycle after it executes
    wire [ROB_NW-1:0]          rob_wv;
    wire [ROB_NW*ROB_IDXB-1:0] rob_wix;
    assign rob_wv[3:0] = {sq_k_take, fp_land & ~(fp_wb & few_int & ~(|by2)), l_wv[0], rob_w_valid & ~(ldw_int & ~(|by0))};
    assign rob_wix[4*ROB_IDXB-1:0] = {sq_kc_rob, ft_rob, l_wix[0], rob_w_idx};
-   assign rob_wv[ROB_NW-1 -: 2] = {md_wb & ~(md_wr & few_int & ~(|by2)), cf_red_fire | fr_rel};
-   assign rob_wix[ROB_NW*ROB_IDXB-1 -: 2*ROB_IDXB] = {md_rob, fr_rob};
+   assign rob_wv[NL + 4 -: 2] = {md_wb & ~(md_wr & few_int & ~(|by2)), cf_red_fire | fr_rel};
+   assign rob_wix[(NL + 5)*ROB_IDXB-1 -: 2*ROB_IDXB] = {md_rob, fr_rob};
    wire [IBF:0]        rf_free;
 `include "smolrv64_credits.vh"
    wire [CRW-1:0]      crd;               // the dispatch credits
@@ -1719,13 +1719,26 @@ module smolrv64_core
       // the write register takes one: the lane's own write wakes its consumers, as a stream's does
       always @(posedge clk) if (!reset & we & bs)
          $fatal(1, "smolrv64_core: lane %0d writes p%h and lands p%h in one cycle", gl, wa_src, q_src);
-      // the lane's ROB completion port: its op at issue (a load or store never; a mispredicting
-      // CTI at its squash), its multiply in the reserved slot, its landing at the drain
-      // -- in its own ROB column: every op a lane runs or lands is its slot's (an integer register
-      // is renamed in its slot's lane), so the column is a constant and the ROB's other columns
-      // never compare this port
+      // the lane's ROB completion port: its op at issue (a load or store never; a CTI the next
+      // cycle, below), its multiply in the reserved slot, its landing at the drain -- in its own ROB
+      // column: every op a lane runs or lands is its slot's (an integer register is renamed in its
+      // slot's lane), so the column is a constant and the ROB's other columns never compare this port
       localparam [ROB_CB-1:0] COL = gl;
-      assign l_wv[gl]  = (iss & ~mis & ~late) | m2 | dc;
+      assign l_wv[gl]  = (iss & ~cti & ~late) | m2 | dc;
+      // A CTI COMPLETES A CYCLE AFTER IT EXECUTES, from registers, on a port of its own: its compare
+      // and target (two carry chains) decide whether it mispredicted, and then it completes at its
+      // squash instead, so in its execute cycle that decision would stand in front of every ROB
+      // entry's done. Dropped when the kill or a redirect takes it in between (a late done must not
+      // land on an entry the kill freed).
+      reg                 ct_v;
+      reg [ROB_IDXB-1:0]  ct_rob;
+      initial ct_v = 1'b0;
+      always @(posedge clk) begin
+         ct_v   <= ~reset & ~redirect & cti & ~mis;
+         ct_rob <= {rob[ROB_IDXB-1:ROB_CB], COL};
+      end
+      assign rob_wv[NL + 5 + gl] = ct_v & ~redirect & ~dead(ct_rob);
+      assign rob_wix[(NL + 5 + gl)*ROB_IDXB +: ROB_IDXB] = ct_rob;
       wire [ROB_IDXB-1:0] wix = dp ? drob : m2 ? mrob2 : rob;   // dp: registers and the SYSQ's fire
       assign l_wix[gl] = {wix[ROB_IDXB-1:ROB_CB], COL};
       always @(posedge clk) if (!reset && l_wv[gl] && wix[ROB_CB-1:0] != COL)
@@ -1955,7 +1968,7 @@ module smolrv64_core
    wire [LQ_N-1:0]     sq_l_fwd;
    wire [LQ_N*28-1:0]  lq_e_vpn;
    wire                lq_x_fwd, lsu_fw_busy, lsu_fw_inj, lsu_fw_any;
-   wire [LQ_IB-1:0]    lsu_fw_lt;
+   wire [LQ_IB-1:0]    lsu_fw_lt, lsu_fw_lt_n;
    wire [63:0]         sq_f_data;  wire [2:0] sq_f_sbo;
    wire [LQ_IB-1:0]    lq_x_idx;
    wire [QNB*(LQ_IB-$clog2(QNB)+1)-1:0] lq_bfree;   // the LQ's free entries by bank, and its bank pointer
@@ -2052,6 +2065,7 @@ module smolrv64_core
       .x_v(lq_x_v), .x_idx(lq_x_idx), .x_pa(lq_x_pa), .x_size(lq_x_size),
       .x_signed(lq_x_signed), .x_fp(lq_x_fp), .x_unc(lq_x_unc), .x_head(lq_x_head), .x_take(lq_x_take),
       .l_v(ld_land), .l_idx(ld_land_idx), .l_tg(dmem_rtag_resp), .l_alt(ld_land_alt), .l_rsp(dmem_rvalid_c),
+      .l_pre_a(dmem_pre_a), .l_pre_b(dmem_pre_b), .l_src_b(dmem_src_b), .l_fw(lsu_fw_any), .l_fwn(lsu_fw_lt_n),
       .l_prd(lq_l_prd), .l_rd(lq_l_rd), .l_rd_v(lq_l_rd_v), .l_rob(lq_l_rob), .l_pa(lq_l_pa),
       .k_v(lq_k_v), .k_idx(lq_k_idx), .k_va(lq_k_va),
       .w_v(lsu_wk_done & ~wk_st), .w_idx(wk_lk_li), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
@@ -2487,7 +2501,7 @@ module smolrv64_core
       .pt_ack(lsu_pt_ack), .pt_is_store(lsu_pt_is_store), .pt_ld_done(lsu_pt_ld_done), .pt_ld_kill(lsu_pt_ld_kill),
       .pt_tag(lq_x_idx), .req_tag(m_lq_idx), .pt_rtag(lsu_pt_rtag), .pt_fast_done(lsu_pt_fast_done),
       .f_ok(dmem_fok), .f_v(dmem_fv), .f_pa(lsu_f_pa), .f_cancel(sq_l_cancel),
-      .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_sbo(sq_f_sbo), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj), .fw_any(lsu_fw_any), .fw_lt(lsu_fw_lt),
+      .pt_fwd(~pt_store & lq_x_fwd), .fw_data(sq_f_data), .fw_sbo(sq_f_sbo), .fw_busy(lsu_fw_busy), .fw_inj(lsu_fw_inj), .fw_any(lsu_fw_any), .fw_lt(lsu_fw_lt), .fw_lt_n(lsu_fw_lt_n),
       .req_store(m_is_store & ~m_is_amo), .req_amo(m_is_amo),
       .req_amo_func(m_amo_func), .req_cbo(m_is_cbo), .req_cbo_zero(m_cbo_zero),
       .req_cbo_keep(m_cbo_keep),
