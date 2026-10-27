@@ -490,12 +490,20 @@ module smolrv64_rename
          assign fq[gk] = fre_q[gk][gL];
       end
       wire [PW-1:0] avail = t - h;
-      // The pointers' next values, so the low-water flag can be a register (see `stall`).
       wire [PW-1:0] t_n = reset ? t : t + cnt(fq);
       wire [PW-1:0] h_n = reset ? hc : flush ? hc_n : h + cnt(sel) - cnt(wsel);
       // a lane's shard gets one register a group, an FP shard up to IW: two groups' worth
       localparam integer LW = (gL >= SH_FL) ? ((LOWAT > 2*IW) ? LOWAT : 2*IW) : LOWAT;
-      assign low_n[gL] = (t_n - h_n) < LW[PW-1:0];
+      // THE LOW-WATER FLAG READS REGISTERS ONLY (see `stall`): the list's tail after this cycle's
+      // frees (registered a cycle ago) and its head BEFORE this cycle's allocation, against the
+      // mark plus the most one cycle allocates (a lane's shard one, an FP shard IW). The allocation
+      // is the dispatch take's, and the flush and the walk only return registers, so leaving all
+      // three out errs toward the stall: not low here is at least LW free after this cycle.
+      localparam integer LA  = (gL >= SH_FL) ? IW : 1;
+      localparam integer LWI = LW + LA;
+      localparam [PW-1:0] LWA = LWI[PW-1:0];
+      wire [PW-1:0] fr_a = t_n - h;                  // modulo the pointers' width: they wrap
+      assign low_n[gL] = fr_a < LWA;
 
       wire [IDXB-1:0]  flrd [0:FLNB-1];
       wire [FLNB-1:0]  behind = ~({FLNB{1'b1}} << h[FLLB-1:0]);   // behind[g] = (g < h's bank): the banks that wrapped
@@ -571,8 +579,9 @@ module smolrv64_rename
    // the minimum is what actually prevents the stall; throttling per-destination only
    // discovers it one instruction too late.  The cost is that the stall probability is the
    // union across shards -- the argument for sizing them unequally rather than adding more.
-   // THE STALL IS A REGISTER: next cycle's low-water flags, from the pointers' next values, so no
-   // pointer's adder or compare stands in front of the dispatch take. It holds the queue's POP;
+   // THE STALL IS A REGISTER: next cycle's low-water flags, from the pointers' registers and the
+   // registered frees (fl.u.low_n), so neither the dispatch take nor the commit and flush cone
+   // stands in front of it. It holds the queue's POP;
    // a group already popped dispatches the next cycle whatever the stall says, and rename
    // allocates for every slot that dispatches (LOWAT covers that group and the one dispatching).
    // An allocation the stall suppressed would hand the next group the same registers.
