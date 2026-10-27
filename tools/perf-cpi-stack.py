@@ -34,9 +34,9 @@ Usage (13 programmable counters -- one set per run, never the union, see perf-sm
     perf-smol br  CMD                   # redirects by cause
     perf-smol mem CMD                   # D$/I$ traffic, loads/stores
     tools/perf-cpi-stack.py perf-smol.cpi.txt     # re-read a run's counts
-    tools/perf-cpi-stack.py --width 2 ...        # a narrower build than the shipping IW=3
+    tools/perf-cpi-stack.py --width 3 ...        # a narrower build than the shipping IW=4
 
-The wait-cycle view's arithmetic: dispatch is WIDTH instructions per cycle (3, the shipping IW), so
+The wait-cycle view's arithmetic: dispatch is WIDTH instructions per cycle (4, the shipping IW), so
     cycles = instructions/WIDTH + sum(wait cycles) + frontend bubbles + UNATTRIBUTED
 and "unattributed" is what no event names, including every cycle that dispatches fewer than
 WIDTH. A run with only the FE_* events names no back-end wait: every one lands in unattributed,
@@ -235,7 +235,7 @@ def tdk(v, parents, pc, R):
     return True
 
 def main():
-    args, width = sys.argv[1:], 3
+    args, width = sys.argv[1:], 4
     if "--width" in args:
         i = args.index("--width"); width = int(args[i + 1]); del args[i:i + 2]
     text = open(args[0]).read() if args else sys.stdin.read()
