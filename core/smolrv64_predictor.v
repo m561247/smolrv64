@@ -274,15 +274,32 @@ module smolrv64_predictor
    // of the eight.
    wire [7:0] tkv = hv & hd1;
    reg  [7:0] bmk [0:7];                     // bank k: the banks before it in the window
-   reg  [7:0] coh, blo;
+   reg  [7:0] coh, lo, ba, bb;
+   // THE END PICK WITH CONSTANT MASKS: the window's order is the first pair's banks (fpm, at or after
+   // the offset) ascending, then the second pair's ascending, so a bank's hits before it are its own
+   // pair's below it -- the constant mask main had -- and, for a second-pair bank, the first pair's
+   // as a whole (any of them, exactly one, any taken: shared by every bank). The offset register
+   // only splits the hits; it is not an input of each bank's pick.
+   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
+      fpm8 = ~((8'd1 << off) - 8'd1);
+   endfunction
+   wire [7:0] fpm   = fpm8(sk_q);
+   wire [7:0] hva   = hv & fpm,  hvb = hv & ~fpm,  tka = tkv & fpm,  tkb = tkv & ~fpm;
+   wire       a_any = |hva;
+   wire       a_one = a_any & ~|(hva & (hva - 8'd1));
+   wire       a_tk  = |tka;
    always @* begin
       for (k = 0; k < 8; k = k + 1)
          bmk[k] = (k[2:0] >= sk_q) ? (((8'd1 << k) - 8'd1) & ~((8'd1 << sk_q) - 8'd1))
                                    : (((8'd1 << k) - 8'd1) |  ~((8'd1 << sk_q) - 8'd1));
       for (k = 0; k < 8; k = k + 1) begin
-         blo    = hv & bmk[k];
-         coh[k] = hv[k] & ((~|blo & tkv[k])
-                         | (|blo & ~|(blo & (blo - 8'd1)) & ~|(tkv & bmk[k])));
+         lo     = (8'd1 << k) - 8'd1;
+         ba     = hva & lo;
+         bb     = hvb & lo;
+         coh[k] = (hva[k] & ((~|ba & tka[k]) | (|ba & ~|(ba & (ba - 8'd1)) & ~|(tka & lo))))
+                | (hvb[k] & ((~a_any & ~|bb & tkb[k])
+                           | (~a_any & |bb & ~|(bb & (bb - 8'd1)) & ~|(tkb & lo))
+                           | (a_one & ~a_tk & ~|bb)));
       end
       cut = |coh;
       for (k = 0; k < 8; k = k + 1) mkv[k] = hv[k] & ~|(coh & bmk[k]);
@@ -296,12 +313,8 @@ module smolrv64_predictor
    // pair after. Each is one OR of the end pick against the offset's mask, so the addresses are a
    // two-way pick of registers and their sums. With no mark ending the window, n_fp is 0 and the
    // next window starts 16 bytes on.
-   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
-      fpm8 = ~((8'd1 << off) - 8'd1);
-   endfunction
-   wire [7:0]      fpk  = fpm8(sk_q);
-   wire            e_fp = |(coh & fpk);
-   wire            n_fp = |(coh & fpk & 8'h7f);
+   wire            e_fp = |(coh & fpm);
+   wire            n_fp = |(coh & fpm & 8'h7f);
    wire [PCW-1:0]  nf   = n_fp ? sa_q : sa16;                      // the next window's first pair...
    wire [PCW-1:0]  nf2  = n_fp ? sa16 : sa32;                      // ...and the pair after it
    wire [PCW-1:0]  h    = {e_fp ? sa_q[PCW-1:4] : sa16[PCW-1:4], hk, 1'b0};

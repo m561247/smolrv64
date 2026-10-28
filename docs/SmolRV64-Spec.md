@@ -408,8 +408,10 @@ Modelled in Simmerv over GB5 single-core (690 G instructions), the BTB-coverage 
 redirects and mispredicts a BTB miss causes) is 44.8 cycles/K instructions for the 2048-entry
 direct-mapped, allocate-every-CTI BTB with backward-taken decode redirects, 1.9 for 2048 entries
 2-way skewed taken-only, and 0.2 for 8192 entries 4-way. Each position decides from the hits
-before it in the window alone whether the window ends there ("before" is a mask of the banks from
-the offset round to it, a function of the offset register), and each way's two next rows -- the
+before it in the window alone whether the window ends there: the window's order is its first
+pair's banks ascending, then the second pair's, so a bank's hits before it are its own pair's
+below it (a constant mask) and, for a second-pair bank, the first pair's as a whole (any, exactly
+one, any taken); the offset register only splits the hits in two. Each way's two next rows -- the
 next window's first pair's and the pair after's -- are skewed from every candidate address (the
 restart's, the ending CTI's target) before the pick, each bank taking one of the two after it;
 after a not-taken mark, or with none, the next window's pairs are the first pair or the pair after
@@ -423,8 +425,8 @@ prefix of the end pick), each bank's bimodal counter is read from a register of 
 block RAM's clock-to-out, and a window's two queue entries are picked one-hot by the end pick's
 masks, a mark's own fields only. No find-first chain, no encode of the end, no rotation and no adder
 stand between the rows read and the next rows' address: out of context at 6.000 ns (FW 6, PCW 40)
-the predictor meets with +0.198 ns, its loop (10 levels; the pairs it replaced, +0.183 and 13
-levels). 3,665 LUTs (+864). A first version that decoded the next offset after the pick and
+the predictor meets with +0.185 ns, its loop (14 levels; the pairs it replaced, +0.183 and 13
+levels). 3,382 LUTs (+581). A first version that decoded the next offset after the pick and
 compared each second pair's tag through `sa_q + 16` missed the build by 0.216 ns on this loop.
 
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
