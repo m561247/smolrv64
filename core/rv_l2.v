@@ -332,8 +332,11 @@ module rv_l2 #(
          d_q_we   <= ~mp_any;
          d_q_id   <= mp_any ? {{(IDW-MB){1'b0}}, mp} : NMI + {{(IDW-BB){1'b0}}, wp};
          d_q_addr <= line_of(mp_any ? m_dl[mp] : wb_dl[wp]);
-         d_q_wdata <= wb_dat[wp];
       end
+      // the write-back's data loads whenever the port is free, not only when something is sent:
+      // at a send it is the same line, and unsent it is never read -- and its 512 enables no longer
+      // wait on the MSHRs' state (m_v -> mp_any -> d_load: 280 endpoints, all route)
+      if (~d_q_valid | d_q_ready) d_q_wdata <= wb_dat[wp];
 
       if (reset) begin
          st <= S_INIT;  ic <= {SB{1'b0}};
