@@ -244,16 +244,20 @@ module smolrv64_predictor
    // THE WINDOW STOPS AT ITS FIRST PAIR'S END when that pair is the last of its page: the I$ reads
    // one page a request.
    wire            w_one = (&sa_q[11:4]) & (sk_q != 3'd0);
-   // each bank's BTB tag: its pair's (the first pair's, or the next one's), from registers
-   wire [TAGW-1:0] stag0 = btag(sa_q), stag1 = btag(sa16);
-   wire [7:0]      fpm   = ~((8'd1 << sk_q) - 8'd1);   // the banks in the window's first pair
+   // THE TAGS FOR THE PAIR AFTER COME WITHOUT AN ADDER: the BTB tag is the bits above the block's,
+   // so the two pairs share it but across a block; the corrector's takes the pair's own bits plus
+   // one, wrapping inside them (ak below). Both are wrong only there, and then that window's second
+   // pair misses -- a lost hint, never a wrong one. (sa_q + 16 in front of the compares cost five
+   // levels on the loop.)
+   wire [TAGW-1:0] stag  = btag(sa_q);
    reg  [PCW-1:0]  ak;
    always @* begin
       hv = 8'd0;  hy = 8'd0;  hd1 = 8'd0;  inw = 8'd0;  ak = sa_q;
       for (k = 0; k < 8; k = k + 1) begin
          ek      = bq[k];
          ck      = yq[k];
-         ak      = (k[2:0] >= sk_q) ? sa_q : sa16;
+         ak      = sa_q;
+         if (k[2:0] < sk_q) ak[YTAGW:4] = sa_q[YTAGW:4] + 1'b1;
          ak[3:1] = k[2:0];
          inw[k]  = (k[2:0] >= sk_q) | ~w_one;
          hv[k]   = ~np_q & inw[k] & bh[k];
@@ -287,11 +291,21 @@ module smolrv64_predictor
       e   = {EW{1'b0}};
       for (k = 0; k < 8; k = k + 1) e = e | ({EW{coh[k]}} & bq[k]);
    end
-   // the ending halfword's pair, and the pair after it
-   wire            hk1  = (hk >= sk_q);
-   wire [PCW-1:0]  hb   = hk1 ? sa_q : sa16;
-   wire [PCW-1:0]  hb16 = hk1 ? sa16 : sa32;
-   wire [PCW-1:0]  h    = {hb[PCW-1:4], hk, 1'b0};                 // its address
+   // Per bank k, from registers: the pair its halfword is in and the pair after it (hbk, hbn), the
+   // halfword's address and the halfword after it -- each picked one-hot by where the window ends,
+   // so no encode of the end stands in front of the next address
+   reg  [PCW-1:0]  hbk [0:7], hbn [0:7];
+   reg  [PCW-1:0]  h, ftc;
+   integer         hj;
+   always @* begin
+      h = {PCW{1'b0}};  ftc = {PCW{1'b0}};
+      for (hj = 0; hj < 8; hj = hj + 1) begin
+         hbk[hj] = (hj[2:0] >= sk_q) ? sa_q : sa16;
+         hbn[hj] = (hj[2:0] >= sk_q) ? sa16 : sa32;
+         h   = h   | ({PCW{coh[hj]}} & {hbk[hj][PCW-1:4], hj[2:0], 1'b0});
+         ftc = ftc | ({PCW{coh[hj]}} & ((hj == 7) ? hbn[hj] : {hbk[hj][PCW-1:4], hj[2:0] + 3'd1, 1'b0}));
+      end
+   end
    wire [2:0]      ety  = e[TGTW +: 3];
    wire [TGTW-1:0] etg  = e[TGTW-1:0];
    wire            dir  = |(coh & hd1);
@@ -306,9 +320,8 @@ module smolrv64_predictor
    assign p_end = pe;
    assign p_mk  = mkw;
    wire            tk   = dir;                                     // the window ends at a taken mark
-   // the halfword after the CTI (no adder behind the mark: the mark's position is the loop's latest
-   // signal), and the next window when no mark ends this one: 16 bytes on, at the same offset
-   wire [PCW-1:0]  ftc  = (hk == 3'd7) ? hb16 : {hb[PCW-1:4], hk + 3'd1, 1'b0};
+   // the next window when no mark ends this one: 16 bytes on, at the same offset (ftc above: the
+   // halfword after the ending CTI, with no adder behind the mark)
    wire [PCW-1:0]  wnx  = {sa16[PCW-1:4], w_one ? 3'd0 : sk_q, 1'b0};
    function [PCW-1:0] tadr(input [EW-1:0] x);                      // an entry's target
       tadr = {{(PCW-TGTW-1){x[TGTW-1]}}, x[TGTW-1:0], 1'b0};
@@ -319,31 +332,37 @@ module smolrv64_predictor
    wire [GHL-1:0]  ghr_post = tk ? phist_step(ghr, h) : ghr;
    // each mark's entry: the ending one's prediction, a not-taken one's details, the pair's pre-state
    wire            push     = adv & (|mkv) & ~flush;
-   wire [QEW-1:0]  pq_e8 [0:7];
+   // a mark's own fields of its queue entry: {taken, yhit, yctr, bank, way, type}
+   localparam integer PFW = 1 + 1 + 2 + 3 + BTBW + 2;
+   wire [PFW-1:0]  pf8 [0:7];
    genvar gm;
    generate for (gm = 0; gm < 8; gm = gm + 1) begin : me
       wire [EW-1:0]  me_e = bq[gm];
       wire [YEW-1:0] me_c = yq[gm];
       wire           me_y = ~me_e[TGTW+2] & hy[gm];
-      assign pq_e8[gm] = {cut & (hk == gm) & dir, tgt, ras_ptr, ghr, me_y, me_y ? me_c[1:0] : 2'b01,
-                          yr_q ^ yh_q, gm[2:0], bw[gm], me_e[TGTW +: 2]};
+      assign pf8[gm] = {coh[gm] & dir, me_y, me_y ? me_c[1:0] : 2'b01, gm[2:0], bw[gm], me_e[TGTW +: 2]};
    end endgenerate
 
-   // the window's entries in mark order (nmk <= M = 2): its first two marks by position
-   reg  [QEW-1:0]  pw_e0, pw_e1;
-   reg  [2:0]      pj0, pj1, pb0, pb1;
-   reg             pf0, pf1;
+   // the window's entries in mark order (nmk <= M = 2): its first two marks in window order, each
+   // one-hot by bank -- no mark before it, exactly one before it -- by the end pick's masks. Only a
+   // mark's own fields are picked; the rest of an entry is the window's.
+   reg  [7:0]      m1h, m2h, mbl;
+   reg  [PFW-1:0]  pf0, pf1;
    integer         pwk;
    always @* begin
-      pf0 = 1'b0;  pf1 = 1'b0;  pj0 = 3'd0;  pj1 = 3'd0;
-      for (pwk = 0; pwk < 8; pwk = pwk + 1)
-         if (mkw[pwk]) begin
-            if (!pf0)      begin pf0 = 1'b1;  pj0 = pwk[2:0]; end
-            else if (!pf1) begin pf1 = 1'b1;  pj1 = pwk[2:0]; end
-         end
-      pb0 = sk_q + pj0;  pb1 = sk_q + pj1;
-      pw_e0 = pq_e8[pb0];  pw_e1 = pf1 ? pq_e8[pb1] : pq_e8[pb0];
+      pf0 = {PFW{1'b0}};  pf1 = {PFW{1'b0}};
+      for (pwk = 0; pwk < 8; pwk = pwk + 1) begin
+         mbl      = mkv & bmk[pwk];
+         m1h[pwk] = mkv[pwk] & ~|mbl;
+         m2h[pwk] = mkv[pwk] & |mbl & ~|(mbl & (mbl - 8'd1));
+         pf0      = pf0 | ({PFW{m1h[pwk]}} & pf8[pwk]);
+         pf1      = pf1 | ({PFW{m2h[pwk]}} & pf8[pwk]);
+      end
    end
+   function [QEW-1:0] pqe(input [PFW-1:0] p);                     // a mark's entry
+      pqe = {p[PFW-1], tgt, ras_ptr, ghr, p[PFW-2 -: 3], yr_q ^ yh_q, p[BTBW+2 +: 3], p[BTBW+1:0]};
+   endfunction
+   wire [QEW-1:0]  pw_e0 = pqe(pf0), pw_e1 = pqe(pf1);
    wire [PQB-1:0]  pw_p1 = pq_wp + 1'b1;
    // bank b takes the entry whose position has parity b: entry 0 at pq_wp, entry 1 at pq_wp + 1.
    // BOTH ARE WRITTEN WHENEVER THE QUEUE HAS ROOM, and push only moves the pointers: the two
@@ -452,37 +471,51 @@ module smolrv64_predictor
       end
    endfunction
    genvar gb, gw;
-   // Way w's two rows for the next window and its offset, each candidate's skewed before the pick
-   // rather than the picked address's after it: the restart's; the ending CTI's target, the RAS top
-   // for a return, else its entry's, the eight skewed and picked one-hot as the entry is; the
-   // halfword after a not-taken mark that ends the window; else 16 bytes on.
+   // Way w's two rows for the next window -- its first pair's and the pair after's -- each candidate's
+   // skewed before the pick rather than the picked address's after it: the restart's; the ending
+   // CTI's target, the RAS top for a return, else its entry's, the eight skewed and picked one-hot as
+   // the entry is; the halfword after a not-taken mark that ends the window, picked one-hot the same
+   // way; else 16 bytes on. Beside them, which banks read the first pair's row (rfp): a mask per
+   // candidate, the targets' decoded from their own offsets and picked one-hot with them, the mark's a
+   // prefix of the end pick, so no encode of the end and no decode of an offset sit on the loop.
+   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
+      fpm8 = ~((8'd1 << off) - 8'd1);
+   endfunction
+   reg  [7:0]      mtk, mc;
+   reg  [PCW-1:0]  rta;
+   integer         kk, kb;
+   always @* begin
+      mtk = 8'd0;
+      for (kk = 0; kk < 8; kk = kk + 1) begin rta = tadr(bq[kk]);  mtk = mtk | ({8{coh[kk]}} & fpm8(rta[3:1])); end
+      // ending at bank k, the next window starts at bank k + 1: the banks after k (all of them at 7)
+      for (kb = 0; kb < 8; kb = kb + 1) begin
+         mc[kb] = coh[7];
+         for (kk = 0; kk < kb; kk = kk + 1) mc[kb] = mc[kb] | coh[kk];
+      end
+   end
+   wire [7:0]      rfp   = flush ? fpm8(rst_a[3:1]) : tk ? (ret ? fpm8(ras[ras_ptr][3:1]) : mtk)
+                         : cut ? mc : fpm8(w_one ? 3'd0 : sk_q);
+   wire [7:0]      kfp   = fpm8(rk);                    // (checked: the next address's own)
    wire [RB-1:0]   rr0   [0:W-1];
    wire [RB-1:0]   rr1   [0:W-1];
-   wire [2:0]      rof;
-   reg  [2:0]      rtk;
-   reg  [PCW-1:0]  rta;
-   integer         kk;
-   always @* begin
-      rtk = 3'd0;
-      for (kk = 0; kk < 8; kk = kk + 1) begin rta = tadr(bq[kk]);  rtk = rtk | ({3{coh[kk]}} & rta[3:1]); end
-   end
-   assign rof = flush ? rst_a[3:1] : tk ? (ret ? ras[ras_ptr][3:1] : rtk) : cut ? hk + 3'd1 : (w_one ? 3'd0 : sk_q);
-   wire [7:0]      rfp   = ~((8'd1 << rof) - 8'd1);   // the banks that read the next window's first pair
-   wire [7:0]      kfp   = ~((8'd1 << rk) - 8'd1);    // (checked: the next address's own)
    generate for (gw = 0; gw < W; gw = gw + 1) begin : rw
-      reg [RB-1:0] rt0, rt1;
+      reg [RB-1:0] t0, t1, c0, c1;
       integer      ki;
       always @* begin
-         rt0 = {RB{1'b0}};  rt1 = {RB{1'b0}};
+         t0 = {RB{1'b0}};  t1 = {RB{1'b0}};  c0 = {RB{1'b0}};  c1 = {RB{1'b0}};
          for (ki = 0; ki < 8; ki = ki + 1) begin
-            rt0 = rt0 | ({RB{coh[ki]}} & bslot (tadr(bq[ki]), gw));
-            rt1 = rt1 | ({RB{coh[ki]}} & bslot1(tadr(bq[ki]), gw));
+            t0 = t0 | ({RB{coh[ki]}} & bslot (tadr(bq[ki]), gw));
+            t1 = t1 | ({RB{coh[ki]}} & bslot1(tadr(bq[ki]), gw));
+            // the halfword after bank ki: its pair's row (at bank 7 the pair after's, where the next
+            // window starts on a pair and no bank reads its second row), and the pair after's
+            c0 = c0 | ({RB{coh[ki]}} & bslot((ki == 7) ? hbn[ki] : hbk[ki], gw));
+            c1 = c1 | ({RB{coh[ki]}} & bslot(hbn[ki], gw));
          end
       end
-      assign rr0[gw] = flush ? bslot (rst_a, gw) : tk ? (ret ? bslot (ras[ras_ptr], gw) : rt0)
-                     : cut ? ((hk == 3'd7) ? bslot(hb16, gw) : bslot(hb, gw)) : bslot(sa16, gw);
-      assign rr1[gw] = flush ? bslot1(rst_a, gw) : tk ? (ret ? bslot1(ras[ras_ptr], gw) : rt1)
-                     : cut ? bslot(hb16, gw) : bslot(sa32, gw);
+      assign rr0[gw] = flush ? bslot (rst_a, gw) : tk ? (ret ? bslot (ras[ras_ptr], gw) : t0)
+                     : cut ? c0 : bslot(sa16, gw);
+      assign rr1[gw] = flush ? bslot1(rst_a, gw) : tk ? (ret ? bslot1(ras[ras_ptr], gw) : t1)
+                     : cut ? c1 : bslot(sa32, gw);
    end endgenerate
    // every bank and way's slot for the training CTI, {bank, way}; the CTI's bank is picked below
    wire [1:0]      bc_rd [0:8*W-1];
@@ -509,19 +542,22 @@ module smolrv64_predictor
                                               // type field carries only conditional-or-not for it)
          reg          nu  [0:NB-1];           // trained recently
          reg [EW-1:0] q;
-         reg [1:0]    cq;
+         reg [RB-1:0] rq;                     // the row q was read at
          integer bi;
          initial for (bi = 0; bi < NB; bi = bi + 1) begin btb[bi] = {EW{1'b0}}; bc[bi] = 2'b00; nu[bi] = 1'b0; end
-         initial begin q = {EW{1'b0}}; cq = 2'b00; end
+         initial begin q = {EW{1'b0}}; rq = {RB{1'b0}}; end
+         // the counter beside the entry: read from the row's register during the block RAM's
+         // clock-to-out, not behind the row's pick (the loop's tail)
+         wire [1:0]   cq = bc[rq];
          assign bc_rd[{BI, WI}] = bc[tsl[gw]];
          assign nu_rd[{BI, WI}] = nu[tsl[gw]];
          assign wq[gw] = {q[EW-1:TGTW+2], q[TGTW+2] ? q[TGTW+1:TGTW] : cq, q[TGTW-1:0]};
-         assign wm[gw] = q[EW-1 -: TAGW] == (fpm[gb] ? stag0 : stag1);
+         assign wm[gw] = q[EW-1 -: TAGW] == stag;
          wire   tw_b = tw_v & (t_last[3:1] == BI);
          always @(posedge clk) if (reset | mv) q <= btb[rrb];
          always @(posedge clk) if (tw_b & tsel[gw]) btb[tsl[gw]] <= t_ent;
          always @(posedge clk) begin
-            if (reset | mv)                cq <= bc[rrb];
+            if (reset | mv)                rq <= rrb;
             if (tw_b & tsel[gw] & res_cbr) bc[tsl[gw]]  <= t_nudge;
             if (tw_b)                      nu[tsl[gw]]  <= nu_d[gw];
          end

@@ -374,8 +374,10 @@ its first halfword in it), looks the window up as the fetch ring asks the I$ for
 stream to the next window. A BTB entry belongs to its CTI's last halfword; a window covers eight
 consecutive halfwords, one in each halfword position, so the BTB and the corrector are each eight
 banks by position. Each BTB bank reads the row of the pair its halfword is in -- the window's first
-pair at or after its offset, else the pair after it -- and compares that pair's tag; the corrector's
-banks all read the row of the window the stream is leaving (the restart's on a restart) -- read
+pair at or after its offset, else the pair after it -- and compares the window's tag (the bits above
+its 2 KiB block, which the two pairs share except across a block, where the second pair misses: a
+lost hint); the corrector's tag for the pair after takes the pair's own bits plus one, wrapping
+inside them. The corrector's banks all read the row of the window the stream is leaving (the restart's on a restart) -- read
 ahead, so the BTB's read and pick are not in front of its read address. No two CTIs share an entry
 (rule B10). Every position evaluates its own hit, corrector hit and direction from registers, and
 the hits in window order mark the known CTIs. **A window ends at its first known CTI predicted
@@ -413,11 +415,15 @@ restart's, the ending CTI's target, the halfword after the ending mark, 16 bytes
 pick, each bank taking one of the two after it. The pair after's row is the low row bits plus one,
 skewed alike: exact for the sums of registers (16 bytes on, after a mark), and for a target, the
 RAS top or a restart exact unless those bits wrap, when that window's second pair reads a wrong row
--- a missed or false hint, never a wrong result. No find-first chain and no rotation stand between
-the rows read and the next rows' address: out of context at 6.000 ns (FW 6, PCW 40) the predictor
-meets with +0.108 ns, the queue's pick of a window's two marks by position; its loop, the block
-RAM's clock-to-out through the pick to the next rows, +0.122 (16 levels; +0.183 and 13 levels for
-the pairs it replaced, the same day). 3,876 LUTs (+1,075).
+-- a missed or false hint, never a wrong result. Which banks take the first pair's row is a mask per
+candidate picked one-hot beside the rows (a target's decoded from its own offset, the mark's a
+prefix of the end pick), each bank's bimodal counter is read from a register of its row during the
+block RAM's clock-to-out, and a window's two queue entries are picked one-hot by the end pick's
+masks, a mark's own fields only. No find-first chain, no encode of the end, no rotation and no adder
+stand between the rows read and the next rows' address: out of context at 6.000 ns (FW 6, PCW 40)
+the predictor meets with +0.258 ns, its loop (11 levels; the pairs it replaced, +0.183 and 13 levels
+the same day). 4,004 LUTs (+1,203). A first version that decoded the next offset after the pick and
+compared each second pair's tag through `sa_q + 16` missed the build by 0.216 ns on this loop.
 
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
 banks by position parity, one write each) in order (a window pushes up to two; the stream moves
