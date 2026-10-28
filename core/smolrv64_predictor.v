@@ -291,21 +291,21 @@ module smolrv64_predictor
       e   = {EW{1'b0}};
       for (k = 0; k < 8; k = k + 1) e = e | ({EW{coh[k]}} & bq[k]);
    end
-   // Per bank k, from registers: the pair its halfword is in and the pair after it (hbk, hbn), the
-   // halfword's address and the halfword after it -- each picked one-hot by where the window ends,
-   // so no encode of the end stands in front of the next address
-   reg  [PCW-1:0]  hbk [0:7], hbn [0:7];
-   reg  [PCW-1:0]  h, ftc;
-   integer         hj;
-   always @* begin
-      h = {PCW{1'b0}};  ftc = {PCW{1'b0}};
-      for (hj = 0; hj < 8; hj = hj + 1) begin
-         hbk[hj] = (hj[2:0] >= sk_q) ? sa_q : sa16;
-         hbn[hj] = (hj[2:0] >= sk_q) ? sa16 : sa32;
-         h   = h   | ({PCW{coh[hj]}} & {hbk[hj][PCW-1:4], hj[2:0], 1'b0});
-         ftc = ftc | ({PCW{coh[hj]}} & ((hj == 7) ? hbn[hj] : {hbk[hj][PCW-1:4], hj[2:0] + 3'd1, 1'b0}));
-      end
-   end
+   // The pair the ending halfword is in, and the pair the halfword after it is in: the first when the
+   // ending bank is at or after the offset (bank 7's next halfword starts the pair after), else the
+   // pair after. Each is one OR of the end pick against the offset's mask, so the addresses are a
+   // two-way pick of registers and their sums. With no mark ending the window, n_fp is 0 and the
+   // next window starts 16 bytes on.
+   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
+      fpm8 = ~((8'd1 << off) - 8'd1);
+   endfunction
+   wire [7:0]      fpk  = fpm8(sk_q);
+   wire            e_fp = |(coh & fpk);
+   wire            n_fp = |(coh & fpk & 8'h7f);
+   wire [PCW-1:0]  nf   = n_fp ? sa_q : sa16;                      // the next window's first pair...
+   wire [PCW-1:0]  nf2  = n_fp ? sa16 : sa32;                      // ...and the pair after it
+   wire [PCW-1:0]  h    = {e_fp ? sa_q[PCW-1:4] : sa16[PCW-1:4], hk, 1'b0};
+   wire [PCW-1:0]  ftc  = {nf[PCW-1:4], hk + 3'd1, 1'b0};          // the halfword after the ending CTI
    wire [2:0]      ety  = e[TGTW +: 3];
    wire [TGTW-1:0] etg  = e[TGTW-1:0];
    wire            dir  = |(coh & hd1);
@@ -320,14 +320,12 @@ module smolrv64_predictor
    assign p_end = pe;
    assign p_mk  = mkw;
    wire            tk   = dir;                                     // the window ends at a taken mark
-   // the next window when no mark ends this one: 16 bytes on, at the same offset (ftc above: the
-   // halfword after the ending CTI, with no adder behind the mark)
-   wire [PCW-1:0]  wnx  = {sa16[PCW-1:4], w_one ? 3'd0 : sk_q, 1'b0};
    function [PCW-1:0] tadr(input [EW-1:0] x);                      // an entry's target
       tadr = {{(PCW-TGTW-1){x[TGTW-1]}}, x[TGTW-1:0], 1'b0};
    endfunction
    wire [PCW-1:0]  tgt  = ret ? ras[ras_ptr] : tadr(e);
-   wire [PCW-1:0]  p_nx = tk ? tgt : cut ? ftc : wnx;
+   // the next window when no mark ends this one: 16 bytes on, at the same offset
+   wire [PCW-1:0]  p_nx = tk ? tgt : {nf[PCW-1:4], cut ? hk + 3'd1 : w_one ? 3'd0 : sk_q, 1'b0};
    wire [RASB-1:0] rsp_post = (tk & call) ? ras_ptr + 1'b1 : (tk & ret) ? ras_ptr - 1'b1 : ras_ptr;
    wire [GHL-1:0]  ghr_post = tk ? phist_step(ghr, h) : ghr;
    // each mark's entry: the ending one's prediction, a not-taken one's details, the pair's pre-state
@@ -474,13 +472,10 @@ module smolrv64_predictor
    // Way w's two rows for the next window -- its first pair's and the pair after's -- each candidate's
    // skewed before the pick rather than the picked address's after it: the restart's; the ending
    // CTI's target, the RAS top for a return, else its entry's, the eight skewed and picked one-hot as
-   // the entry is; the halfword after a not-taken mark that ends the window, picked one-hot the same
-   // way; else 16 bytes on. Beside them, which banks read the first pair's row (rfp): a mask per
+   // the entry is; else the next window's pairs, nf and nf2 (after a not-taken mark that ends the
+   // window, or 16 bytes on). Beside them, which banks read the first pair's row (rfp): a mask per
    // candidate, the targets' decoded from their own offsets and picked one-hot with them, the mark's a
    // prefix of the end pick, so no encode of the end and no decode of an offset sit on the loop.
-   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
-      fpm8 = ~((8'd1 << off) - 8'd1);
-   endfunction
    reg  [7:0]      mtk, mc;
    reg  [PCW-1:0]  rta;
    integer         kk, kb;
@@ -499,23 +494,19 @@ module smolrv64_predictor
    wire [RB-1:0]   rr0   [0:W-1];
    wire [RB-1:0]   rr1   [0:W-1];
    generate for (gw = 0; gw < W; gw = gw + 1) begin : rw
-      reg [RB-1:0] t0, t1, c0, c1;
+      reg [RB-1:0] t0, t1;
       integer      ki;
       always @* begin
-         t0 = {RB{1'b0}};  t1 = {RB{1'b0}};  c0 = {RB{1'b0}};  c1 = {RB{1'b0}};
+         t0 = {RB{1'b0}};  t1 = {RB{1'b0}};
          for (ki = 0; ki < 8; ki = ki + 1) begin
             t0 = t0 | ({RB{coh[ki]}} & bslot (tadr(bq[ki]), gw));
             t1 = t1 | ({RB{coh[ki]}} & bslot1(tadr(bq[ki]), gw));
-            // the halfword after bank ki: its pair's row (at bank 7 the pair after's, where the next
-            // window starts on a pair and no bank reads its second row), and the pair after's
-            c0 = c0 | ({RB{coh[ki]}} & bslot((ki == 7) ? hbn[ki] : hbk[ki], gw));
-            c1 = c1 | ({RB{coh[ki]}} & bslot(hbn[ki], gw));
          end
       end
       assign rr0[gw] = flush ? bslot (rst_a, gw) : tk ? (ret ? bslot (ras[ras_ptr], gw) : t0)
-                     : cut ? c0 : bslot(sa16, gw);
+                     : bslot(nf, gw);
       assign rr1[gw] = flush ? bslot1(rst_a, gw) : tk ? (ret ? bslot1(ras[ras_ptr], gw) : t1)
-                     : cut ? c1 : bslot(sa32, gw);
+                     : bslot(nf2, gw);
    end endgenerate
    // every bank and way's slot for the training CTI, {bank, way}; the CTI's bank is picked below
    wire [1:0]      bc_rd [0:8*W-1];

@@ -411,9 +411,11 @@ direct-mapped, allocate-every-CTI BTB with backward-taken decode redirects, 1.9 
 before it in the window alone whether the window ends there ("before" is a mask of the banks from
 the offset round to it, a function of the offset register), and each way's two next rows -- the
 next window's first pair's and the pair after's -- are skewed from every candidate address (the
-restart's, the ending CTI's target, the halfword after the ending mark, 16 bytes on) before the
-pick, each bank taking one of the two after it. The pair after's row is the low row bits plus one,
-skewed alike: exact for the sums of registers (16 bytes on, after a mark), and for a target, the
+restart's, the ending CTI's target) before the pick, each bank taking one of the two after it;
+after a not-taken mark, or with none, the next window's pairs are the first pair or the pair after
+it and the one after that, one OR of the end pick against the offset's mask choosing among the
+registers' sums (`sa_q`, `sa_q + 16`, `sa_q + 32`). The pair after's row is the low row bits plus
+one, skewed alike: exact for the sums of registers, and for a target, the
 RAS top or a restart exact unless those bits wrap, when that window's second pair reads a wrong row
 -- a missed or false hint, never a wrong result. Which banks take the first pair's row is a mask per
 candidate picked one-hot beside the rows (a target's decoded from its own offset, the mark's a
@@ -421,8 +423,8 @@ prefix of the end pick), each bank's bimodal counter is read from a register of 
 block RAM's clock-to-out, and a window's two queue entries are picked one-hot by the end pick's
 masks, a mark's own fields only. No find-first chain, no encode of the end, no rotation and no adder
 stand between the rows read and the next rows' address: out of context at 6.000 ns (FW 6, PCW 40)
-the predictor meets with +0.258 ns, its loop (11 levels; the pairs it replaced, +0.183 and 13 levels
-the same day). 4,004 LUTs (+1,203). A first version that decoded the next offset after the pick and
+the predictor meets with +0.198 ns, its loop (10 levels; the pairs it replaced, +0.183 and 13
+levels). 3,665 LUTs (+864). A first version that decoded the next offset after the pick and
 compared each second pair's tag through `sa_q + 16` missed the build by 0.216 ns on this loop.
 
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
