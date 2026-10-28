@@ -1634,10 +1634,11 @@ its revised order); the I$ is `rv_icache`, a read-only module of its own (Stage 
 | Prefetch | next line, **on**, within the 4 KiB page | none |
 | Storage | BRAM (`smolrv64_sdpram`, 1R1W, `READ_LATENCY=1`) | 32 RAMB36 of 512 x 64 with a write enable per byte (`smolrv64_sdpram_be`), diagonal in groups of eight |
 
-**Not UltraRAM.** The I$'s data is even/odd **banks** of `BANKW` bits per way — `2*WAYS` sync-read
-BRAMs. Because `BANKW` equals the read width, any read at any byte offset spans at most two
-consecutive chunks, which have opposite parity and therefore live in different banks: one
-read serves it, with a byte shift instead of a full-line mux.
+**Not UltraRAM.** The I$'s data is two 64-bit block-RAM banks per way, the even and the odd 8-byte
+chunk of a pair, read at one row ({set, pair}): a read is one **16-byte-aligned pair** (asserted),
+and the fetch ring (§4.1) does the alignment. A stream that is not 16-byte aligned costs
+bandwidth at IW=4 (ChaCha20: 34 cycles an iteration against 25 aligned); the even and odd 16-byte
+banks that read 16 bytes at any halfword are `docs/PLAN-2026-10-27-fetch-window.md`.
 
 The I$ does not skew: a VHPR cache's physical probe finds the same-offset synonym candidates by
 a straight index, and a hashed index would scatter them across sets.
