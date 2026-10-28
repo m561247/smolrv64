@@ -1627,7 +1627,7 @@ its revised order); the I$ is `rv_icache`, a read-only module of its own (Stage 
 | Sets | 1024 | 64 |
 | Line | 64 B (512 bit) | 64 B |
 | Indexing | **VHPR** (virtual index and tag; physical reconcile on a miss) | **VIPT, alias-free**: the set, PA[11:6], is inside the page offset; every request carries its PA |
-| Read | a 16-byte-aligned pair, a new one taken every cycle, answered the next | 64 bit, one load lookup a cycle, answered at T+2 by tag |
+| Read | a window of up to 16 bytes from any halfword, inside a 4 KiB page (the fetch ring asks for 16-byte-aligned pairs), a new one taken every cycle, answered the next | 64 bit, one load lookup a cycle, answered at T+2 by tag |
 | Stores | -- | **a store lookup beside the load lookup**: a committed plain store a cycle, written into the one array that holds its chunk or merged into its line's fill |
 | Misses | one demand read + prefetch | **non-blocking**: 8 MSHRs with merge buffers, a waiter per tag |
 | Write policy | fill-only | **write-back**, 2 write-back lines |
@@ -1635,11 +1635,14 @@ its revised order); the I$ is `rv_icache`, a read-only module of its own (Stage 
 | Storage | BRAM (`smolrv64_sdpram`, 1R1W, `READ_LATENCY=1`) | 32 RAMB36 of 512 x 64 with a write enable per byte (`smolrv64_sdpram_be`), diagonal in groups of eight |
 
 **Not UltraRAM.** The I$'s data is an even and an odd 16-byte bank per way -- a line's pairs 0
-and 2, and 1 and 3 -- each two 64-bit block RAMs read at one row ({set, pair[1]}): a read is one
-**16-byte-aligned pair** (asserted), from its parity's bank, and the fetch ring (§4.1) does the
-alignment. A stream that is not 16-byte aligned costs bandwidth at IW=4 (ChaCha20: 34 cycles an
-iteration against 25 aligned); reading 16 bytes at any halfword is
-`docs/PLAN-2026-10-27-fetch-window.md`.
+and 2, and 1 and 3 -- each two 64-bit block RAMs with a row of its own ({set, pair[1]}). A read is
+a **window**: up to 16 bytes from any halfword (`rd_addr` through `rd_last`), the window's first
+pair and the pair after it, which has the other parity; the even bank reads the next line's pair 0
+when the window starts in pair 3. Each half takes its own line's way, and the two pairs in stream
+order are rotated to the window. The fetch ring still asks for 16-byte-aligned pairs (§4.1) and
+does the alignment; a stream that is not 16-byte aligned costs bandwidth at IW=4 (ChaCha20: 34
+cycles an iteration against 25 aligned), which the windows of
+`docs/PLAN-2026-10-27-fetch-window.md` (step 3) remove.
 
 The I$ does not skew: a VHPR cache's physical probe finds the same-offset synonym candidates by
 a straight index, and a hashed index would scatter them across sets.
@@ -1680,9 +1683,13 @@ takes 4.9% more cycles though it mispredicts less: strcmp's byte loads land soon
 branch resolves before reaching the ROB head and its recovery walks back about 15 rows instead of
 squashing at the head (§6).
 
-**VHPR I$ (`rv_icache`).** A pair is a 16-byte-aligned quarter of a line (asserted), so it is one
-line's lookup; each way's data is an even and an odd 16-byte bank, each two 64-bit block RAMs
-read at one row. Per line: valid, the **virtual tag**, the
+**VHPR I$ (`rv_icache`).** A request is a window of up to 16 bytes from any halfword, inside one
+page (asserted). It reaches the next line only when it starts in a line's last pair, and then it
+hits when both lines do: the next line's tags come from the tag RAMs' second port (the fill's, idle
+in every cycle the banks read) and its valid bits from a second read of the valid arrays. A miss
+fills the first of the window's lines that misses (never a line it does not reach); the next
+line's reconcile probe is a cycle later (`S_RCN`), through the lookup's read of the physical tags.
+Per line: valid, the **virtual tag**, the
 **physical tag** (PA above the 4 KiB offset) and an **8-bit epoch**. Every request carries the
 epoch it was taken in, and **a hit is `valid & (vtag == VA) & (epoch == the request's)` -- no
 translation and no physical tag on the hit path**, so an I$ hit never waits on the iTLB. A
@@ -1978,7 +1985,8 @@ The I$ (`rv_icache`, 128 KiB): data 8 RAMs of `2048 × 64` (1 048 576 bits, 32 R
 even and an odd 16-byte bank, each two RAMs on one row address (§9.1). Each way's
 `{virtual tag, epoch}` (`tg0`, `tg1`: `1024 × 31`) is one block RAM read with the banks, at the
 same set, so a lookup's tags arrive in s1 beside its data; its second port is the fill's (the
-write, and the other way's read for the duplicate-stamp check). The physical tags and validity
+write, and the other way's read for the duplicate-stamp check), and in every cycle the banks read
+it reads the next line's set. The physical tags and validity
 (`pst[*]`: 32 × 64 rows of 27 + 2 bits) are LUTRAM, read at the lookup's, the fill's and the
 probe's rows in one cycle.
 
@@ -2203,7 +2211,7 @@ one to fire. The I$'s parity array stays opt-in (`-DCACHE_PARITY`); the D$ has n
 | bits | unit | source of the numbering |
 |---|---|---|
 | `[15:0]` | D$ | `rv_dcache.v`, invariants block (16 conditions: an orphan fill beat, a response nothing awaits, a write completion nothing sent, beats out of order, two valid ways holding one line in either lookup, a tag reused while outstanding, a waiter on a dead MSHR, a beat into a line being read out, a store in both lookups or a plain store that hits or joins in the main lookup, a victim an MSHR reserves or the store lookup writes, a store sent back or the head issued as the head leaves, a store taken while a clean is asked for or under way, M's fast load misused, an outside flush finishing on a blocked line or a release with none, an MSHR's read issued while the MSHR is not live or a second time) |
-| `[31:16]` | I$ | `rv_icache.v`, invariants block (9 conditions: a line hitting in both ways, an unrequested L2 answer, alignment, a full skid, VA/PA page-offset mismatch, a demand read and a prefetch both outstanding, a duplicate stamp, one physical line in both ways, a tag write in a bank read's cycle) |
+| `[31:16]` | I$ | `rv_icache.v`, invariants block (11 conditions: a line hitting in both ways, an unrequested L2 answer, a window not halfword aligned, a full skid, VA/PA page-offset mismatch, a demand read and a prefetch both outstanding, a duplicate stamp, one physical line in both ways, a tag write in a bank read's cycle, a window across a page, a lookup beside the next line's reconcile probe) |
 | `[47:32]` | LSU | `smolrv64_lsu.v` (8 conditions: the three B-rule tag checks, the two non-DRAM checks, `pt_ld_done` equivalence, `req_early`, an AMO or CBO off the ROB head) |
 | `[63:48]` | frontend | `smolrv64_frontend.v` (the fetch ring's, the predictor's and fetch's invariants) |
 

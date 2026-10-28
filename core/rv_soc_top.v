@@ -852,7 +852,8 @@ module rv_soc_top #(
    // The read-only VHPR I$ (core/rv_icache.v): a pair per cycle, hit on the virtual tag alone.
    rv_icache #(.SIZE_KB(SIZE_KB), .HW(8), .RTW(`SMOLRV64_ICTAG_W), .PGW(PABITS)) u_icache
      (.clk(clk), .reset(reset),
-      .rd_req(ic_rd_req), .rd_addr(ic_rd_addr), .rd_pa(ic_rd_pa), .rd_tag(ic_tag),
+      // the fetch ring asks for 16-byte-aligned pairs, so each request is a whole pair's window
+      .rd_req(ic_rd_req), .rd_addr(ic_rd_addr), .rd_last(3'd7), .rd_pa(ic_rd_pa), .rd_tag(ic_tag),
       .rd_ack(ic_rd_ack), .rd_data(ic_rd_data), .rd_valid(ic_rd_valid),
       .rd_resp_addr(ic_rd_resp_addr), .rd_resp_tag(ic_rsp_tag),
       .inv_req(ic_inv_req), .ep_bump(ic_ep_bump), .inv_busy(ic_inv_busy),
