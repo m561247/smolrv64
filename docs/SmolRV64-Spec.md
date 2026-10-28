@@ -1634,11 +1634,12 @@ its revised order); the I$ is `rv_icache`, a read-only module of its own (Stage 
 | Prefetch | next line, **on**, within the 4 KiB page | none |
 | Storage | BRAM (`smolrv64_sdpram`, 1R1W, `READ_LATENCY=1`) | 32 RAMB36 of 512 x 64 with a write enable per byte (`smolrv64_sdpram_be`), diagonal in groups of eight |
 
-**Not UltraRAM.** The I$'s data is two 64-bit block-RAM banks per way, the even and the odd 8-byte
-chunk of a pair, read at one row ({set, pair}): a read is one **16-byte-aligned pair** (asserted),
-and the fetch ring (§4.1) does the alignment. A stream that is not 16-byte aligned costs
-bandwidth at IW=4 (ChaCha20: 34 cycles an iteration against 25 aligned); the even and odd 16-byte
-banks that read 16 bytes at any halfword are `docs/PLAN-2026-10-27-fetch-window.md`.
+**Not UltraRAM.** The I$'s data is an even and an odd 16-byte bank per way -- a line's pairs 0
+and 2, and 1 and 3 -- each two 64-bit block RAMs read at one row ({set, pair[1]}): a read is one
+**16-byte-aligned pair** (asserted), from its parity's bank, and the fetch ring (§4.1) does the
+alignment. A stream that is not 16-byte aligned costs bandwidth at IW=4 (ChaCha20: 34 cycles an
+iteration against 25 aligned); reading 16 bytes at any halfword is
+`docs/PLAN-2026-10-27-fetch-window.md`.
 
 The I$ does not skew: a VHPR cache's physical probe finds the same-offset synonym candidates by
 a straight index, and a hashed index would scatter them across sets.
@@ -1680,8 +1681,8 @@ branch resolves before reaching the ROB head and its recovery walks back about 1
 squashing at the head (§6).
 
 **VHPR I$ (`rv_icache`).** A pair is a 16-byte-aligned quarter of a line (asserted), so it is one
-line's lookup; each way's data is two BRAM banks, the even and the odd 8-byte chunks, read at the
-same row. Per line: valid, the **virtual tag**, the
+line's lookup; each way's data is an even and an odd 16-byte bank, each two 64-bit block RAMs
+read at one row. Per line: valid, the **virtual tag**, the
 **physical tag** (PA above the 4 KiB offset) and an **8-bit epoch**. Every request carries the
 epoch it was taken in, and **a hit is `valid & (vtag == VA) & (epoch == the request's)` -- no
 translation and no physical tag on the hit path**, so an I$ hit never waits on the iTLB. A
@@ -1973,8 +1974,8 @@ The L2 (`rv_l2`, 2 MiB; out of context 1.5 k logic LUTs, 0.38 k LUTs of distribu
 | fill-beat queue | 16 × 136 | {id, beat, last, data} | 2 176 | LUTRAM |
 | MSHRs | 8 | line 26, way 3, id 5, 3 flags | 296 | flops |
 
-The I$ (`rv_icache`, 128 KiB): data 4 banks of `4096 × 64` (1 048 576 bits, BRAM), even/odd chunk
-banking per way, so any read at any byte offset is served by one access (§9.1). Each way's
+The I$ (`rv_icache`, 128 KiB): data 8 RAMs of `2048 × 64` (1 048 576 bits, 32 RAMB36): per way an
+even and an odd 16-byte bank, each two RAMs on one row address (§9.1). Each way's
 `{virtual tag, epoch}` (`tg0`, `tg1`: `1024 × 31`) is one block RAM read with the banks, at the
 same set, so a lookup's tags arrive in s1 beside its data; its second port is the fill's (the
 write, and the other way's read for the duplicate-stamp check). The physical tags and validity

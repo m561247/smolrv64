@@ -3,9 +3,10 @@
 // (docs/PLAN-2026-09-24-frontend-stage4.md, increment 0).
 //
 // GEOMETRY. SIZE_KB (64) in 2 ways of 64-byte lines. A pair is a 16-byte-aligned quarter of a
-// line (asserted), so a pair is one line's lookup, and each way's data is two block-RAM banks,
-// the even and the odd 8-byte chunks, read at the same row. Each way's tags are a block RAM read
-// with them.
+// line (asserted), so a pair is one line's lookup. Each way's data is an EVEN bank (a line's pairs
+// 0 and 2) and an ODD bank (pairs 1 and 3), each a pair's two 8-byte chunks in two 64-bit block
+// RAMs read at one row, {set, pair[1]}; the pair's parity picks the bank. Each way's tags are a
+// block RAM read with them.
 //
 // HIT. Virtual only: valid, the virtual tag and the request's epoch -- no translation and no
 // physical tag on the hit path (docs/VHPR.md), so an I$ hit never waits on the iTLB.
@@ -97,7 +98,7 @@ module rv_icache #(
    localparam IB   = $clog2(SETS);
    localparam VTB  = VAW - OFFB - IB;          // virtual tag
    localparam PTB  = PGW - 12;                 // physical tag: PA above the 4 KiB page offset
-   localparam RB   = IB + 2;                   // bank row: {set, pair}
+   localparam RB   = IB + 1;                   // bank row: {set, pair[1]}
    assign l2_we    = 1'b0;
    assign l2_wdata = 512'd0;
 
@@ -160,19 +161,23 @@ module rv_icache #(
    wire [RTW-1:0] a_tag = rp_f ? f_tag : rp_s ? sk_tag : rd_tag;
    wire [EPW-1:0] a_ep  = rp_f ? f_ep  : rp_s ? sk_ep  : cur_ep;
    wire        a_take = rp_f | rp_s | rd_ack;
-   // data: per way, the even and the odd 8-byte chunk of a pair, in two 64-bit banks read at one
-   // row (bank = way*2 + parity)
+   // data: per way, the even and the odd bank, each a pair's two 8-byte chunks in two 64-bit block
+   // RAMs read at one row (gb = {way, the pair's parity, the chunk}); an install writes pair f_k
+   // into its parity's two
    wire [IB+VTB-1:0] a_line = line_of(a_va);
-   wire [RB-1:0]  bk_ra = {a_line[IB-1:0], a_va[5:4]};
-   wire [RB-1:0]  bk_wa = {f_line[IB-1:0], f_k};
-   wire [63:0]    bk_rd [0:3];
+   wire [RB-1:0]  bk_ra = {a_line[IB-1:0], a_va[5]};
+   wire [RB-1:0]  bk_wa = {f_line[IB-1:0], f_k[1]};
+   wire [63:0]    bk_rd [0:7];
    genvar gb;
-   generate for (gb = 0; gb < 4; gb = gb + 1) begin : bank
+   generate for (gb = 0; gb < 8; gb = gb + 1) begin : bank
       smolrv64_sdpram #(.ADDR_WIDTH(RB), .DATA_WIDTH(64), .READ_LATENCY(1)) u_bank
         (.clock(clk), .rd_addr(bk_ra), .rd_data(bk_rd[gb]),
-         .wr_en((st == S_INST) & (f_way == gb[1])), .wr_addr(bk_wa),
-         .wr_data(f_data[{f_k, gb[0]} * 64 +: 64]));             // chunk 2k (even) or 2k+1 (odd)
+         .wr_en((st == S_INST) & (f_way == gb[2]) & (f_k[0] == gb[1])), .wr_addr(bk_wa),
+         .wr_data(f_data[{f_k, gb[0]} * 64 +: 64]));             // chunk 2*f_k (low) or 2*f_k+1
    end endgenerate
+   // the requested pair: its parity's bank, of each way
+   wire [127:0] pr0 = s1_va[4] ? {bk_rd[3], bk_rd[2]} : {bk_rd[1], bk_rd[0]};
+   wire [127:0] pr1 = s1_va[4] ? {bk_rd[7], bk_rd[6]} : {bk_rd[5], bk_rd[4]};
 
    // ---------------------------------------------------------------- the lookup
    wire [IB+VTB-1:0] m_line = line_of(s1_va);      // the line, and the one a miss fills
@@ -284,7 +289,7 @@ module rv_icache #(
          // a hit answers; a miss parks the request (and a request taken this cycle in the skid)
          if (s1_v & hit) begin
             rd_valid <= 1'b1;
-            rd_data  <= h1 ? {bk_rd[3], bk_rd[2]} : {bk_rd[1], bk_rd[0]};
+            rd_data  <= h1 ? pr1 : pr0;
             rd_resp_addr <= s1_va;  rd_resp_tag <= s1_tag;
          end
          if (miss) begin
