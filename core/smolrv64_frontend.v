@@ -75,6 +75,7 @@ module smolrv64_frontend
     output wire [63:0]             ic_va,
     output wire [63:0]             ic_pa,
     output wire [`SMOLRV64_ICTAG_W-1:0] ic_tag,
+    output wire [2:0]              ic_last,   // the window's last halfword
     input  wire                    ic_ack,
     input  wire                    ic_valid,
     input  wire [127:0]            ic_data,
@@ -160,7 +161,7 @@ module smolrv64_frontend
       .win(imem_data), .mk(imem_mk), .st(imem_st), .avail(imem_avail), .ok(imem_ok), .lvl(imem_lvl),
       .sa(st_sa), .sk(st_sk), .p_mk(p_mk), .p_end(p_end), .pr_adv(pr_adv),
       .pq_room(pq_room), .pq_cnt(pq_cnt),
-      .ic_req(ic_req), .ic_va(ic_va), .ic_pa(ic_pa), .ic_tag(ic_tag),
+      .ic_req(ic_req), .ic_va(ic_va), .ic_pa(ic_pa), .ic_tag(ic_tag), .ic_last(ic_last),
       .ic_ack(ic_ack), .ic_valid(ic_valid), .ic_data(ic_data), .ic_rtag(ic_rtag), .err(ring_err));
    assign fe_avail = imem_avail;
    assign fe_ok    = imem_ok;

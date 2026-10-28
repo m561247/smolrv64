@@ -302,18 +302,23 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
   per physical line) and the epoch roll-over walk are in `docs/VHPR.md`.
 - **The fetch ring** (Stage 4 increment 1a, `smolrv64_fring`, in the frontend; the core's instruction
   port is the I$ request and its answer). A ring of 32 halfword slots holds the
-  instruction stream from the PC on, filled by an address stream that reads one 16-byte pair per
-  accepted `rv_icache` request (16-byte aligned, so a pair never crosses 4 KiB; the stream address
-  is the predictor's, §4.2) and runs ahead of the PC while the ring has room for a whole pair and
-  the predictor's queue has room. **Its head is the PC by construction:** the head
+  instruction stream from the PC on, filled by an address stream that reads one **window** per
+  accepted `rv_icache` request -- up to 16 bytes from the stream's address, any halfword, never
+  across its 4 KiB page (the stream address is the predictor's, §4.2) -- and runs ahead of the PC
+  while the ring has room for a whole window and the predictor's queue has room. Every request is
+  the next 16 bytes of the stream, so after a taken branch the windows are in step with the bundles
+  of 4-byte code and the ring's room suffices at 16 bytes a cycle: ChaCha20 (`crypt.c`, its loop 12
+  bytes into a pair) runs 25 cycles an iteration, as aligned code does, against 34 when the ring
+  asked for 16-byte-aligned pairs and every bundle straddled two of them (the ring then skipped
+  every fourth request; docs/PLAN-2026-10-27-fetch-window.md). **Its head is the PC by construction:** the head
   advances by the halfwords fetch consumed (`adv_hw`: a bundle's `consumed`, or one halfword per
   step of a page straddle), and a predicted-taken branch does not empty it -- the predictor
   (§4.2) already steered the stream to the target, whose halfwords follow the branch's; a restart
   (a redirect, or, a cycle later, a mark fetch rejects) empties it and restarts the stream at the
   redirect's target or the PC.
   So the window fetch aligns is a rotation of the ring from its registered head, with no address
-  compare on the fetch loop, and each halfword carries a mark bit: it ends a pair at a CTI the
-  predictor knows. Answers come back in order; a flush marks every request then in flight stale and
+  compare on the fetch loop, and each halfword carries a mark bit: it ends a CTI the predictor
+  knows. Answers come back in order; a flush marks every request then in flight stale and
   that many answers are dropped (a generation in the tag cross-checks it). A `fence.i` or a
   mapping change (`freeze`) empties the ring. **The stream stays inside the PC's enclosing page**
   (4 KiB, or 2 MiB for a >= 2 MiB leaf) and takes its PA from the iMMU's translation of the PC;
@@ -356,7 +361,7 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
   loop back edge in `workloads/brbench`, 15 lost predictions in 300 iterations; 2 after.) A
   bundle also ends at a mark predicted taken and carries on through one predicted not taken, so
   a bundle holds up to `IW` predictions, one for each slot that ends on a mark. The fetch ring
-  predecodes a START bit per halfword as each pair arrives (a halfword begins an instruction unless
+  predecodes a START bit per halfword as each window arrives (a halfword begins an instruction unless
   the one before began a 32-bit op; the chain runs on from the last halfword appended and restarts
   at the PC), so the aligner places slot k at the window's k-th start, decodes every halfword in
   parallel and selects per slot: no slot's position waits for the lengths before it. `PDW` = 32:
@@ -364,26 +369,28 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
 ### 4.2 Branch prediction
 
 **At the fetch stream, keyed by the last halfword** (Stage 4 increment 1b). The predictor is the
-fetch stream: it holds the stream's address (a registered 16-byte pair and the halfwords of it to
-skip), looks the pair up as the fetch ring asks the I$ for it, and steers the stream to the next
-pair. A BTB entry belongs to its CTI's last halfword; a pair covers eight halfwords, so the BTB and
-the corrector are each eight banks, one per halfword position, and all eight read the same row
-whenever the stream moves: the BTB the next pair's address above its 16 bytes, the corrector the
-pair the stream is leaving (the restart's on a restart) -- read ahead, so the BTB's read and pick
-are not in front of its read address. No two CTIs share an entry
+fetch stream: it holds the stream's address (a registered **window**: its first 16-byte pair and
+its first halfword in it), looks the window up as the fetch ring asks the I$ for it, and steers the
+stream to the next window. A BTB entry belongs to its CTI's last halfword; a window covers eight
+consecutive halfwords, one in each halfword position, so the BTB and the corrector are each eight
+banks by position. Each BTB bank reads the row of the pair its halfword is in -- the window's first
+pair at or after its offset, else the pair after it -- and compares that pair's tag; the corrector's
+banks all read the row of the window the stream is leaving (the restart's on a restart) -- read
+ahead, so the BTB's read and pick are not in front of its read address. No two CTIs share an entry
 (rule B10). Every position evaluates its own hit, corrector hit and direction from registers, and
-the hits in order mark the known CTIs. **A pair ends at its first known CTI predicted taken, or
-at its second known CTI** (`M`=2): the stream goes on at the target (the RAS top for a return) or
-at the halfword after the last mark; a predicted call pushes its last halfword + 2. A pair
-therefore holds at most two predictions, both read with the history from before the pair, and the
-history shifts at most once per pair. The corrector is read with the history before the current pair's own shift (a
-pair of lag), and the index read is the one carried for training. Training recomputes the key
+the hits in window order mark the known CTIs. **A window ends at its first known CTI predicted
+taken, or at its second known CTI** (`M`=2): the stream goes on at the target (the RAS top for a
+return), at the halfword after the last mark, or 16 bytes on; a predicted call pushes its last
+halfword + 2. A window stops at its first pair's end only when that pair is its page's last. A
+window therefore holds at most two predictions, both read with the history from before the window,
+and the history shifts at most once per window. The corrector is read with the history before the
+current window's own shift (a window of lag), and the index read is the one carried for training. Training recomputes the key
 from the resolving CTI's PC and length.
 
 **The BTB is skewed-associative and taken-only.** Each halfword bank is `W` = 2 ways
 (`BTBW`=1); way `w` reads row `lo ^ rotl(hi, w)`, `lo` the 7 address bits above the pair and
 `hi` the 7 above those, so halfwords that share a row in one way rarely share it in another. A
-pair reads both ways of all eight banks; a halfword's entry is its first way whose tag
+window reads both ways of all eight banks; a halfword's entry is its first way whose tag
 matches. Every jump, call and return is allocated; a conditional is allocated only when it
 resolves taken, so a conditional the BTB misses is one never taken (or evicted) and falls
 through, with no decode redirect (`DCR_BACK`=0). Training never reads the entries: a CTI the
@@ -399,14 +406,21 @@ Modelled in Simmerv over GB5 single-core (690 G instructions), the BTB-coverage 
 redirects and mispredicts a BTB miss causes) is 44.8 cycles/K instructions for the 2048-entry
 direct-mapped, allocate-every-CTI BTB with backward-taken decode redirects, 1.9 for 2048 entries
 2-way skewed taken-only, and 0.2 for 8192 entries 4-way. Each position decides from the hits
-below it alone whether the pair ends there, and each way's next row is skewed from every candidate
-address (the restart's, the ending CTI's target, this pair's, the next pair's) before the pick, so
-no find-first chain and no skew stand between the rows read and the next rows' address: out of
-context at 6.000 ns the predictor meets with +0.268 ns, the block RAM's clock-to-out in its loop
-(+0.624 with the entries in distributed RAM, which cost 3,392 LUTs of LUTRAM).
+before it in the window alone whether the window ends there ("before" is a mask of the banks from
+the offset round to it, a function of the offset register), and each way's two next rows -- the
+next window's first pair's and the pair after's -- are skewed from every candidate address (the
+restart's, the ending CTI's target, the halfword after the ending mark, 16 bytes on) before the
+pick, each bank taking one of the two after it. The pair after's row is the low row bits plus one,
+skewed alike: exact for the sums of registers (16 bytes on, after a mark), and for a target, the
+RAS top or a restart exact unless those bits wrap, when that window's second pair reads a wrong row
+-- a missed or false hint, never a wrong result. No find-first chain and no rotation stand between
+the rows read and the next rows' address: out of context at 6.000 ns (FW 6, PCW 40) the predictor
+meets with +0.108 ns, the queue's pick of a window's two marks by position; its loop, the block
+RAM's clock-to-out through the pick to the next rows, +0.122 (16 levels; +0.183 and 13 levels for
+the pairs it replaced, the same day). 3,876 LUTs (+1,075).
 
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
-banks by position parity, one write each) in order (a pair pushes up to two; the stream moves
+banks by position parity, one write each) in order (a window pushes up to two; the stream moves
 only with two entries free): taken, the target,
 the corrector details training needs, and the RAS pointer and history as they stand before the
 CTI. The aligner reads the queue's first `IW` entries; an instruction ending on a marked halfword
@@ -415,7 +429,7 @@ and, when its last instruction is a real branch or jump predicted taken, takes i
 costs a restart a cycle later, as a one-cycle freeze: taken on anything but a branch or jump (a
 page straddler included), the bundle falls through and the stream restarts at its fall-through;
 taken inside a 32-bit instruction, the stream restarts at the PC predicting nothing in its first
-pair; not taken inside a 32-bit instruction, the ring clears the mark and the head is popped.
+window; not taken inside a 32-bit instruction, the ring clears the mark and the head is popped.
 Between marks the stream's state does not change, so the queue head's pre-state -- or the
 stream's own registers, when the queue is empty -- is the state as of fetch: every instruction's
 snapshot, and what every restart of the stream (a rejected mark, a freeze) goes back to.
@@ -1627,7 +1641,7 @@ its revised order); the I$ is `rv_icache`, a read-only module of its own (Stage 
 | Sets | 1024 | 64 |
 | Line | 64 B (512 bit) | 64 B |
 | Indexing | **VHPR** (virtual index and tag; physical reconcile on a miss) | **VIPT, alias-free**: the set, PA[11:6], is inside the page offset; every request carries its PA |
-| Read | a window of up to 16 bytes from any halfword, inside a 4 KiB page (the fetch ring asks for 16-byte-aligned pairs), a new one taken every cycle, answered the next | 64 bit, one load lookup a cycle, answered at T+2 by tag |
+| Read | a window of up to 16 bytes from any halfword, inside a 4 KiB page, a new one taken every cycle, answered the next | 64 bit, one load lookup a cycle, answered at T+2 by tag |
 | Stores | -- | **a store lookup beside the load lookup**: a committed plain store a cycle, written into the one array that holds its chunk or merged into its line's fill |
 | Misses | one demand read + prefetch | **non-blocking**: 8 MSHRs with merge buffers, a waiter per tag |
 | Write policy | fill-only | **write-back**, 2 write-back lines |
@@ -1639,10 +1653,9 @@ and 2, and 1 and 3 -- each two 64-bit block RAMs with a row of its own ({set, pa
 a **window**: up to 16 bytes from any halfword (`rd_addr` through `rd_last`), the window's first
 pair and the pair after it, which has the other parity; the even bank reads the next line's pair 0
 when the window starts in pair 3. Each half takes its own line's way, and the two pairs in stream
-order are rotated to the window. The fetch ring still asks for 16-byte-aligned pairs (§4.1) and
-does the alignment; a stream that is not 16-byte aligned costs bandwidth at IW=4 (ChaCha20: 34
-cycles an iteration against 25 aligned), which the windows of
-`docs/PLAN-2026-10-27-fetch-window.md` (step 3) remove.
+order are rotated to the window. The fetch ring asks for windows from the stream's address (§4.1),
+so a stream that is not 16-byte aligned runs as an aligned one does (ChaCha20: 25 cycles an
+iteration; 34 when the ring asked for 16-byte-aligned pairs).
 
 The I$ does not skew: a VHPR cache's physical probe finds the same-offset synonym candidates by
 a straight index, and a hashed index would scatter them across sets.

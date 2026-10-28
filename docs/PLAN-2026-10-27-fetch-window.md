@@ -1,7 +1,8 @@
 # PLAN 2026-10-27: fetch 16 bytes at any halfword
 
-Status: steps 1 and 2 built and verified (`wip/fwin`); step 3 built, lockstep-clean and measured on
-ChaCha (§7); its GB5 price is running. Tommy (2026-10-27), on the ChaCha pipe trace: *"What I would
+Status: steps 1-3 on `wip/fwin`, with today's 64-byte ring and windows stopping only at the page.
+Tommy (2026-10-27, on ChaCha's 25 cycles): *"I want the 25 cycle Chacha20 no matter what GB5
+shows."* Tommy (2026-10-27), on the ChaCha pipe trace: *"What I would
 have expected from the I$ was an odd and an even 128-bit (16B) bank, each with a tag read port, so
 we can always fetch 16B regardless of alignment as long as the lines are present."*
 
@@ -167,9 +168,9 @@ ring through the lockstep), the Linux lockstep, then the board.
 1. **The I$ banks** -- done: cycle-identical to main (the I$ bench's counts, ChaCha, the 60 M boot).
 2. **The I$ window** -- done: the bench issues windows at every halfword and length and checks each
    answer by line; the core still asks for aligned pairs and is cycle-identical.
-3. **The stream** -- built: riscv-tests 240/0, ChaCha 25 cycles an iteration. Next: the 77 GB5
-   SimPoints, Dhrystone, CoreMark, the 60 M boot, the predictor out of context, the userspace
-   locksteps, then build and gate.
+3. **The stream** -- built: riscv-tests 240/0, ChaCha 25 cycles an iteration, the predictor out of
+   context +0.108 ns (§4). Then the GB5 SimPoints for the record, the userspace locksteps, the
+   build and the board gate.
 
 **Invariants (always on):**
 - a window never crosses its page (the I$'s `e_page`);

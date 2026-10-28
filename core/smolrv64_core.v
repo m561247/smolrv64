@@ -93,9 +93,10 @@ module smolrv64_core
     output wire                    imem_cancel,     // the fetch stream restarts: a waiting I$ miss is stale
     input  wire                    ic_busy,         // fence.i or an I$ invalidation in progress
     output wire                    ic_req,
-    output wire [63:0]             ic_va,           // the pair's first byte, 8-byte aligned
+    output wire [63:0]             ic_va,           // the window's first halfword
     output wire [63:0]             ic_pa,
     output wire [`SMOLRV64_ICTAG_W-1:0] ic_tag,
+    output wire [2:0]              ic_last,         // ...and its last halfword
     input  wire                    ic_ack,
     input  wire                    ic_valid,
     input  wire [127:0]            ic_data,
@@ -328,7 +329,7 @@ module smolrv64_core
       .imem_addr(imem_va), .imem_ipc(), .imem_pa(imem_addr), .imem_xlvl(immu_lvl),
       .imem_xlate_ok(immu_ready & ~immu_fault), .imem_freeze(ic_busy | imem_ctx_chg), .imem_flush(imem_cancel),
       .fe_avail(imem_avail), .fe_ok(imem_ok),
-      .ic_req(ic_req), .ic_va(ic_va), .ic_pa(ic_pa), .ic_tag(ic_tag),
+      .ic_req(ic_req), .ic_va(ic_va), .ic_pa(ic_pa), .ic_tag(ic_tag), .ic_last(ic_last),
       .ic_ack(ic_ack), .ic_valid(ic_valid), .ic_data(ic_data), .ic_rtag(ic_rtag),
       .imem_fault(immu_ready & immu_fault), .imem_cause(immu_cause),
       .res_v(res_v_q), .res_cbr(res_cbr_q), .res_call(res_call_q), .res_ret(res_ret_q),

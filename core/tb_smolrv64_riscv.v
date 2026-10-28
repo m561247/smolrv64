@@ -32,9 +32,10 @@ module tb;
    reg  reset;
 
    wire [PCW-1:0]   imem_addr;                 // the fetch PC's PA
-   wire             ic_req;                    // the fetch ring's I$ port: a pair per request,
+   wire             ic_req;                    // the fetch ring's I$ port: a window per request,
    wire [63:0]      ic_pa;                     // answered the next cycle, in order
    wire [`SMOLRV64_ICTAG_W-1:0] ic_tag;
+   wire [2:0]       ic_last;                   // (the model answers 16 bytes from the window's start)
    reg              ic_valid;
    reg  [63:0]      ic_pa_q;
    reg  [`SMOLRV64_ICTAG_W-1:0] ic_rtag;
@@ -65,7 +66,7 @@ module tb;
    smolrv64_core #(.PCW(PCW), .HW(HW), .RESET_PC(BASE)) dut
      (.clk(clk), .reset(reset),
       .imem_addr(imem_addr), .imem_ctx_chg(), .ic_busy(1'b0),
-      .ic_req(ic_req), .ic_va(), .ic_pa(ic_pa), .ic_tag(ic_tag),
+      .ic_req(ic_req), .ic_va(), .ic_pa(ic_pa), .ic_tag(ic_tag), .ic_last(ic_last),
       .ic_ack(1'b1), .ic_valid(ic_valid), .ic_data(ic_data), .ic_rtag(ic_rtag),
       .hw_ip(12'd0), .mtime(64'd0),           // device-less: no CLINT/PLIC
       .hpm_dc_access(1'b0), .hpm_dc_miss(1'b0), .hpm_ic_access(1'b0), .hpm_ic_miss(1'b0),
