@@ -40,14 +40,23 @@ def inferred_rams(logpath):
     names = set()
     final = set()        # (scope, path) of every array in the FINAL mapping reports: once each
     in_final = False
+    in_block = False     # inside a Block RAM mapping table: every row of it is a block RAM
     with open(logpath, errors="ignore") as fh:
         for line in fh:
-            if re.match(r"(Distributed|Block) RAM: (Final|Preliminary) Mapping Report", line):
+            m0 = re.match(r"(Distributed|Block) RAM: (Final|Preliminary) Mapping Report", line)
+            if m0:
                 in_final = "Final" in line
+                in_block = m0.group(1) == "Block"
+            elif line.strip() and not line.startswith(("|", "+")):
+                in_block = False
             # 1. utilization table: |module | path/name_reg | Implied | D x W | RAM32M16 x n |
+            #    A Block RAM table's true-dual-port rows carry their RAMB counts in later columns
+            #    (|module | name_reg | A: D x W | W | R | B: D x W | W | R | ... | RAMB18 | RAMB36 |),
+            #    so in that table every row is a RAM, whatever its fifth column says.
             if line.startswith("|"):
                 f = [x.strip() for x in line.split("|")]
-                if len(f) >= 6 and re.search(r"RAM\d|RAMB|BRAM", f[5]):
+                blk = in_block and len(f) >= 3 and f[2] not in ("", "RTL Object")
+                if blk or (len(f) >= 6 and re.search(r"RAM\d|RAMB|BRAM", f[5])):
                     names.add(_base(f[2]))
                     if in_final:
                         final.add((f[1], _path(f[2])))
