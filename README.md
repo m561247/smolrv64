@@ -319,8 +319,8 @@ explains each line and the `cpi` and `mem` sets that go under it.
   second load lookup ([docs/PLAN-2026-10-03-dcache-vipt-l2.md](docs/PLAN-2026-10-03-dcache-vipt-l2.md)).
 - One out-of-order load/store pipe: loads and stores issued out of order, translated in
   their queues, with memory speculation and replay.
-- A review of the clock: 250 MHz would be worth 50%, with the memory controller's 333 MHz
-  behind a clock crossing.
+- The clock: two lanes at the memory controller's 333 MHz, every loop two cycles, for the same
+  work per nanosecond in less area ([docs/PLAN-2026-10-27-333mhz.md](docs/PLAN-2026-10-27-333mhz.md)).
 - The question of whether a vector unit fits without giving up the clock.
 - SPEC CPU on the board.
 
