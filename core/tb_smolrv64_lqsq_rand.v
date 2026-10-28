@@ -90,6 +90,7 @@ module tb;
 
    wire [NENT-1:0] lq_kmask_nc, sq_kmask_nc;   // the kill is not exercised here
    wire            sq_c_fast_nc;               // the core's store register is not modelled: every drain is a handoff and a free
+   wire lf_new;                // an entry flagged for replay this cycle (the core's one-cycle hold)
    smolrv64_lq #(.LDPRE(0),.DRAM_BASE(64'd0),.NENT(NENT),.IDXB(IDXB),.PAW(PAW),.PBITS(PBITS),.ROBB(ROBB),.SQIB(IDXB+1),.NW(NW),.NB(2)) u_lq
      (.clk(clk),.reset(reset),
       .d_alloc(lq_d_alloc),.d_pc({NW{39'd0}}),.d_seq({NW{8'd0}}),.d_rob(lq_d_rob),.d_prd(lq_d_prd),.d_rd({NW{6'd0}}),.d_rd_v({NW{1'b1}}),
@@ -103,7 +104,7 @@ module tb;
       .x_fp(lq_x_fp),.x_unc(lq_x_unc),.x_head(lq_x_head),.x_devwait(lq_x_devwait),.x_take(lq_x_take),
       .l_v(lq_l_v),.l_idx(lq_l_idx),.l_tg(lq_l_idx),.l_alt(lq_l_idx),.l_rsp(1'b1),
       .l_pre_a(lq_l_idx),.l_pre_b(lq_l_idx),.l_src_b(1'b0),.l_fw(1'b0),.l_fwn(lq_l_idx),.l_prd(lq_l_prd),.l_rd(lq_l_rd),.l_rd_v(lq_l_rd_v),.l_rob(lq_l_rob),
-      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_v(lf_v),.f_idx(lf_idx),.f_rp(lf_rp),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.kmask(lq_kmask_nc),
+      .l_pa(lq_l_pa),.k_v(lk_v),.k_idx(lk_idx),.k_va(lk_va),.w_v(1'b0),.w_idx({IDXB{1'b0}}),.w_pa({PAW{1'b0}}),.w_unc(1'b0),.w_mem(1'b0),.w_flt(1'b0),.w_fc(4'd0),.f_new(lf_new),.f_v(lf_v),.f_idx(lf_idx),.f_rp(lf_rp),.f_rob(lf_rob),.f_fc(lf_fc),.f_pc(lf_pc),.f_seq(lf_seq),.occupancy(lq_occ), .av_any(lq_av_any),.e_dprd(lq_e_dprd),.uf_any(lq_uf_any),.ar({NENT{1'b1}}),.pk_v(lq_pk_v),.pk_idx(lq_pk_idx),.pk_seq(lq_pk_seq),.flush(flush),.kd_v(1'b0),.kh({ROBB{1'b0}}),.kb({ROBB{1'b0}}),.kmask(lq_kmask_nc),
       // every bench address is DRAM (speculates freely), so the device head-gate is never taken
       .a_mem(1'b1),.rob_head({ROBB{1'b0}}));
 

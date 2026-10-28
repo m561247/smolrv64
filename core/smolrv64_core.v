@@ -1892,7 +1892,7 @@ module smolrv64_core
    // translation (stores commit and loads reach memory in queue order, so no other entry can be
    // waited on first). Once taken, an entry keeps the walker until it answers -- a store filling
    // meanwhile does not take the walk over -- or a redirect ends the walk with the entry.
-   wire                sq_k_v, lq_k_v, sq_f_v, lq_f_v;
+   wire                sq_k_v, lq_k_v, sq_f_v, lq_f_v, lq_f_new;
    wire [SQ_N-1:0]     sq_kmask;          // the kill's entries this cycle (smolrv64_sq/lq kmask)
    wire [LQ_N-1:0]     lq_kmask;
    wire [SQ_IB-1:0]    sq_k_idx;
@@ -2071,7 +2071,7 @@ module smolrv64_core
       .k_v(lq_k_v), .k_idx(lq_k_idx), .k_va(lq_k_va),
       .w_v(lsu_wk_done & ~wk_st), .w_idx(wk_lk_li), .w_pa(lsu_wk_pa), .w_unc(lsu_wk_unc), .w_mem(lsu_wk_mem),
       .w_flt(lsu_wk_flt), .w_fc(lsu_wk_fc),
-      .f_v(lq_f_v), .f_idx(lq_f_idx), .f_rp(lq_f_rp), .f_rob(lq_f_rob), .f_fc(lq_f_fc), .f_pc(lq_f_pc), .f_seq(lq_f_seq),
+      .f_new(lq_f_new), .f_v(lq_f_v), .f_idx(lq_f_idx), .f_rp(lq_f_rp), .f_rob(lq_f_rob), .f_fc(lq_f_fc), .f_pc(lq_f_pc), .f_seq(lq_f_seq),
       .x_devwait(lq_x_devwait), .occupancy(lq_occ), .av_any(lq_av_any), .e_dprd(lq_e_dprd), .uf_any(lq_uf_any), .ar(la_v), .pk_v(lq_pk_v), .pk_idx(lq_pk_idx), .pk_seq(lq_pk_seq), .rob_head(rob_head_idx), .flush(redirect),
       .kd_v(rob_kd_v), .kh(rob_kh), .kb(rob_kb), .kmask(lq_kmask));
 
@@ -2154,6 +2154,19 @@ module smolrv64_core
    // A load flagged for replay is done, so it would retire the cycle it becomes the head: it is held
    // from the cycle the queue flags it (its column's term) until the SYSQ's replay redirects (rp_hold).
    wire rp_hold;                         // (assigned with the SYSQ below)
+   // THE REPLAY HOLD FROM REGISTERS. The queue's oldest flagged entry (an age pick over its entries
+   // and a read of its ROB index) is registered before the commit ports and the irrevocable pointer
+   // compare it, so it names a load flagged two cycles back; for the cycle after a flag, which it
+   // does not name yet, nothing that completed commits and the pointer holds (rp_new_q: any flag, a
+   // rare event; smolrv64_rob c_hold -- a head finishing with its own redirect still commits).
+   reg                rp_new_q, rp_f_q;
+   reg [ROB_IDXB-1:0] rp_rob_q;
+   initial begin rp_new_q = 1'b0; rp_f_q = 1'b0; end
+   always @(posedge clk) begin
+      rp_new_q <= ~reset & lq_f_new;
+      rp_f_q   <= ~reset & lq_f_v & lq_f_rp;
+      rp_rob_q <= lq_f_rob;
+   end
    wire rc_tkill = (m_valid & m_done_red & m_trap) | sy_trap | rp_hold;
    wire [IW-1:0]          rc_head;
    wire [IW*ROB_IDXB-1:0] rc_idxv;
@@ -2162,7 +2175,9 @@ module smolrv64_core
       assign rc_sx[gs]   = rsi(rc_idx[gs]);
       assign rc_f[gs]    = rc_rdv[gs] & rc_rd[gs*6+5];     // writes an f-register
       assign rc_kill[gs] = (rc_head[gs] ? rc_tkill : m_valid & (m_rob_idx == rc_idx[gs]))
-                         | (lq_f_v & lq_f_rp & (lq_f_rob == rc_idx[gs]));   // a load flagged for replay never retires
+                         | (rp_f_q & (rp_rob_q == rc_idx[gs]));   // a load flagged for replay never retires
+      always @(posedge clk) if (!reset && rc_v[gs] && lq_f_v && lq_f_rp && (lq_f_rob == rc_idx[gs]))
+         $fatal(1, "smolrv64_core: commit port %0d retires ROB entry %0d, a load flagged for replay", gs, rc_idx[gs]);
    end endgenerate
    smolrv64_rob #(.ROWS(ROB_ROWS), .CAP(ROB_CAP), .IDXB(ROB_IDXB), .PBITS(RN_PBITS), .IW(IW), .NW(ROB_NW), .IRR_FWD({{(ROB_NW-4){1'b0}}, 4'b1000})) u_rob   // w_v[3]: sq_k_take
      (.clk(clk), .reset(reset),
@@ -2173,9 +2188,9 @@ module smolrv64_core
       .d_ready(rob_readyv), .d_idx(rob_d_idxv),
       .w_v(rob_wv), .w_ix(rob_wix),
       .h_fin(cf_red_fire | (m_red_fire & ~m_trap) | (sy_done & sy_red)),   // the head completes and flushes (a trap never commits)
-      .c_kill(rc_kill), .c_valid(rc_v), .c_head(rc_head), .c_idx(rc_idxv), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd), .c_pold(rc_pold), .c_noret(rc_noret),
+      .c_kill(rc_kill), .c_hold(rp_new_q), .c_valid(rc_v), .c_head(rc_head), .c_idx(rc_idxv), .c_rd(rc_rd), .c_rd_v(rc_rdv), .c_prd(rc_prd), .c_pold(rc_pold), .c_noret(rc_noret),
       .flush(redirect), .empty(rob_empty), .occ_n(rob_occ), .head_idx(rob_head_idx), .head_n_idx(rob_head_n_idx),
-      .irr_idx(rob_irr_idx), .irr_v(rob_irr_v), .rp_v(lq_f_v & lq_f_rp), .rp_ix(lq_f_rob),
+      .irr_idx(rob_irr_idx), .irr_v(rob_irr_v), .rp_v(rp_f_q), .rp_ix(rp_rob_q), .rp_all(rp_new_q),
       .d_pold(rn_poldv),
       // the walk starts the cycle after the resolve, from the registered branch
       .k_v(fr_set_q), .k_idx(fr_rob),

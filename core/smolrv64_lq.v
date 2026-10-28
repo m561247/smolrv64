@@ -193,6 +193,7 @@ module smolrv64_lq
     input  wire                  w_flt,
     input  wire [3:0]            w_fc,
     // ---- a translation that faulted, at the candidate: it traps at the ROB head ----
+    output wire                  f_new,       // an entry is flagged for replay this cycle (rpl set at this edge)
     output wire                  f_v,
     output wire [IDXB-1:0]       f_idx,       // the entry it is: the oldest one whose translation faulted or that must replay
     output wire                  f_rp,        // ...a replay (it read before an older store that overlaps it), not a fault
@@ -420,6 +421,7 @@ module smolrv64_lq
    assign k_va  = va[k_idx];
    wire [IDXB-1:0] fi = oldest(flt_m, om);
    assign f_v   = |flt_m;
+   assign f_new = |(viol & v & ~rpl);
    assign f_idx = fi;
    assign f_rp  = rpl[fi];
    assign f_rob = rob[fi];

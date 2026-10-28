@@ -70,6 +70,9 @@ module smolrv64_rob
     // waits there for the head with done set; retiring it from behind the head retires the
     // wrong path).
     input  wire [IW-1:0]          c_kill,
+    // a load was flagged for replay last cycle (a flop): nothing that completed commits this cycle
+    // (a head finishing with its own redirect, h_fin, still does: a flagged load never does that)
+    input  wire                   c_hold,
     output wire [IW-1:0]          c_valid,
     output wire [IW-1:0]          c_head,       // port p is the head's (one-hot while the ROB holds any)
     output wire [IW*IDXB-1:0]     c_idx,        // port p's entry, its tag
@@ -101,6 +104,8 @@ module smolrv64_rob
     // ahead of the replay that will squash it.
     input  wire                   rp_v,
     input  wire [IDXB-1:0]        rp_ix,
+    // ...and a load was flagged last cycle, which rp_v does not name yet: the pointer holds this cycle
+    input  wire                   rp_all,
 
     // ---- the walk: from the tail back to a mispredicted branch, a row a cycle ----
     // k_v names the branch (a later k_v names an older one: the walk goes on to it). Each cycle
@@ -204,7 +209,7 @@ module smolrv64_rob
             if (w_v[q] && (w_ix[q*IDXB +: IDXB] == ix)) w_hits = 1'b1;
       end
    endfunction
-   wire head_done = v[hsx] & (done[hsx] | h_fin);
+   wire head_done = v[hsx] & ((done[hsx] & ~c_hold) | h_fin);
    wire [RB-1:0] irow = irr[SB-1:CB];
    assign irr_idx = tag_of(irow, ifc, irr[CB-1:0]);
    assign irr_v   = (irr != tail);
@@ -231,7 +236,7 @@ module smolrv64_rob
       irr_step = {irr[SB:CB] + 1'b1, {CB{1'b0}}};
       for (ick = NCOL - 1; ick >= 0; ick = ick - 1)
          if (ir_wait[ick]) irr_step = {irr[SB:CB], ick[CB-1:0]};
-      if (irr == tail) irr_step = irr;
+      if ((irr == tail) | rp_all) irr_step = irr;
    end
    // the position after one of the head row's: the next while it is valid, else the next row
    function automatic [SB:0] next_pos(input [SB:0] p);
@@ -350,7 +355,7 @@ module smolrv64_rob
          assign cv[0] = (hp == P) & head_done & ~c_kill[0];
       end else begin: b
          assign cv[gk] = (hp == P) ? (head_done & ~c_kill[gk])
-                       : (hp < P) & cv[gk-1] & v[ix] & done[ix] & ~c_kill[gk] & ~flush;
+                       : (hp < P) & cv[gk-1] & v[ix] & done[ix] & ~c_kill[gk] & ~c_hold & ~flush;
       end
       assign c_head[gk]               = (hp == P);
       assign c_idx[gk*IDXB +: IDXB]   = tag_of(hrow, hfc, P);

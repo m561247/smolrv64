@@ -1476,7 +1476,14 @@ starts a busy divider; the writeback's clear precedes the issue's set in the sta
     it), a redirect to the load's own PC with its own seq, and the retire of its row held from the
     cycle it is flagged (`rc_kill`'s per-column term, then `rp_hold` through the record and the
     SYSQ). The load re-executes behind
-    the stores it conflicted with. The irrevocable pointer stops at it meanwhile.
+    the stores it conflicted with. The irrevocable pointer stops at it meanwhile. **The hold reads
+    registers:** the LQ's pick of its oldest flagged load and that load's ROB index are registered
+    (`rp_f_q`, `rp_rob_q`), so the commit ports compare against a load flagged two cycles back; for
+    the one cycle after a NEW flag (the LQ's `f_new`, rare), nothing that merely completed commits
+    (the ROB's `c_hold`; a head finishing with its own redirect still does) and the irrevocable
+    pointer holds (`rp_all`). Asserted: no commit port ever retires the load the live pick names.
+    (The live pick into every commit slot was a 24-level cone, -0.48 ns in the oldest-first pick's
+    builds; the registered one cost the 60 M boot 0.24% of its retires.)
   - *The wait table.* `mdw`: a 2-bit saturating counter per load-PC hash (PC[8:1], 256 entries),
     a distributed RAM with one write a cycle; it forgets one entry every 16 K cycles, so each
     entry every 4 M (a step that loses its cycle to a replay or a training event waits for the
