@@ -45,6 +45,13 @@ workloads/mlbench/mlbench.elf
 tools/perftool/target/
 workloads/saxpybench/saxpybench.bin
 workloads/saxpybench/saxpybench.elf
+# workloads/rvbench: what its `make clean` removes
+workloads/rvbench/*.elf
+workloads/rvbench/*.bin
+workloads/rvbench/*.dump
+workloads/rvbench/*.run.log
+workloads/rvbench/syscalls-uart.c
+workloads/rvbench/dhry-src/
 sq/obj_dir_sq
 
 # Ubuntu disk images -- 9.5 GB and 3.0 GB. Added by mistake in the dts commit via a
