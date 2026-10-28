@@ -27,7 +27,7 @@
 // or 16 bytes on. A not-taken mark does not end the window, so the aligner reads on past it. The
 // history steps at most once per window, at its end, so every mark of a window has the same
 // pre-state and its corrector reads share the history they were read with. The ring marks each
-// marked halfword (p_mk, in window order), and each mark's prediction goes into the queue, in order.
+// marked halfword (p_mk, by bank), and each mark's prediction goes into the queue, in window order.
 //
 // THE QUEUE. One entry per marked halfword, in order: taken, the target, the corrector details
 // training needs, and the RAS pointer and history as they stand BEFORE the CTI. Between two marks
@@ -75,7 +75,7 @@ module smolrv64_predictor
     output wire [2:0]           sk,         // ...and the window's first halfword in that pair
     output wire                 p_cut,      // the window ends at a mark...
     output wire [2:0]           p_end,      // ...at this position of it (its last when it does not)
-    output wire [7:0]           p_mk,       // the window's marked halfwords, by position
+    output wire [7:0]           p_mk,       // the window's marked halfwords, by bank
     output wire                 pq_room,
     output wire [PQB:0]         pq_cnt,
     // ---- the aligner: the first IW entries, entry j at [j] ----
@@ -325,13 +325,9 @@ module smolrv64_predictor
    wire            call = (ety == TY_CALL), ret = (ety == TY_RET);
    // the window's last position: where a mark ends it, else its own end
    wire [2:0]      pe   = cut ? hk - sk_q : w_one ? 3'd7 - sk_q : 3'd7;
-   reg  [7:0]      mkw;                                            // the marks, by position
-   reg  [2:0]      mb;
-   integer         mj;
-   always @* for (mj = 0; mj < 8; mj = mj + 1) begin mb = sk_q + mj[2:0];  mkw[mj] = mkv[mb]; end
    assign p_cut = cut;
    assign p_end = pe;
-   assign p_mk  = mkw;
+   assign p_mk  = mkv;
    wire            tk   = dir;                                     // the window ends at a taken mark
    function [PCW-1:0] tadr(input [EW-1:0] x);                      // an entry's target
       tadr = {{(PCW-TGTW-1){x[TGTW-1]}}, x[TGTW-1:0], 1'b0};

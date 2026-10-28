@@ -10,8 +10,9 @@
 // THE WINDOW. A request is up to 16 bytes from any halfword (rd_addr, through rd_last) inside one
 // 4 KiB page (asserted). Its first halfword is in pair p of line L, and it covers at most pair p
 // and the pair after it, which has the other parity: the odd bank reads L's odd pair, the even bank
-// L's even pair -- or, when p is 3, the NEXT line's pair 0, at set + 1. The answer is the two pairs
-// rotated to the window, its first halfword low.
+// L's even pair -- or, when p is 3, the NEXT line's pair 0, at set + 1. The answer is BY BANK, as the
+// BTB's banks are: its halfword b is the window's halfword at address bits [3:1] == b, from the first
+// pair when b is at or after the window's first halfword, else from the pair after.
 //
 // HIT. Virtual only: valid, the virtual tag and the request's epoch -- no translation and no
 // physical tag on the hit path (docs/VHPR.md), so an I$ hit never waits on the iTLB. A window that
@@ -82,7 +83,7 @@ module rv_icache #(
    input  wire [63:0]       rd_pa,       // its PA
    input  wire [RTW-1:0]    rd_tag,
    output wire              rd_ack,      // taken this cycle
-   output reg  [HW*16-1:0]  rd_data,     // the window, its first halfword low (past rd_last: any)
+   output reg  [HW*16-1:0]  rd_data,     // the window by bank: halfword b at address bits [3:1] == b (outside it: any)
    output reg               rd_valid,
    output reg  [63:0]       rd_resp_addr,
    output reg  [RTW-1:0]    rd_resp_tag,
@@ -228,19 +229,16 @@ module rv_icache #(
    wire              rc0    = v_s[{1'b0, r_col}] & (pt_s[{1'b0, r_col}*PTB +: PTB] == r_tg);
    wire              rc1    = v_s[{1'b1, r_col}] & (pt_s[{1'b1, r_col}*PTB +: PTB] == r_tg);
    // the answer: the window's first pair (pair p of this line) and the pair after it (the other
-   // parity: this line's, or the next line's pair 0 when p is 3), each from its own line's way, in
-   // stream order and rotated to the window's first halfword
+   // parity: this line's, or the next line's pair 0 when p is 3), each from its own line's way, by
+   // bank: halfword b is in the first pair when b is at or after the window's first halfword, the
+   // first pair is the odd one when s1_va[4] is set, and b is the odd pair's when those two agree
    wire        we1 = (s1_va[5:4] == 2'd3) ? g1 : h1;      // the even bank's line hits in way 1
    wire [127:0] evp = we1 ? {bk_rd[5], bk_rd[4]} : {bk_rd[1], bk_rd[0]};
    wire [127:0] odp = h1  ? {bk_rd[7], bk_rd[6]} : {bk_rd[3], bk_rd[2]};
-   wire [255:0] p2  = s1_va[4] ? {evp, odp} : {odp, evp};   // {the pair after, the first pair}
    reg  [127:0] win;
-   reg  [3:0]   wi;
    integer wk;
-   always @* for (wk = 0; wk < 8; wk = wk + 1) begin
-      wi = {1'b0, s1_va[3:1]} + wk[3:0];                 // the window's halfword wk: 0..14 of the two
-      win[wk*16 +: 16] = p2[{wi, 4'd0} +: 16];
-   end
+   always @* for (wk = 0; wk < 8; wk = wk + 1)
+      win[wk*16 +: 16] = ((wk[2:0] >= s1_va[3:1]) == s1_va[4]) ? odp[wk*16 +: 16] : evp[wk*16 +: 16];
    // counted once per request, never per replay: an access is a request taken, a miss its first lookup's
    assign perf_access = rd_ack;
    assign perf_miss   = miss & ~s1_rp;

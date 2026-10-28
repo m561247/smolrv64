@@ -110,8 +110,10 @@ module tb;
       ic_valid <= ~reset & ic_req;
       if (ic_req) begin ic_pa_q <= ic_pa; ic_rtag <= ic_tag; end
    end
+   // the window by bank, as rv_icache answers: halfword b from the first pair when b is at or after
+   // the window's first halfword, else from the pair after
    always @(ic_pa_q or wtick)
-      for (m=0;m<16;m=m+1) ic_data[m*8 +: 8] = mem[(ic_pa_q-BASE)+m];
+      for (m=0;m<16;m=m+1) ic_data[m*8 +: 8] = mem[({ic_pa_q[63:4], 4'd0}-BASE)+m+(((m/2) < ic_pa_q[3:1]) ? 16 : 0)];
    always @(dmem_raddr or wtick) dmem_rdata = rd64(dmem_raddr);
    reg                       fv_q;
    reg [`SMOLRV64_LQB-1:0]   ftag_q;

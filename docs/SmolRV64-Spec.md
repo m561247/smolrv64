@@ -425,9 +425,10 @@ prefix of the end pick), each bank's bimodal counter is read from a register of 
 block RAM's clock-to-out, and a window's two queue entries are picked one-hot by the end pick's
 masks, a mark's own fields only. No find-first chain, no encode of the end, no rotation and no adder
 stand between the rows read and the next rows' address: out of context at 6.000 ns (FW 6, PCW 40)
-the predictor meets with +0.185 ns, its loop (14 levels; the pairs it replaced, +0.183 and 13
-levels). 3,382 LUTs (+581). A first version that decoded the next offset after the pick and
-compared each second pair's tag through `sa_q + 16` missed the build by 0.216 ns on this loop.
+the predictor meets with +0.204 ns at a queue write, its loop with +0.264 ns (13 levels; the pairs
+it replaced, +0.183 and 13 levels). 3,350 LUTs (+549). A first version that decoded the next
+offset after the pick and compared each second pair's tag through `sa_q + 16` missed the build by
+0.216 ns on this loop.
 
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
 banks by position parity, one write each) in order (a window pushes up to two; the stream moves
@@ -1669,8 +1670,11 @@ its revised order); the I$ is `rv_icache`, a read-only module of its own (Stage 
 and 2, and 1 and 3 -- each two 64-bit block RAMs with a row of its own ({set, pair[1]}). A read is
 a **window**: up to 16 bytes from any halfword (`rd_addr` through `rd_last`), the window's first
 pair and the pair after it, which has the other parity; the even bank reads the next line's pair 0
-when the window starts in pair 3. Each half takes its own line's way, and the two pairs in stream
-order are rotated to the window. The fetch ring asks for windows from the stream's address (§4.1),
+when the window starts in pair 3. Each half takes its own line's way, and the answer is **by bank**,
+as the BTB's banks are (§4.2): halfword b is the window's halfword at address bits [3:1] == b, the
+first pair's when b is at or after the window's first halfword, else the pair after's -- a pick of
+the even and the odd pair's halfword b, no rotation. The ring appends bank b at its tail plus b's
+position in the window. The fetch ring asks for windows from the stream's address (§4.1),
 so a stream that is not 16-byte aligned runs as an aligned one does (ChaCha20: 25 cycles an
 iteration; 34 when the ring asked for 16-byte-aligned pairs).
 

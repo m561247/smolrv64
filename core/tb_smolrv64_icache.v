@@ -78,6 +78,12 @@ module tb;
             a = pa + 64'(2 * i);  d = mem[a[18:3]];  win_at[i*16 +: 16] = d[a[2:1]*16 +: 16];
          end
       end endfunction
+   // the answer by bank (halfword b at address bits [3:1] == b), in window order for the checks
+   function [127:0] by_pos; input [127:0] d; input [2:0] sk;
+      reg [2:0] b; integer i;
+      begin
+         for (i = 0; i < 8; i = i + 1) begin b = sk + 3'(i);  by_pos[i*16 +: 16] = d[b*16 +: 16]; end
+      end endfunction
    // an answer matches when each of the window's lines holds its new bytes or its old ones
    function win_ok; input [127:0] d, nw, od; input [63:0] pa; input [2:0] last;
       reg [127:0] m1, m2; reg [63:0] a; integer i;
@@ -127,9 +133,9 @@ module tb;
       if (rd_valid) begin
          if (q_n == 0) begin $display("FAIL: an answer with nothing outstanding"); $finish; end
          if (rd_resp_tag !== q_tag[q_rp] || rd_resp_addr !== q_va[q_rp]
-             || (~q_st[q_rp] && !win_ok(rd_data, win_at(q_pa[q_rp]), q_old[q_rp], q_pa[q_rp], q_last[q_rp]))) begin
+             || (~q_st[q_rp] && !win_ok(by_pos(rd_data, q_pa[q_rp][3:1]), win_at(q_pa[q_rp]), q_old[q_rp], q_pa[q_rp], q_last[q_rp]))) begin
             $display("FAIL at cycle %0d: tag %h/%h va %h/%h pa %h last %0d data %h expected %h", cyc,
-                     rd_resp_tag, q_tag[q_rp], rd_resp_addr, q_va[q_rp], q_pa[q_rp], q_last[q_rp], rd_data, win_at(q_pa[q_rp]));
+                     rd_resp_tag, q_tag[q_rp], rd_resp_addr, q_va[q_rp], q_pa[q_rp], q_last[q_rp], by_pos(rd_data, q_pa[q_rp][3:1]), win_at(q_pa[q_rp]));
             $finish;
          end
          nresp <= nresp + 1;  q_rp <= q_rp + 1;

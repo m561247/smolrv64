@@ -13,7 +13,9 @@
 // ring from its registered head, with a mark on each halfword that ends a CTI the predictor knows.
 //
 // THE STREAM. One window per accepted I$ request: up to eight halfwords from the stream's address,
-// never across its 4 KiB page (smolrv64_predictor's w_one), running ahead
+// never across its 4 KiB page (smolrv64_predictor's w_one), answered by bank (halfword b at address
+// bits [3:1] == b, as the predictor marks it) and appended in window order -- bank b at the tail plus
+// its position, b minus the window's first halfword -- running ahead
 // of the PC while the ring has room for a whole window and the predictor has room for the window's
 // prediction. The predictor (smolrv64_predictor) holds the stream's address (sa, sk) and looks the
 // window up as it is requested: a window ends at the first CTI it knows at or after the stream's
@@ -52,7 +54,7 @@ module smolrv64_fring
     // the predictor: the stream's window, where it ends, and the ring taking it
     input  wire [PCW-1:0]          sa,      // the window's first pair's first byte...
     input  wire [2:0]              sk,      // ...and the window's first halfword in it
-    input  wire [7:0]              p_mk,       // the window's marked halfwords, by position...
+    input  wire [7:0]              p_mk,       // the window's marked halfwords, by bank...
     input  wire [2:0]              p_end,      // ...and its last
     output wire                    pr_adv,
     input  wire                    pq_room,
@@ -105,9 +107,9 @@ module smolrv64_fring
    assign ic_va   = {25'b0, wa[38:0]};                     // VIRTUAL: canonical Sv39 VA (sign ext masked)
    assign ic_pa   = {{(64-PCW){1'b0}}, big_pg ? {pc_pa[PCW-1:21], wa[20:0]} : {pc_pa[PCW-1:12], wa[11:0]}};
    assign ic_last = p_end;
-   assign ic_tag  = {p_mk, p_end, rg_gen};
-   initial if (`SMOLRV64_ICTAG_W != 8 + 3 + GW)
-      $fatal(1, "smolrv64_fring: SMOLRV64_ICTAG_W is %0d, the tag's fields are %0d bits", `SMOLRV64_ICTAG_W, 8 + 3 + GW);
+   assign ic_tag  = {p_mk, p_end, sk, rg_gen};
+   initial if (`SMOLRV64_ICTAG_W != 8 + 3 + 3 + GW)
+      $fatal(1, "smolrv64_fring: SMOLRV64_ICTAG_W is %0d, the tag's fields are %0d bits", `SMOLRV64_ICTAG_W, 8 + 3 + 3 + GW);
    function [3:0] ones8(input [7:0] x);
       integer i;
       begin ones8 = 4'd0; for (i = 0; i < 8; i = i + 1) ones8 = ones8 + {3'd0, x[i]}; end
@@ -119,8 +121,9 @@ module smolrv64_fring
    // window's prediction marked it. An answer landing in a restart's cycle belongs to the old
    // stream and is not written.
    wire         rp_ok   = ic_valid & (rg_drop == 3'd0);
-   wire [7:0]   rp_mk   = ic_rtag[GW+3 +: 8];              // the answer's marked halfwords
-   wire [2:0]   rp_end  = ic_rtag[GW +: 3];
+   wire [7:0]   rp_mk   = ic_rtag[GW+6 +: 8];              // the answer's marked halfwords, by bank
+   wire [2:0]   rp_end  = ic_rtag[GW+3 +: 3];              // ...its last position
+   wire [2:0]   rp_sk   = ic_rtag[GW +: 3];                // ...and its first halfword's bank
    wire [3:0]   rp_n    = rp_ok ? ({1'b0, rp_end} + 4'd1) : 4'd0;
    wire [RSB-1:0] tail  = rg_head + rg_cnt[RSB-1:0];
    wire [RSB:0]   adv_w = {{(RSB+1-AVW){1'b0}}, adv_hw};
@@ -141,16 +144,20 @@ module smolrv64_fring
    // THE START BITS, PREDECODED AS THE BYTES ARRIVE: a halfword begins an instruction unless the one
    // before it began a 32-bit op. The stream is the instruction stream in order (a predicted-taken
    // window ends at its CTI's last halfword), so the chain runs on from the last halfword appended
-   // (rg_cy) and a restart begins it afresh at the PC. The aligner then needs no length scan.
-   reg [7:0] rp_st;
+   // (rg_cy) and a restart begins it afresh at the PC. The aligner then needs no length scan. The
+   // chain runs in window order (rp_st), and each bank takes its position's bit (rp_sb).
+   reg [7:0] rp_st, rp_sb;
    reg       rp_cy;
+   reg [2:0] sb;
    integer   sj;
    always @* begin
       rp_cy = rg_cy;
       for (sj = 0; sj < 8; sj = sj + 1) begin
+         sb        = rp_sk + sj[2:0];
          rp_st[sj] = ~rp_cy;
-         if (sj <= rp_end) rp_cy = rp_st[sj] & (ic_data[sj*16 +: 2] == 2'b11);
+         if (sj <= rp_end) rp_cy = rp_st[sj] & (ic_data[sb*16 +: 2] == 2'b11);
       end
+      for (sj = 0; sj < 8; sj = sj + 1) begin sb = sj[2:0] - rp_sk;  rp_sb[sj] = rp_st[sb]; end
    end
    integer j;
    always @(posedge clk) begin
@@ -177,15 +184,16 @@ module smolrv64_fring
             if (rp_wv[j]) rmk[rp_wp[j*RSB +: RSB]] <= rp_mk[j];
       end
    end
-   // the answer's halfwords to its end, at the tail on: one per bank
+   // the answer's halfwords to its end, at the tail on in window order: one writer per bank
    wire [7:0]     rp_wv;
    wire [8*RSB-1:0] rp_wp;
    wire [8*17-1:0]  rp_wd;
    genvar ga;
    generate for (ga = 0; ga < 8; ga = ga + 1) begin : an
-      assign rp_wv[ga] = ~reset & ~flush & rp_ok & (ga <= rp_end);
-      assign rp_wp[ga*RSB +: RSB] = tail + ga[RSB-1:0];
-      assign rp_wd[ga*17 +: 17] = {ic_data[ga*16 +: 16], rp_st[ga]};
+      wire [2:0] pos = ga[2:0] - rp_sk;                    // bank ga's position in the window
+      assign rp_wv[ga] = ~reset & ~flush & rp_ok & (pos <= rp_end);
+      assign rp_wp[ga*RSB +: RSB] = tail + {{(RSB-3){1'b0}}, pos};
+      assign rp_wd[ga*17 +: 17] = {ic_data[ga*16 +: 16], rp_sb[ga]};
    end endgenerate
    wire [HW*3-1:0] rg_ro;                       // the window: HW consecutive halfwords
    generate for (ga = 0; ga < HW; ga = ga + 1) begin: ro
