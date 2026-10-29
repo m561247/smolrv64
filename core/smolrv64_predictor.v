@@ -413,8 +413,8 @@ module smolrv64_predictor
    reg  [RASB-1:0] s2_rsp;
    reg  [GHL-1:0]  s2_ghr;
    reg  [YB-1:0]   s2_yix;
-   reg  [7:0]      s2_mk, s2_bh1;
-   reg  [8*BTBW-1:0] s2_bw1;
+   reg  [7:0]      s2_mk;
+   reg  [8*W-1:0]  s2_m1;                    // ...and L1's matching ways, by bank
    reg  [PQB-1:0]  s2_wp;                    // the queue's tail before the window
    reg  [2:0]      s2_n;                     // ...and the entries it pushed
    initial s2_v = 1'b0;
@@ -435,10 +435,11 @@ module smolrv64_predictor
    reg  [PQB-1:0]  cr_wp;
    reg  [2:0]      cr_n;                     // the queue entries to give back
    reg  [1:0]      cr_k;                     // the ring's requests to drop
-   reg  [8*W-1:0]  fl_w;
-   reg  [8*L1RB-1:0] fl_r;
-   reg  [8*L1EW-1:0] fl_e;
+   reg  [8*W-1:0]  fl_w, fl_c;               // by bank and way: write, and write zeros (clear)
+   reg  [8*W*L1RB-1:0] fl_r;                 // ...at this row
+   reg  [8*L1EW-1:0] fl_e;                   // by bank: L2's entry
    initial begin cr_q = 1'b0;  mf_q = 1'b0;  fl_w = {8*W{1'b0}}; end
+   wire [8*W-1:0]  m1_f;                     // L1's matching ways now, by bank
    assign cancel   = cr_q;
    assign cancel_n = cr_k;
 
@@ -467,9 +468,11 @@ module smolrv64_predictor
          initial for (li = 0; li < L1N; li = li + 1) l1[li] = {L1EW{1'b0}};
          wire   l1t = tw_b & tsel[gw];
          wire   l1f = (cr_q | mf_q) & fl_w[gb*W + gw];
+         localparam integer FI = gb*W + gw;
          wire [L1RB-1:0] lr  = fp ? lslot(sa_q, WI) : lslot1(sa_q, WI);   // the read's row
-         wire [L1RB-1:0] lw  = l1t ? lslot(t_last, WI) : fl_r[gb*L1RB +: L1RB];
-         wire [L1EW-1:0] lwd = l1t ? {ltag(t_last, btag(t_last)), t_type, res_tgt[TGTW:1]} : fl_e[gb*L1EW +: L1EW];
+         wire [L1RB-1:0] lw  = l1t ? lslot(t_last, WI) : fl_r[FI*L1RB +: L1RB];
+         wire [L1EW-1:0] lwd = l1t ? {ltag(t_last, btag(t_last)), t_type, res_tgt[TGTW:1]}
+                             : fl_c[FI] ? {L1EW{1'b0}} : fl_e[gb*L1EW +: L1EW];
          assign e1[gw] = l1[lr];
          assign m1[gw] = e1[gw][L1EW-1 -: L1TW] == lt;
          always @(posedge clk) if (l1t | l1f) l1[lw] <= lwd;
@@ -514,18 +517,26 @@ module smolrv64_predictor
       end
       assign bq[gb]  = {{TAGW{1'b0}}, s1e[TGTW+2:0]};       // the pick reads the type and the target
       assign bh[gb]  = |m1;
+      assign m1_f[gb*W +: W] = m1;
       assign bw[gb]  = x1;
       assign bq2[gb] = s2e;
       assign bh2[gb] = |m2;
       assign bw2[gb] = x2;
-      // the fill for this bank: L2's entry in L2's way where L2 hit, else clear L1's where only it did
+      // the fill for this bank: L2's entry into L2's way where L2 hit, and every other way that held
+      // the halfword in L1 cleared -- L1's rows are not L2's, so an L2 eviction leaves L1's copy, and a
+      // copy in a way before L2's would be L1's first match for ever
       wire            fp2 = fpk2[gb];
-      wire [BTBW-1:0] fw  = bh2[gb] ? x2 : s2_bw1[gb*BTBW +: BTBW];
-      always @(posedge clk) begin
-         fl_w[gb*W +: W]       <= (inw2[gb] & (bh2[gb] | s2_bh1[gb])) ? ({{(W-1){1'b0}}, 1'b1} << fw) : {W{1'b0}};
-         fl_r[gb*L1RB +: L1RB] <= fp2 ? lslot(s2_sa, fw) : lslot1(s2_sa, fw);
-         fl_e[gb*L1EW +: L1EW] <= bh2[gb] ? {ltag(s2_sa, s2_tag), s2e[TGTW+2:0]} : {L1EW{1'b0}};
+      for (gw = 0; gw < W; gw = gw + 1) begin : fl
+         localparam [BTBW-1:0] WI = gw;
+         localparam integer    FI = gb*W + gw;
+         wire l2w = bh2[gb] & (x2 == WI);                     // L2's way: takes its entry
+         always @(posedge clk) begin
+            fl_w[FI] <= inw2[gb] & (l2w | s2_m1[FI]);
+            fl_c[FI] <= ~l2w;
+            fl_r[FI*L1RB +: L1RB] <= fp2 ? lslot(s2_sa, WI) : lslot1(s2_sa, WI);
+         end
       end
+      always @(posedge clk) fl_e[gb*L1EW +: L1EW] <= {ltag(s2_sa, s2_tag), s2e[TGTW+2:0]};
       reg [YEW-1:0] yc  [0:NY-1];
       reg [YEW-1:0] yqr;
       integer yi;
@@ -567,7 +578,7 @@ module smolrv64_predictor
       if (adv) begin
          s2_sa  <= sa_q;  s2_sk <= sk_q;  s2_np <= np_q;  s2_yq <= yq_f;
          s2_rtop <= ras[ras_ptr];  s2_rsp <= ras_ptr;  s2_ghr <= ghr;  s2_yix <= yr_q ^ yh_q;
-         s2_pe  <= pe;  s2_nx <= p_nx;  s2_mk <= mkv;  s2_bh1 <= bh;  s2_bw1 <= bw_f;
+         s2_pe  <= pe;  s2_nx <= p_nx;  s2_mk <= mkv;  s2_m1 <= m1_f;
          s2_wp  <= pq_wp;  s2_n <= push ? nmk[2:0] : 3'd0;
       end
       cr_q   <= ~reset & d_bad;

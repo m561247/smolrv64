@@ -429,14 +429,15 @@ the details carry is both levels'. L2 (`BTBB`=13: 512 rows a bank and way, in th
 held 128) reads the same rows in the same cycle, each bank its own pair's (`sa_q + 16`, exact), so
 its entries arrive a cycle later, when a second end pick (`u_chk`) gives L2's view of the window: its
 last position, where the stream goes on, its marks. When L2's differs from L1's in where the window
-ends or where the stream goes on, the cycle after corrects: L1 is filled from L2 at that window,
-the stream goes back to the window's start with its history, RAS pointer and queue tail from before
+ends or where the stream goes on, the cycle after corrects: L1 is filled from L2 at that window
+(L2's entry into L2's way, and zeros into every other way that matched: L1's rows are not L2's, so
+an L2 eviction can leave L1's copy, which would stay L1's first match for ever), the stream goes back to the window's start with its history, RAS pointer and queue tail from before
 it, and the ring drops that window's request and the next's (§4.1) -- the window is looked up again
 three cycles after it first was. A window that differs only in its marks fills L1 and is left
 alone: the not-taken conditional L1 lacked goes unpredicted once, as a BTB miss does. Training
 writes both levels at the CTI's own slots. A window's two queue entries are picked one-hot by the
 end pick's masks, a mark's own fields only, and L2's bimodal counter is read from a register of its
-row during the block RAM's clock-to-out. Out of context at 6.000 ns (FW 6, PCW 40) the predictor meets with +0.135 ns at a queue write, its loop with +0.140 ns (16 levels); 5,843 LUTs (2,352 of them distributed RAM). The one-level predictor (2K entries in block RAM, in the loop) met
+row during the block RAM's clock-to-out. Out of context at 6.000 ns (FW 6, PCW 40) the predictor meets with +0.133 ns at a queue write, its loop with more (not among the 40 worst paths, the 40th at +0.256); 6,237 LUTs (2,352 of them distributed RAM). The one-level predictor (2K entries in block RAM, in the loop) met
 with +0.204 ns out of context and missed all nine of its builds (-0.065 to -0.83 ns): its loop's route
 to 16 block RAMs in two columns was 60% of 5.88 ns.
 
