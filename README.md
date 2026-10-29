@@ -1,3 +1,4 @@
+![SmolRV64 running X11 and Quake](docs/SmolRV64-7f8f5a94-quake.jpeg)
 # SmolRV64
 
 ![Geekbench 5 single-core score over time](docs/images/gb5-progress.svg)
