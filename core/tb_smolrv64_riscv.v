@@ -37,7 +37,9 @@ module tb;
    wire [`SMOLRV64_ICTAG_W-1:0] ic_tag;
    wire [2:0]       ic_last;                   // (the model answers 16 bytes from the window's start)
    reg              ic_valid;
-   reg  [63:0]      ic_pa_q;
+   reg  [63:0]      ic_pa_q, ic_pa1;
+   reg              ic_v1;
+   reg  [`SMOLRV64_ICTAG_W-1:0] ic_tag1;
    reg  [`SMOLRV64_ICTAG_W-1:0] ic_rtag;
    reg  [127:0]     ic_data;
    wire [63:0]      dmem_raddr, dmem_waddr, dmem_wdata;
@@ -107,8 +109,12 @@ module tb;
    reg wtick = 0;
    integer m;
    always @(posedge clk) begin
-      ic_valid <= ~reset & ic_req;
-      if (ic_req) begin ic_pa_q <= ic_pa; ic_rtag <= ic_tag; end
+      // two cycles from request to answer, as rv_icache's (its banks, then its tags): the ring's
+      // corrections rely on it (smolrv64_fring asserts it)
+      ic_v1    <= ~reset & ic_req;
+      if (ic_req) begin ic_pa1 <= ic_pa; ic_tag1 <= ic_tag; end
+      ic_valid <= ~reset & ic_v1;
+      if (ic_v1) begin ic_pa_q <= ic_pa1; ic_rtag <= ic_tag1; end
    end
    // the window by bank, as rv_icache answers: halfword b from the first pair when b is at or after
    // the window's first halfword, else from the pair after

@@ -318,8 +318,11 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
   redirect's target or the PC.
   So the window fetch aligns is a rotation of the ring from its registered head, with no address
   compare on the fetch loop, and each halfword carries a mark bit: it ends a CTI the predictor
-  knows. Answers come back in order; a flush marks every request then in flight stale and
-  that many answers are dropped (a generation in the tag cross-checks it). A `fence.i` or a
+  knows. Answers come back in order, and each request in flight is an entry of a small FIFO with
+  its halfwords, its marks and a kill bit: a flush kills every one in flight (a generation in the
+  tag cross-checks it), and a correction of the predictor's (§4.2) the youngest one or two, whose
+  reservation and marks are given back. That needs an answer two cycles after its request, as
+  `rv_icache` gives it; the ring asserts it. A `fence.i` or a
   mapping change (`freeze`) empties the ring. **The stream stays inside the PC's enclosing page**
   (4 KiB, or 2 MiB for a >= 2 MiB leaf) and takes its PA from the iMMU's translation of the PC;
   increment 1d translates on an I$ miss instead. The ring replaced Stage 2's alignment adapter
@@ -371,7 +374,9 @@ the irrevocable pointer (§6) are architecturally done and drain after the flush
 **At the fetch stream, keyed by the last halfword** (Stage 4 increment 1b). The predictor is the
 fetch stream: it holds the stream's address (a registered **window**: its first 16-byte pair and
 its first halfword in it), looks the window up as the fetch ring asks the I$ for it, and steers the
-stream to the next window. A BTB entry belongs to its CTI's last halfword; a window covers eight
+stream to the next window. **Two BTBs:** a small L1 in the predictor's loop, and an 8K-entry L2
+behind it that checks every window a cycle later and corrects L1 (below). A BTB entry belongs to
+its CTI's last halfword; a window covers eight
 consecutive halfwords, one in each halfword position, so the BTB and the corrector are each eight
 banks by position. Each BTB bank reads the row of the pair its halfword is in -- the window's first
 pair at or after its offset, else the pair after it -- and compares the window's tag (the bits above
@@ -389,17 +394,17 @@ and the history shifts at most once per window. The corrector is read with the h
 current window's own shift (a window of lag), and the index read is the one carried for training. Training recomputes the key
 from the resolving CTI's PC and length.
 
-**The BTB is skewed-associative and taken-only.** Each halfword bank is `W` = 2 ways
-(`BTBW`=1); way `w` reads row `lo ^ rotl(hi, w)`, `lo` the 7 address bits above the pair and
-`hi` the 7 above those, so halfwords that share a row in one way rarely share it in another. A
+**Both BTBs are skewed-associative and taken-only.** Each halfword bank is `W` = 2 ways
+(`BTBW`=1); way `w` reads row `lo ^ rotl(hi, w)`, `lo` the row bits above the pair (L2 9, L1 5)
+and `hi` as many above those, so halfwords that share a row in one way rarely share it in another. A
 window reads both ways of all eight banks; a halfword's entry is its first way whose tag
 matches. Every jump, call and return is allocated; a conditional is allocated only when it
 resolves taken, so a conditional the BTB misses is one never taken (or evicted) and falls
 through, with no decode redirect (`DCR_BACK`=0). Training never reads the entries: a CTI the
 BTB hit carries the way it hit in its details, and training rewrites that way; a miss allocates
 the first way whose recently-trained bit is clear (set when trained; when that would set both,
-the other clears), else a rotating way. Each way's entries are therefore a block RAM with two
-ports, the stream's read and training's write. An instance predicted before an earlier
+the other clears), else a rotating way. Each L2 way's entries are therefore a block RAM with two
+ports, the check's read and training's write. An instance predicted before an earlier
 instance's allocation landed allocates again, but a first miss mispredicts and drops everything
 younger, so few do: 11 to 184 duplicate allocations in about 9 M trainings on each GB5 slice
 (the lockstep's `BTB-SIM` line, which also counts entries rewritten after they changed: 0 to
@@ -411,24 +416,29 @@ direct-mapped, allocate-every-CTI BTB with backward-taken decode redirects, 1.9 
 before it in the window alone whether the window ends there: the window's order is its first
 pair's banks ascending, then the second pair's, so a bank's hits before it are its own pair's
 below it (a constant mask) and, for a second-pair bank, the first pair's as a whole (any, exactly
-one, any taken); the offset register only splits the hits in two. Each way's two next rows -- the
-next window's first pair's and the pair after's -- are skewed from every candidate address (the
-restart's, the ending CTI's target) before the pick, each bank taking one of the two after it;
-after a not-taken mark, or with none, the next window's pairs are the first pair or the pair after
-it and the one after that, one OR of the end pick against the offset's mask choosing among the
-registers' sums (`sa_q`, `sa_q + 16`, `sa_q + 32`). The pair after's row is the low row bits plus
-one, skewed alike: exact for the sums of registers, and for a target, the
-RAS top or a restart exact unless those bits wrap, when that window's second pair reads a wrong row
--- a missed or false hint, never a wrong result. Which banks take the first pair's row is a mask per
-candidate picked one-hot beside the rows (a target's decoded from its own offset, the mark's a
-prefix of the end pick), each bank's bimodal counter is read from a register of its row during the
-block RAM's clock-to-out, and a window's two queue entries are picked one-hot by the end pick's
-masks, a mark's own fields only. No find-first chain, no encode of the end, no rotation and no adder
-stand between the rows read and the next rows' address: out of context at 6.000 ns (FW 6, PCW 40)
-the predictor meets with +0.204 ns at a queue write, its loop with +0.264 ns (13 levels; the pairs
-it replaced, +0.183 and 13 levels). 3,350 LUTs (+549). A first version that decoded the next
-offset after the pick and compared each second pair's tag through `sa_q + 16` missed the build by
-0.216 ns on this loop.
+one, any taken); the offset register only splits the hits in two. **The BTB in the loop is a small L1, and the 8K-entry L2 behind it checks it.** L1 is eight halfword
+banks of 2 skewed ways of 32 rows (`L1RB`=5) in distributed RAM, read at the START of the cycle at
+rows of the stream's registers: bank b at its pair's -- the first pair's when b is at or after the
+offset, else the pair after's, which is the first pair's plus one in L1's row bits alone, with the
+first pair's skew and tag, so no carry chain stands in front of the read (it is the pair's own slot
+except where those bits wrap, and the fill writes a pair after's entries where the read finds
+them). So the loop is the stream's registers, the rows, the read, the hits and the end pick, the
+next address -- none of the next window's rows. An L1 entry mirrors an L2 entry in the SAME way: its
+tag is the L2 index bits above L1's and L2's tag, its type carries the bimodal counter, and the way
+the details carry is both levels'. L2 (`BTBB`=13: 512 rows a bank and way, in the 16 RAMB36 that
+held 128) reads the same rows in the same cycle, each bank its own pair's (`sa_q + 16`, exact), so
+its entries arrive a cycle later, when a second end pick (`u_chk`) gives L2's view of the window: its
+last position, where the stream goes on, its marks. When L2's differs from L1's in where the window
+ends or where the stream goes on, the cycle after corrects: L1 is filled from L2 at that window,
+the stream goes back to the window's start with its history, RAS pointer and queue tail from before
+it, and the ring drops that window's request and the next's (§4.1) -- the window is looked up again
+three cycles after it first was. A window that differs only in its marks fills L1 and is left
+alone: the not-taken conditional L1 lacked goes unpredicted once, as a BTB miss does. Training
+writes both levels at the CTI's own slots. A window's two queue entries are picked one-hot by the
+end pick's masks, a mark's own fields only, and L2's bimodal counter is read from a register of its
+row during the block RAM's clock-to-out. Out of context at 6.000 ns (FW 6, PCW 40) the predictor meets with +0.135 ns at a queue write, its loop with +0.140 ns (16 levels); 5,843 LUTs (2,352 of them distributed RAM). The one-level predictor (2K entries in block RAM, in the loop) met
+with +0.204 ns out of context and missed all nine of its builds (-0.065 to -0.83 ns): its loop's route
+to 16 block RAMs in two columns was 60% of 5.88 ns.
 
 The ring marks each predicted CTI's last halfword, and each prediction enters an 8-entry queue (two
 banks by position parity, one write each) in order (a window pushes up to two; the stream moves
@@ -457,7 +467,8 @@ frontend reaches 214.6 MHz (196.5 with the ring alone).
 
 | structure | size | organisation | storage |
 |---|---|---|---|
-| BTB | **2048 entries** (`BTBB`=11), 8 halfword banks x 2 skewed ways (`BTBW`=1) of 128 | 12-bit tag + 3-bit type + 38-bit target | block RAM, one RAMB36 per bank and way: the stream's read (in the predictor's loop) and training's write |
+| L1 BTB | 512 entries (`L1RB`=5), 8 halfword banks x 2 skewed ways (`BTBW`=1) of 32 | 16-bit tag + 3-bit type (a conditional's counter) + 38-bit target | distributed RAM, read at the stream's registers (in the predictor's loop); one write, training's, else a correction's fill |
+| L2 BTB | **8192 entries** (`BTBB`=13), 8 halfword banks x 2 skewed ways of 512 | 12-bit tag + 3-bit type + 38-bit target | block RAM, one RAMB36 per bank and way: the check's read (a cycle behind the stream) and training's write |
 | YAGS corrector | 2048 entries (`YBITS`=11), 8 halfword banks | 8-bit tag + 2-bit counter | distributed RAM, read as the stream moves |
 | GHR | 11 bits (`GHL`) | path history | flops |
 | RAS | 8 entries (`RASB`=3) | call/return stack | flops |
@@ -486,8 +497,8 @@ of its CTIs, the same two taken branches on every run, which never reached the B
 mispredicted every run (253.2 cycles a run); at 32 it drops none and runs in 222.2. A CTI younger than a pending restart
 queues nothing; an entry the kill marks dead, or one past the pending restart, is discarded at
 the head. A redirect discards every entry that has not retired, except the restart's own CTI at
-its squash (the ROB head). Training is a read-modify-write of the tables' current counters (the
-bimodal banks `bc`, the corrector), never of the snapshot carried from fetch, which every
+its squash (the ROB head). Training is a read-modify-write of the tables' current counters (L2's
+bimodal banks `bc`, the corrector; L1 takes the same write), never of the snapshot carried from fetch, which every
 in-flight instance of a loop's branch shares. A mispredicting
 conditional branch's early restart restores its own history snapshot, stepped by its own address
 when it was taken. The key is the CTI's last halfword (its PC and length). Dhrystone

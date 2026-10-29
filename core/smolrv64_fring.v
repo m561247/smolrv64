@@ -22,9 +22,12 @@
 // address, and the stream goes on at the predicted next address.
 // The stream stays inside the PC's enclosing page (4 KiB, or 2 MiB for a >= 2 MiB leaf), whose PA
 // the iMMU holds for the PC; increment 1d translates on an I$ miss instead. Answers come back in
-// order, so a flush marks every request then in flight stale and that many answers are dropped
-// (rg_drop); the generation in the tag only cross-checks it. A fence.i or a mapping change
-// (freeze) empties the ring while it runs.
+// order, and each request in flight is an entry of a small FIFO (fq_*) with its halfwords, its
+// marks and a kill bit: a flush kills every one in flight, and a correction of the predictor's
+// (cancel) the youngest one or two -- a window its first-level BTB mispredicted and the one after
+// it -- whose halfwords the reservation and whose marks the count give back. A killed request's
+// answer is not written; the generation in the tag only cross-checks a flush. A fence.i or a
+// mapping change (freeze) empties the ring while it runs.
 module smolrv64_fring
   #(parameter HW  = 8,                      // the window fetch aligns, in halfwords
     parameter PQB = 3,                      // the predictor's queue (for the mark count check)
@@ -58,6 +61,8 @@ module smolrv64_fring
     input  wire [2:0]              p_end,      // ...and its last
     output wire                    pr_adv,
     input  wire                    pq_room,
+    input  wire                    cancel,  // a correction: drop the youngest requests...
+    input  wire [1:0]              cancel_n,   // ...this many (none taken this cycle)
     input  wire [PQB:0]            pq_cnt,
     // the I$ (rv_icache)
     output wire                    ic_req,
@@ -84,10 +89,10 @@ module smolrv64_fring
    reg  [GW-1:0]   rg_gen;
    reg  [1:0]      rg_lvl;                                 // page size of the bytes held
    reg  [PCW-1:0]  rg_hva;                                 // the head's VA (checked, never used)
-   reg  [2:0]      rg_infl, rg_drop;                       // requests in flight; of them, stale
+   reg  [3:0]      rg_infl;                                // requests in flight
    reg  [PQB:0]    rg_mfl;                                 // marks in flight (checked)
    initial begin rg_head = 0; rg_cnt = 0; rg_resv = 0; rg_gen = 0;
-                 rg_lvl = 2'd0; rg_infl = 0; rg_drop = 0; rg_mfl = 0; rmk = 0; rg_cy = 1'b0; end
+                 rg_lvl = 2'd0; rg_infl = 0; rg_mfl = 0; rmk = 0; rg_cy = 1'b0; end
    wire            flush  = restart | freeze;
 
    // the request: the stream's window, inside the PC's enclosing page (a window never crosses 4 KiB,
@@ -103,7 +108,7 @@ module smolrv64_fring
    // holds two windows, so a bundle waiting for its bytes (the aligner's bytes_late) always leaves
    // room for the window that brings them.
    initial if (RS < HW + 8) $fatal(1, "smolrv64_fring: %0d slots cannot hold two %0d-halfword windows", RS, HW);
-   assign ic_req = ~freeze & xlate_ok & inpg & pq_room & (rg_resv <= RS[RSB:0] - 5'd8);
+   assign ic_req = ~freeze & ~cancel & xlate_ok & inpg & pq_room & (rg_resv <= RS[RSB:0] - 5'd8);
    assign ic_va   = {25'b0, wa[38:0]};                     // VIRTUAL: canonical Sv39 VA (sign ext masked)
    assign ic_pa   = {{(64-PCW){1'b0}}, big_pg ? {pc_pa[PCW-1:21], wa[20:0]} : {pc_pa[PCW-1:12], wa[11:0]}};
    assign ic_last = p_end;
@@ -120,7 +125,22 @@ module smolrv64_fring
    // the answer: the window's halfwords to its end, appended at the tail, each marked as the
    // window's prediction marked it. An answer landing in a restart's cycle belongs to the old
    // stream and is not written.
-   wire         rp_ok   = ic_valid & (rg_drop == 3'd0);
+   // THE REQUESTS IN FLIGHT, oldest at fq_rp: each one's halfwords and marks, and its kill bit
+   localparam integer FD = 8;
+   reg  [3:0]    fq_n [0:FD-1];
+   reg  [1:0]    fq_m [0:FD-1];
+   reg  [FD-1:0] fq_k;
+   reg  [2:0]    fq_rp, fq_wp;
+   initial begin fq_rp = 3'd0;  fq_wp = 3'd0;  fq_k = {FD{1'b0}}; end
+   wire [2:0]    yg0 = fq_wp - 3'd1, yg1 = fq_wp - 3'd2;  // the youngest two
+   wire          c2  = cancel_n[1];
+   wire [3:0]    rq_m = ones8(p_mk);                       // a request's marks (at most two)
+   // what a correction gives back: the youngest one's halfwords and marks, and the next's when two
+   wire [4:0]    gb_n = {1'b0, fq_n[yg0]} + (c2 ? {1'b0, fq_n[yg1]} : 5'd0);
+   wire [2:0]    gb_m = {1'b0, fq_m[yg0]} + (c2 ? {1'b0, fq_m[yg1]} : 3'd0);
+   // the answer at the head is kept unless it was killed, or a correction kills it now
+   wire          hd_k = fq_k[fq_rp] | (cancel & (rg_infl <= {2'd0, cancel_n}));
+   wire         rp_ok   = ic_valid & ~hd_k;
    wire [7:0]   rp_mk   = ic_rtag[GW+6 +: 8];              // the answer's marked halfwords, by bank
    wire [2:0]   rp_end  = ic_rtag[GW+3 +: 3];              // ...its last position
    wire [2:0]   rp_sk   = ic_rtag[GW +: 3];                // ...and its first halfword's bank
@@ -161,11 +181,21 @@ module smolrv64_fring
    end
    integer j;
    always @(posedge clk) begin
-      // requests in flight, and how many of them a flush made stale (answers come in order)
-      rg_infl <= reset ? 3'd0 : rg_infl + {2'd0, rq_acc} - {2'd0, ic_valid};
-      rg_drop <= reset ? 3'd0
-               : flush ? rg_infl + {2'd0, rq_acc} - {2'd0, ic_valid}
-               : rg_drop - {2'd0, ic_valid & (rg_drop != 3'd0)};
+      // the requests in flight: a flush kills them all (a request taken in its cycle too), a
+      // correction the youngest cancel_n
+      rg_infl <= reset ? 4'd0 : rg_infl + {3'd0, rq_acc} - {3'd0, ic_valid};
+      if (reset) begin
+         fq_rp <= 3'd0;  fq_wp <= 3'd0;
+      end else begin
+         if (ic_valid) fq_rp <= fq_rp + 3'd1;
+         if (rq_acc) begin
+            fq_wp <= fq_wp + 3'd1;
+            fq_n[fq_wp] <= rq_n;  fq_m[fq_wp] <= rq_m[1:0];
+         end
+         for (j = 0; j < FD; j = j + 1)
+            if (flush | (cancel & ((j[2:0] == yg0) | (c2 & (j[2:0] == yg1))))) fq_k[j] <= 1'b1;
+            else if (rq_acc & (j[2:0] == fq_wp)) fq_k[j] <= 1'b0;
+      end
       if (reset | flush) begin
          rg_cnt <= 0;  rg_resv <= 0;  rg_head <= 0;  rg_mfl <= 0;  rg_cy <= 1'b0;
          rg_hva <= rst_a;
@@ -173,9 +203,11 @@ module smolrv64_fring
       end else begin
          rg_head <= rg_head + adv_w[RSB-1:0];
          rg_cnt  <= rg_cnt + {{(RSB-3){1'b0}}, rp_n} - adv_w;
-         rg_resv <= rg_resv + (rq_acc ? {{(RSB-3){1'b0}}, rq_n} : {(RSB+1){1'b0}}) - adv_w;
+         rg_resv <= rg_resv + (rq_acc ? {{(RSB-3){1'b0}}, rq_n} : {(RSB+1){1'b0}}) - adv_w
+                            - (cancel ? {{(RSB-4){1'b0}}, gb_n} : {(RSB+1){1'b0}});
          rg_mfl  <= rg_mfl + (rq_acc ? {{(PQB+1-4){1'b0}}, ones8(p_mk)} : {(PQB+1){1'b0}})
-                           - (rp_ok ? {{(PQB+1-4){1'b0}}, ones8(rp_mk)} : {(PQB+1){1'b0}});
+                           - (rp_ok ? {{(PQB+1-4){1'b0}}, ones8(rp_mk)} : {(PQB+1){1'b0}})
+                           - (cancel ? {{(PQB+1-3){1'b0}}, gb_m} : {(PQB+1){1'b0}});
          rg_hva  <= take ? take_tgt : rg_hva + {{(PCW-1-AVW){1'b0}}, adv_hw, 1'b0};
          if (rq_acc) rg_lvl <= pc_lvl;
          if (drop) rmk[rg_head] <= 1'b0;
@@ -215,7 +247,12 @@ module smolrv64_fring
    wire e_over  = chk & ({1'b0, adv_hw} > rg_cnt);
    wire e_hold  = chk & (rg_cnt + rp_n > rg_resv);
    wire e_gen   = chk & rp_ok & (ic_rtag[GW-1:0] != rg_gen);
-   wire e_orph  = chk & ic_valid & (rg_infl == 3'd0);
+   // AN ANSWER TAKES TWO CYCLES (rv_icache: its banks, then its tags), so a correction two cycles
+   // after a window, which kills its request and the next, always finds them in flight
+   reg  acc_q;
+   always @(posedge clk) acc_q <= ~reset & rq_acc;
+   wire e_orph  = chk & ((ic_valid & ((rg_infl == 4'd0) | (acc_q & (rg_infl == 4'd1))))
+                         | (cancel & (rg_infl < {2'd0, cancel_n})));
    wire e_marks = chk & (n_mk + {1'b0, rg_mfl} != {1'b0, pq_cnt});
    reg  [5:0] err_q;
    always @(posedge clk) err_q <= reset ? 6'd0 : {e_marks, e_orph, e_gen, e_hold, e_over, e_head};
@@ -225,7 +262,8 @@ module smolrv64_fring
       if (e_over)  $fatal(1, "smolrv64_fring: fetch consumed %0d halfwords of a ring holding %0d", adv_hw, rg_cnt);
       if (e_hold)  $fatal(1, "smolrv64_fring: the ring holds more (%0d) than it reserved (%0d)", rg_cnt + rp_n, rg_resv);
       if (e_gen)   $fatal(1, "smolrv64_fring: a kept I$ answer is from generation %0d, the stream is %0d", ic_rtag[GW-1:0], rg_gen);
-      if (e_orph)  $fatal(1, "smolrv64_fring: an I$ answer with no request in flight");
+      if (e_orph)  $fatal(1, "smolrv64_fring: an I$ answer with none in flight or a cycle after its request, or a correction of %0d with %0d in flight",
+                          cancel_n, rg_infl);
       if (e_marks) $fatal(1, "smolrv64_fring: %0d marks held and %0d in flight, but %0d predictions queued", n_mk, rg_mfl, pq_cnt);
    end
 endmodule
