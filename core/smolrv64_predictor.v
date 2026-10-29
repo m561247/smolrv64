@@ -153,11 +153,7 @@ module smolrv64_predictor
    function [YB-1:0] yfold(input [GHL-1:0] x);
       yfold = x[YB-1:0] ^ {{(2*YB-GHL){1'b0}}, x[GHL-1:YB]};
    endfunction
-   // The index consumes the halfword's bits [YB+3:1], so the tag carries them (rule B9).
-   function [YTAGW-1:0] ytagf(input [PCW-1:0] a);
-      ytagf = a[YTAGW:1] ^ {{(2*YTAGW-YBITS){1'b0}}, a[YBITS:YTAGW+1]}
-            ^ a[YBITS+YTAGW:YBITS+1] ^ a[YBITS+2*YTAGW:YBITS+YTAGW+1] ^ {{(YTAGW-1){1'b0}}, a[PCW-1]};
-   endfunction
+`include "smolrv64_ytag.vh"
 
    // ------------------------------------------------------------ speculative state
    reg [GHL-1:0]  ghr;                       // the stream's history
@@ -229,147 +225,43 @@ module smolrv64_predictor
    wire [7:0]      bh;                       // ...whether any way matched
    wire [BTBW-1:0] bw [0:7];                 // ...and which (training's, carried in the details)
    wire [YEW-1:0]  yq [0:7];
-   reg  [7:0]      hv, hy, hd1;              // per position: hit, corrector hit, direction taken
-   reg  [7:0]      inw;                      // ...the bank holds one of the window's halfwords
-   reg  [7:0]      mkv;                      // the marks, by bank
-   reg  [3:0]      nmk;                      // ...how many
-   reg  [2:0]      hk;                       // the bank where the window ends at a mark (7: none)
-   reg             cut;                      // ...whether one does
-   reg  [EW-1:0]   e;                        // the ending mark's entry
-   reg  [EW-1:0]   ek;
-   reg  [YEW-1:0]  ck;
-   integer         k;
-   wire [PCW-1:0]  sa16 = sa_q + PC16;       // the pair after the first (an adder from a register)
-   wire [PCW-1:0]  sa32 = sa16 + PC16;       // ...and the one after that
-   // THE WINDOW STOPS AT ITS FIRST PAIR'S END when that pair is the last of its page: the I$ reads
-   // one page a request.
-   wire            w_one = (&sa_q[11:4]) & (sk_q != 3'd0);
-   // THE TAGS FOR THE PAIR AFTER COME WITHOUT AN ADDER: the BTB tag is the bits above the block's,
-   // so the two pairs share it but across a block; the corrector's takes the pair's own bits plus
-   // one, wrapping inside them (ak below). Both are wrong only there, and then that window's second
-   // pair misses -- a lost hint, never a wrong one. (sa_q + 16 in front of the compares cost five
-   // levels on the loop.)
-   wire [TAGW-1:0] stag  = btag(sa_q);
-   reg  [PCW-1:0]  ak;
-   always @* begin
-      hv = 8'd0;  hy = 8'd0;  hd1 = 8'd0;  inw = 8'd0;  ak = sa_q;
-      for (k = 0; k < 8; k = k + 1) begin
-         ek      = bq[k];
-         ck      = yq[k];
-         ak      = sa_q;
-         if (k[2:0] < sk_q) ak[YTAGW:4] = sa_q[YTAGW:4] + 1'b1;
-         ak[3:1] = k[2:0];
-         inw[k]  = (k[2:0] >= sk_q) | ~w_one;
-         hv[k]   = ~np_q & inw[k] & bh[k];
-         hy[k]   = ~ek[TGTW+2] & (ck[YEW-1 -: YTAGW] == ytagf(ak));
-         hd1[k]  = ek[TGTW+2] | (hy[k] ? ck[1] : ek[TGTW+1]);
-      end
-   end
-   // Where the window ends, one-hot by bank (0: at its own end): at the first taken hit when it is
-   // one of the first two, else at the second hit (M = 2), in window order. Each position decides
-   // from the hits before it alone -- a taken hit with none before, or any hit with one untaken hit
-   // before -- and "before" is a mask of the banks from sk_q up to it (bmk), a function of the
-   // register alone: no find-first chain and no rotation stand between the rows and the next
-   // window's address. The marks are the hits up to where it ends, and its entry is the one-hot pick
-   // of the eight.
-   wire [7:0] tkv = hv & hd1;
-   reg  [7:0] bmk [0:7];                     // bank k: the banks before it in the window
-   reg  [7:0] coh, lo, ba, bb;
-   // THE END PICK WITH CONSTANT MASKS: the window's order is the first pair's banks (fpm, at or after
-   // the offset) ascending, then the second pair's ascending, so a bank's hits before it are its own
-   // pair's below it -- the constant mask main had -- and, for a second-pair bank, the first pair's
-   // as a whole (any of them, exactly one, any taken: shared by every bank). The offset register
-   // only splits the hits; it is not an input of each bank's pick.
-   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
-      fpm8 = ~((8'd1 << off) - 8'd1);
-   endfunction
-   wire [7:0] fpm   = fpm8(sk_q);
-   wire [7:0] hva   = hv & fpm,  hvb = hv & ~fpm,  tka = tkv & fpm,  tkb = tkv & ~fpm;
-   wire       a_any = |hva;
-   wire       a_one = a_any & ~|(hva & (hva - 8'd1));
-   wire       a_tk  = |tka;
-   always @* begin
-      for (k = 0; k < 8; k = k + 1)
-         bmk[k] = (k[2:0] >= sk_q) ? (((8'd1 << k) - 8'd1) & ~((8'd1 << sk_q) - 8'd1))
-                                   : (((8'd1 << k) - 8'd1) |  ~((8'd1 << sk_q) - 8'd1));
-      for (k = 0; k < 8; k = k + 1) begin
-         lo     = (8'd1 << k) - 8'd1;
-         ba     = hva & lo;
-         bb     = hvb & lo;
-         coh[k] = (hva[k] & ((~|ba & tka[k]) | (|ba & ~|(ba & (ba - 8'd1)) & ~|(tka & lo))))
-                | (hvb[k] & ((~a_any & ~|bb & tkb[k])
-                           | (~a_any & |bb & ~|(bb & (bb - 8'd1)) & ~|(tkb & lo))
-                           | (a_one & ~a_tk & ~|bb)));
-      end
-      cut = |coh;
-      for (k = 0; k < 8; k = k + 1) mkv[k] = hv[k] & ~|(coh & bmk[k]);
-      nmk = {3'd0, |mkv} + {3'd0, |(mkv & (mkv - 8'd1))};
-      hk  = {~|(coh & 8'h0f), ~|(coh & 8'h33), ~|(coh & 8'h55)};   // 7 when no mark ends it
-      e   = {EW{1'b0}};
-      for (k = 0; k < 8; k = k + 1) e = e | ({EW{coh[k]}} & bq[k]);
-   end
-   // The pair the ending halfword is in, and the pair the halfword after it is in: the first when the
-   // ending bank is at or after the offset (bank 7's next halfword starts the pair after), else the
-   // pair after. Each is one OR of the end pick against the offset's mask, so the addresses are a
-   // two-way pick of registers and their sums. With no mark ending the window, n_fp is 0 and the
-   // next window starts 16 bytes on.
-   wire            e_fp = |(coh & fpm);
-   wire            n_fp = |(coh & fpm & 8'h7f);
-   wire [PCW-1:0]  nf   = n_fp ? sa_q : sa16;                      // the next window's first pair...
-   wire [PCW-1:0]  nf2  = n_fp ? sa16 : sa32;                      // ...and the pair after it
-   wire [PCW-1:0]  h    = {e_fp ? sa_q[PCW-1:4] : sa16[PCW-1:4], hk, 1'b0};
-   wire [PCW-1:0]  ftc  = {nf[PCW-1:4], hk + 3'd1, 1'b0};          // the halfword after the ending CTI
-   wire [2:0]      ety  = e[TGTW +: 3];
-   wire [TGTW-1:0] etg  = e[TGTW-1:0];
-   wire            dir  = |(coh & hd1);
-   wire            call = (ety == TY_CALL), ret = (ety == TY_RET);
-   // the window's last position: where a mark ends it, else its own end
-   wire [2:0]      pe   = cut ? hk - sk_q : w_one ? 3'd7 - sk_q : 3'd7;
+   wire [7:0]      hy, inw, mkv, coh;        // per bank: corrector hit, in the window, marked, ends it
+   wire [3:0]      nmk;                      // the marks
+   wire [2:0]      hk, pe, ety;              // the bank where a mark ends it, its last position, the type
+   wire            cut, tk, call, ret, w_one;
+   wire [PCW-1:0]  nf, nf2, ftc, p_nx;
+   wire [RASB-1:0] rsp_post;
+   wire [GHL-1:0]  ghr_post;
+   wire [QEW-1:0]  pw_e0, pw_e1;
+   wire [8*EW-1:0]   bq_f;
+   wire [8*BTBW-1:0] bw_f;
+   wire [8*YEW-1:0]  yq_f;
+   genvar gq;
+   generate for (gq = 0; gq < 8; gq = gq + 1) begin : bqf
+      assign bq_f[gq*EW +: EW] = bq[gq];  assign bw_f[gq*BTBW +: BTBW] = bw[gq];  assign yq_f[gq*YEW +: YEW] = yq[gq];
+   end endgenerate
+   smolrv64_wpick #(.PCW(PCW), .TAGW(TAGW), .TGTW(TGTW), .BTBW(BTBW), .GHL(GHL), .RASB(RASB), .YBITS(YBITS),
+                    .YTAGW(YTAGW)) u_pick
+     (.sa(sa_q), .sk(sk_q), .np(np_q), .bq_f(bq_f), .bh(bh), .bw_f(bw_f), .yq_f(yq_f),
+      .ras_top(ras[ras_ptr]), .ras_ptr(ras_ptr), .ghr(ghr), .yix(yr_q ^ yh_q),
+      .hy(hy), .inw(inw), .mkv(mkv), .coh(coh), .nmk(nmk), .hk(hk), .pe(pe), .ety(ety), .cut(cut), .tk(tk),
+      .call(call), .ret(ret), .w_one(w_one), .nf(nf), .nf2(nf2), .ftc(ftc), .p_nx(p_nx), .rsp_post(rsp_post),
+      .ghr_post(ghr_post), .pw_e0(pw_e0), .pw_e1(pw_e1));
    assign p_cut = cut;
    assign p_end = pe;
    assign p_mk  = mkv;
-   wire            tk   = dir;                                     // the window ends at a taken mark
+   wire [PCW-1:0]  sa16 = sa_q + PC16;       // the pair after the first
+   // the BTB tag of both pairs: the bits above the block's (the second pair's is wrong across a block,
+   // and then that pair misses -- a lost hint, never a wrong one)
+   wire [TAGW-1:0] stag = btag(sa_q);
+   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
+      fpm8 = ~((8'd1 << off) - 8'd1);
+   endfunction
    function [PCW-1:0] tadr(input [EW-1:0] x);                      // an entry's target
       tadr = {{(PCW-TGTW-1){x[TGTW-1]}}, x[TGTW-1:0], 1'b0};
    endfunction
-   wire [PCW-1:0]  tgt  = ret ? ras[ras_ptr] : tadr(e);
-   // the next window when no mark ends this one: 16 bytes on, at the same offset
-   wire [PCW-1:0]  p_nx = tk ? tgt : {nf[PCW-1:4], cut ? hk + 3'd1 : w_one ? 3'd0 : sk_q, 1'b0};
-   wire [RASB-1:0] rsp_post = (tk & call) ? ras_ptr + 1'b1 : (tk & ret) ? ras_ptr - 1'b1 : ras_ptr;
-   wire [GHL-1:0]  ghr_post = tk ? phist_step(ghr, h) : ghr;
    // each mark's entry: the ending one's prediction, a not-taken one's details, the pair's pre-state
    wire            push     = adv & (|mkv) & ~flush;
-   // a mark's own fields of its queue entry: {taken, yhit, yctr, bank, way, type}
-   localparam integer PFW = 1 + 1 + 2 + 3 + BTBW + 2;
-   wire [PFW-1:0]  pf8 [0:7];
-   genvar gm;
-   generate for (gm = 0; gm < 8; gm = gm + 1) begin : me
-      wire [EW-1:0]  me_e = bq[gm];
-      wire [YEW-1:0] me_c = yq[gm];
-      wire           me_y = ~me_e[TGTW+2] & hy[gm];
-      assign pf8[gm] = {coh[gm] & dir, me_y, me_y ? me_c[1:0] : 2'b01, gm[2:0], bw[gm], me_e[TGTW +: 2]};
-   end endgenerate
-
-   // the window's entries in mark order (nmk <= M = 2): its first two marks in window order, each
-   // one-hot by bank -- no mark before it, exactly one before it -- by the end pick's masks. Only a
-   // mark's own fields are picked; the rest of an entry is the window's.
-   reg  [7:0]      m1h, m2h, mbl;
-   reg  [PFW-1:0]  pf0, pf1;
-   integer         pwk;
-   always @* begin
-      pf0 = {PFW{1'b0}};  pf1 = {PFW{1'b0}};
-      for (pwk = 0; pwk < 8; pwk = pwk + 1) begin
-         mbl      = mkv & bmk[pwk];
-         m1h[pwk] = mkv[pwk] & ~|mbl;
-         m2h[pwk] = mkv[pwk] & |mbl & ~|(mbl & (mbl - 8'd1));
-         pf0      = pf0 | ({PFW{m1h[pwk]}} & pf8[pwk]);
-         pf1      = pf1 | ({PFW{m2h[pwk]}} & pf8[pwk]);
-      end
-   end
-   function [QEW-1:0] pqe(input [PFW-1:0] p);                     // a mark's entry
-      pqe = {p[PFW-1], tgt, ras_ptr, ghr, p[PFW-2 -: 3], yr_q ^ yh_q, p[BTBW+2 +: 3], p[BTBW+1:0]};
-   endfunction
-   wire [QEW-1:0]  pw_e0 = pqe(pf0), pw_e1 = pqe(pf1);
    wire [PQB-1:0]  pw_p1 = pq_wp + 1'b1;
    // bank b takes the entry whose position has parity b: entry 0 at pq_wp, entry 1 at pq_wp + 1.
    // BOTH ARE WRITTEN WHENEVER THE QUEUE HAS ROOM, and push only moves the pointers: the two
@@ -651,7 +543,7 @@ module smolrv64_predictor
       bpt_cyc <= bpt_cyc + 64'd1;
       if (bpt_on & adv & (|mkv))
          $display("[BP] c=%0d PRED pair=%h skip=%0d end=%0d type=%b yhit=%b dir=%b tk=%b nx=%h ghr=%h rsp=%0d",
-                  bpt_cyc, pc64(sa_q), sk_q, p_end, ety, hy[hk], dir, tk, pc64(p_nx), ghr, ras_ptr);
+                  bpt_cyc, pc64(sa_q), sk_q, p_end, ety, hy[hk], tk, tk, pc64(p_nx), ghr, ras_ptr);
       if (bpt_on & res_v)
          $display("[BP] c=%0d RES last=%h cbr=%b call=%b ret=%b taken=%b tgt=%h | carried hit=%b ctr=%0d yhit=%b yctr=%0d yidx=%0d | ywr=%b | now hit=%b nu=%b way=%b wr=%b",
                   bpt_cyc, pc64(res_last), res_cbr, res_call, res_ret, res_taken, pc64(res_tgt),
@@ -660,6 +552,200 @@ module smolrv64_predictor
          $display("[BP] c=%0d RESTART at=%h rollback=%b ghr<=%h ras_ptr<=%0d", bpt_cyc, pc64(rst_a), rollback, rs_ghr, rs_rsp);
    end
 `endif
+endmodule
+
+// THE END PICK (smolrv64_predictor): a window's marks, where it ends and where the stream goes on,
+// from its eight banks' entries (the first matching way's) and corrector rows. Bank k holds the
+// window's halfword at address bits [3:1] == k, in the first pair (sa) when k is at or after the
+// offset sk, else in the pair after it. Every position evaluates its own hit, corrector hit and
+// direction at once; the marks are the hits in WINDOW ORDER -- the banks from sk round to sk - 1 --
+// up to the first taken one, or the M-th.
+module smolrv64_wpick
+  #(parameter PCW   = 40,
+    parameter TAGW  = 12,
+    parameter TGTW  = 38,
+    parameter BTBW  = 1,
+    parameter GHL   = 11,
+    parameter RASB  = 3,
+    parameter YBITS = 11,
+    parameter YTAGW = 8,
+    parameter EW    = TAGW + 3 + TGTW,
+    parameter YEW   = YTAGW + 2,
+    parameter QEW   = 1 + PCW + RASB + GHL + 1 + 2 + YBITS + BTBW + 2)
+   (input  wire [PCW-1:0]      sa,         // the window: its first pair...
+    input  wire [2:0]          sk,         // ...its first halfword in it...
+    input  wire                np,         // ...and predict nothing in it
+    input  wire [8*EW-1:0]     bq_f,         // bank k's entry at [k*EW +: EW]...
+    input  wire [7:0]          bh,         // ...whether any way matched
+    input  wire [8*BTBW-1:0]   bw_f,         // ...and which
+    input  wire [8*YEW-1:0]    yq_f,         // bank k's corrector row
+    input  wire [PCW-1:0]      ras_top,
+    input  wire [RASB-1:0]     ras_ptr,
+    input  wire [GHL-1:0]      ghr,
+    input  wire [YBITS-4:0]    yix,        // the corrector row read, as training indexes it
+    output reg  [7:0]          hy,         // per bank: the corrector hit...
+    output reg  [7:0]          inw,        // ...the bank holds one of the window's halfwords
+    output reg  [7:0]          mkv,        // ...marked
+    output reg  [7:0]          coh,        // ...where the window ends at a mark (one-hot)
+    output reg  [3:0]          nmk,        // the marks
+    output reg  [2:0]          hk,         // the bank where a mark ends it (7: none)
+    output wire [2:0]          pe,         // its last position
+    output wire [2:0]          ety,        // the ending mark's type
+    output reg                 cut,        // a mark ends it...
+    output wire                tk,         // ...taken
+    output wire                call,       // ...a call
+    output wire                ret,        // ...a return
+    output wire                w_one,      // it stops at its first pair's end (its page's last pair)
+    output wire [PCW-1:0]      nf,         // the next window's first pair, and the pair after it, when
+    output wire [PCW-1:0]      nf2,        // ...no taken mark ends this one
+    output wire [PCW-1:0]      ftc,        // the halfword after the ending mark
+    output wire [PCW-1:0]      p_nx,       // where the stream goes on
+    output wire [RASB-1:0]     rsp_post,
+    output wire [GHL-1:0]      ghr_post,
+    output wire [QEW-1:0]      pw_e0,      // its first two marks' queue entries
+    output wire [QEW-1:0]      pw_e1);
+   localparam [2:0] TY_CALL = 3'b101, TY_RET = 3'b110;
+   localparam integer M = 2;                 // marks per window (the queue's pushes per cycle)
+`include "smolrv64_phist.vh"
+`include "smolrv64_pc.vh"
+`include "smolrv64_ytag.vh"
+   wire [EW-1:0]   bq [0:7];
+   wire [BTBW-1:0] bw [0:7];
+   wire [YEW-1:0]  yq [0:7];
+   genvar gu;
+   generate for (gu = 0; gu < 8; gu = gu + 1) begin : un
+      assign bq[gu] = bq_f[gu*EW +: EW];  assign bw[gu] = bw_f[gu*BTBW +: BTBW];  assign yq[gu] = yq_f[gu*YEW +: YEW];
+   end endgenerate
+   reg  [7:0]      hv, hd1;                  // per position: hit, direction taken
+   reg  [EW-1:0]   e;                        // the ending mark's entry
+   reg  [EW-1:0]   ek;
+   reg  [YEW-1:0]  ck;
+   integer         k;
+   wire [PCW-1:0]  sa16 = sa + PC16;       // the pair after the first (an adder from a register)
+   wire [PCW-1:0]  sa32 = sa16 + PC16;       // ...and the one after that
+   // THE WINDOW STOPS AT ITS FIRST PAIR'S END when that pair is the last of its page: the I$ reads
+   // one page a request.
+   assign          w_one = (&sa[11:4]) & (sk != 3'd0);
+   // The corrector's tag for the pair after takes the pair's own bits plus one, wrapping inside them
+   // (ak below): wrong only there, and then that window's second pair misses -- a lost hint, never a
+   // wrong one (sa + 16 in front of the compares cost five levels on the loop).
+   reg  [PCW-1:0]  ak;
+   always @* begin
+      hv = 8'd0;  hy = 8'd0;  hd1 = 8'd0;  inw = 8'd0;  ak = sa;
+      for (k = 0; k < 8; k = k + 1) begin
+         ek      = bq[k];
+         ck      = yq[k];
+         ak      = sa;
+         if (k[2:0] < sk) ak[YTAGW:4] = sa[YTAGW:4] + 1'b1;
+         ak[3:1] = k[2:0];
+         inw[k]  = (k[2:0] >= sk) | ~w_one;
+         hv[k]   = ~np & inw[k] & bh[k];
+         hy[k]   = ~ek[TGTW+2] & (ck[YEW-1 -: YTAGW] == ytagf(ak));
+         hd1[k]  = ek[TGTW+2] | (hy[k] ? ck[1] : ek[TGTW+1]);
+      end
+   end
+   // Where the window ends, one-hot by bank (0: at its own end): at the first taken hit when it is
+   // one of the first two, else at the second hit (M = 2), in window order. Each position decides
+   // from the hits before it alone -- a taken hit with none before, or any hit with one untaken hit
+   // before -- and "before" is a mask of the banks from sk up to it (bmk), a function of the
+   // register alone: no find-first chain and no rotation stand between the rows and the next
+   // window's address. The marks are the hits up to where it ends, and its entry is the one-hot pick
+   // of the eight.
+   wire [7:0] tkv = hv & hd1;
+   reg  [7:0] bmk [0:7];                     // bank k: the banks before it in the window
+   reg  [7:0] lo, ba, bb;
+   // THE END PICK WITH CONSTANT MASKS: the window's order is the first pair's banks (fpm, at or after
+   // the offset) ascending, then the second pair's ascending, so a bank's hits before it are its own
+   // pair's below it -- the constant mask main had -- and, for a second-pair bank, the first pair's
+   // as a whole (any of them, exactly one, any taken: shared by every bank). The offset register
+   // only splits the hits; it is not an input of each bank's pick.
+   function [7:0] fpm8(input [2:0] off);                           // the banks at or after off
+      fpm8 = ~((8'd1 << off) - 8'd1);
+   endfunction
+   wire [7:0] fpm   = fpm8(sk);
+   wire [7:0] hva   = hv & fpm,  hvb = hv & ~fpm,  tka = tkv & fpm,  tkb = tkv & ~fpm;
+   wire       a_any = |hva;
+   wire       a_one = a_any & ~|(hva & (hva - 8'd1));
+   wire       a_tk  = |tka;
+   always @* begin
+      for (k = 0; k < 8; k = k + 1)
+         bmk[k] = (k[2:0] >= sk) ? (((8'd1 << k) - 8'd1) & ~((8'd1 << sk) - 8'd1))
+                                   : (((8'd1 << k) - 8'd1) |  ~((8'd1 << sk) - 8'd1));
+      for (k = 0; k < 8; k = k + 1) begin
+         lo     = (8'd1 << k) - 8'd1;
+         ba     = hva & lo;
+         bb     = hvb & lo;
+         coh[k] = (hva[k] & ((~|ba & tka[k]) | (|ba & ~|(ba & (ba - 8'd1)) & ~|(tka & lo))))
+                | (hvb[k] & ((~a_any & ~|bb & tkb[k])
+                           | (~a_any & |bb & ~|(bb & (bb - 8'd1)) & ~|(tkb & lo))
+                           | (a_one & ~a_tk & ~|bb)));
+      end
+      cut = |coh;
+      for (k = 0; k < 8; k = k + 1) mkv[k] = hv[k] & ~|(coh & bmk[k]);
+      nmk = {3'd0, |mkv} + {3'd0, |(mkv & (mkv - 8'd1))};
+      hk  = {~|(coh & 8'h0f), ~|(coh & 8'h33), ~|(coh & 8'h55)};   // 7 when no mark ends it
+      e   = {EW{1'b0}};
+      for (k = 0; k < 8; k = k + 1) e = e | ({EW{coh[k]}} & bq[k]);
+   end
+   // The pair the ending halfword is in, and the pair the halfword after it is in: the first when the
+   // ending bank is at or after the offset (bank 7's next halfword starts the pair after), else the
+   // pair after. Each is one OR of the end pick against the offset's mask, so the addresses are a
+   // two-way pick of registers and their sums. With no mark ending the window, n_fp is 0 and the
+   // next window starts 16 bytes on.
+   wire            e_fp = |(coh & fpm);
+   wire            n_fp = |(coh & fpm & 8'h7f);
+   assign          nf   = n_fp ? sa : sa16;                      // the next window's first pair...
+   assign          nf2  = n_fp ? sa16 : sa32;                      // ...and the pair after it
+   wire [PCW-1:0]  h    = {e_fp ? sa[PCW-1:4] : sa16[PCW-1:4], hk, 1'b0};
+   assign          ftc  = {nf[PCW-1:4], hk + 3'd1, 1'b0};          // the halfword after the ending CTI
+   assign          ety  = e[TGTW +: 3];
+   wire [TGTW-1:0] etg  = e[TGTW-1:0];
+   wire            dir  = |(coh & hd1);
+   assign          call = (ety == TY_CALL);
+   assign          ret  = (ety == TY_RET);
+   // the window's last position: where a mark ends it, else its own end
+   assign          pe   = cut ? hk - sk : w_one ? 3'd7 - sk : 3'd7;
+   assign          tk   = dir;                                     // the window ends at a taken mark
+   function [PCW-1:0] tadr(input [EW-1:0] x);                      // an entry's target
+      tadr = {{(PCW-TGTW-1){x[TGTW-1]}}, x[TGTW-1:0], 1'b0};
+   endfunction
+   wire [PCW-1:0]  tgt  = ret ? ras_top : tadr(e);
+   // the next window when no mark ends this one: 16 bytes on, at the same offset
+   assign          p_nx = tk ? tgt : {nf[PCW-1:4], cut ? hk + 3'd1 : w_one ? 3'd0 : sk, 1'b0};
+   assign          rsp_post = (tk & call) ? ras_ptr + 1'b1 : (tk & ret) ? ras_ptr - 1'b1 : ras_ptr;
+   assign          ghr_post = tk ? phist_step(ghr, h) : ghr;
+   // a mark's own fields of its queue entry: {taken, yhit, yctr, bank, way, type}
+   localparam integer PFW = 1 + 1 + 2 + 3 + BTBW + 2;
+   wire [PFW-1:0]  pf8 [0:7];
+   genvar gm;
+   generate for (gm = 0; gm < 8; gm = gm + 1) begin : me
+      wire [EW-1:0]  me_e = bq[gm];
+      wire [YEW-1:0] me_c = yq[gm];
+      wire           me_y = ~me_e[TGTW+2] & hy[gm];
+      assign pf8[gm] = {coh[gm] & dir, me_y, me_y ? me_c[1:0] : 2'b01, gm[2:0], bw[gm], me_e[TGTW +: 2]};
+   end endgenerate
+
+   // the window's entries in mark order (nmk <= M = 2): its first two marks in window order, each
+   // one-hot by bank -- no mark before it, exactly one before it -- by the end pick's masks. Only a
+   // mark's own fields are picked; the rest of an entry is the window's.
+   reg  [7:0]      m1h, m2h, mbl;
+   reg  [PFW-1:0]  pf0, pf1;
+   integer         pwk;
+   always @* begin
+      pf0 = {PFW{1'b0}};  pf1 = {PFW{1'b0}};
+      for (pwk = 0; pwk < 8; pwk = pwk + 1) begin
+         mbl      = mkv & bmk[pwk];
+         m1h[pwk] = mkv[pwk] & ~|mbl;
+         m2h[pwk] = mkv[pwk] & |mbl & ~|(mbl & (mbl - 8'd1));
+         pf0      = pf0 | ({PFW{m1h[pwk]}} & pf8[pwk]);
+         pf1      = pf1 | ({PFW{m2h[pwk]}} & pf8[pwk]);
+      end
+   end
+   function [QEW-1:0] pqe(input [PFW-1:0] p);                     // a mark's entry
+      pqe = {p[PFW-1], tgt, ras_ptr, ghr, p[PFW-2 -: 3], yix, p[BTBW+2 +: 3], p[BTBW+1:0]};
+   endfunction
+   assign          pw_e0 = pqe(pf0);
+   assign          pw_e1 = pqe(pf1);
 endmodule
 
 `default_nettype wire
