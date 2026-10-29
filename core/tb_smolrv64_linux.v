@@ -683,6 +683,56 @@ module tb;
       if (dut.core.fe.u_bp.tw_v & ~dut.core.fe.u_bp.tr_hit & (|bt_now))   bt_dup   <= bt_dup + 1;
       if (dut.core.fe.u_bp.tr_hit & ~|(dut.core.fe.u_bp.tm & bt_now))     bt_stale <= bt_stale + 1;
    end
+   // L1BTB-SIM: shadow first-level BTBs beside the predictor's, sizing a small one in the predictor's
+   // loop with today's BTB behind it as a second level that corrects it a cycle or two late. Each
+   // window the ring takes, its marked CTIs (by their last halfword's address, the BTB's key) are
+   // looked up in each shadow -- eight banks of R rows, 1 or 2 ways, a full-address tag -- and then
+   // filled. A window ending at a taken CTI a shadow lacks is a late correction; any other mark it
+   // lacks, a missing mark. The direction (bimodal and corrector) is assumed the second level's.
+   wire        l1_win = dut.core.fe.u_bp.adv & ~dut.core.fe.u_bp.flush;
+   wire [39:0] l1_sa  = 40'(dut.core.fe.u_bp.sa_q), l1_s16 = 40'(dut.core.fe.u_bp.sa16);
+   wire [2:0]  l1_sk  = dut.core.fe.u_bp.sk_q;
+   wire [7:0]  l1_mk  = dut.core.fe.u_bp.mkv;
+   wire [7:0]  l1_et  = dut.core.fe.u_bp.coh & {8{dut.core.fe.u_bp.tk}};
+   reg  [63:0] l1_wn, l1_tkn;
+   initial begin l1_wn = 0; l1_tkn = 0; end
+   always @(posedge clk) if (!reset && meas && l1_win) begin
+      l1_wn <= l1_wn + 1;
+      if (|l1_et) l1_tkn <= l1_tkn + 1;
+   end
+   genvar l1g;
+   generate for (l1g = 0; l1g < 8; l1g = l1g + 1) begin : l1s
+      localparam integer R  = 8 << (l1g >> 1);           // rows a bank: 8, 8, 16, 16, 32, 32, 64, 64
+      localparam integer NW = 1 + (l1g & 1);             // ways: 1, 2
+      localparam integer RL = $clog2(R);
+      reg [39:0] tg [0:8*R*NW-1];
+      reg        vl [0:8*R*NW-1];
+      reg        lru [0:8*R-1];                          // 2 ways: the way to replace next
+      reg [63:0] corr, ntm;
+      integer    i, k, w, set, hw;
+      reg [39:0] pr, a;
+      reg        hit;
+      initial begin
+         corr = 0;  ntm = 0;
+         for (i = 0; i < 8*R*NW; i = i + 1) vl[i] = 1'b0;
+         for (i = 0; i < 8*R; i = i + 1) lru[i] = 1'b0;
+      end
+      always @(posedge clk) if (!reset && meas && l1_win) begin
+         for (k = 0; k < 8; k = k + 1) if (l1_mk[k]) begin
+            pr  = (k[2:0] >= l1_sk) ? l1_sa : l1_s16;
+            a   = {pr[39:4], k[2:0], 1'b0};
+            set = k * R + 32'(a[4 +: RL]);
+            hit = 1'b0;  hw = 0;
+            for (w = 0; w < NW; w = w + 1) if (vl[set*NW + w] && tg[set*NW + w] == a) begin hit = 1'b1;  hw = w; end
+            if (!hit) begin
+               if (l1_et[k]) corr = corr + 1;  else ntm = ntm + 1;
+               hw = (NW == 2) ? 32'(lru[set]) : 0;
+               tg[set*NW + hw] = a;  vl[set*NW + hw] = 1'b1;
+            end
+            if (NW == 2) lru[set] = (hw == 0);
+         end
+      end
+   end endgenerate
    // LQ-SIM: the load queue's occupancy summed per cycle, and the cycles the queue head has no
    // load-queue credit (smolrv64_core st_lq) by why: a head op in flight or in the IR (cbo_any: cbo),
    // every entry live (full),
@@ -1875,6 +1925,11 @@ module tb;
                fx_div, fx_i2f, fx_sys, fx_st, fx_fst, fx_rd);
       $display("BTB-SIM trainings=%0d carried-hit=%0d | against the slots now: duplicate allocations=%0d stale rewrites=%0d",
                bt_n, bt_car, bt_dup, bt_stale);
+      $write("L1BTB-SIM windows=%0d taken-ends=%0d | rows x ways: corrections missing-marks", l1_wn, l1_tkn);
+      $write(" | 8x1 %0d %0d", l1s[0].corr, l1s[0].ntm);  $write(" | 8x2 %0d %0d", l1s[1].corr, l1s[1].ntm);
+      $write(" | 16x1 %0d %0d", l1s[2].corr, l1s[2].ntm); $write(" | 16x2 %0d %0d", l1s[3].corr, l1s[3].ntm);
+      $write(" | 32x1 %0d %0d", l1s[4].corr, l1s[4].ntm); $write(" | 32x2 %0d %0d", l1s[5].corr, l1s[5].ntm);
+      $write(" | 64x1 %0d %0d", l1s[6].corr, l1s[6].ntm); $display(" | 64x2 %0d %0d", l1s[7].corr, l1s[7].ntm);
       $write("RENAME-SIM be:rename cycles each shard is low, and the sweep (a cycle can count in several):");
       for (rli = 0; rli < 8; rli = rli + 1)
          if (dut.core.sh_used(3'(rli))) begin
