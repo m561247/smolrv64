@@ -51,7 +51,7 @@
 module smolrv64_predictor
   #(parameter PCW   = 64,
     parameter BTBB  = 13,            // log2 L2 BTB entries, all banks and ways
-    parameter L1RB  = 5,             // log2 L1 BTB rows a bank and way
+    parameter L1RB  = 6,             // log2 L1 BTB rows a bank and way
     parameter BTBW  = 1,             // log2 BTB ways (skewed), at least 1
     parameter TAGW  = 12,
     parameter TGTW  = 38,            // stored target bits [38:1] (canonical VA, sign-extended)

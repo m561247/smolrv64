@@ -1,6 +1,7 @@
 # PLAN 2026-10-28: a small BTB in the predictor's loop, the big one behind it
 
-Status: designed; L1 sized on the GB5 SimPoints (section 3); RTL on `wip/fwtrim`.
+Status: built and board-gated with L1 at 64 rows (section 5). Timing met at +0.001 ns; GB5 on the
+4 GiB board -0.29% cycles against 7f8f5a94; ChaCha20 26.09 cycles an iteration (34.09).
 Tommy (2026-10-28), on the fetch windows missing timing: *"If the loop is too long, make it shorter
 => shrink the BTB. Make up the loss with a second full L2 BTB, coming in with late corrections and
 training the L1 BTB."* And: *"if this allows us opportunity to grow the L2 BTB from the size of the
@@ -59,12 +60,35 @@ looked up and filled; a window ending at a taken CTI a shadow lacks is a correct
 | run | windows | taken ends | 16x2 | 32x2 | 64x2 |
 |---|---|---|---|---|---|
 | 20 M boot (lockstep) | 7,639,156 | 3,318,665 | 144,320 (4.3%) | 90,105 (2.7%) | 55,462 (1.7%) |
-| GB5 SimPoints, 2K L2 | | | | | |
-| GB5 SimPoints, 8K L2 | | | | | |
+| GB5 SimPoints, 2K L2 (77 points, weighted) | 48.87 G taken ends | | 2.162 G (4.4%) | 1.199 G (2.5%) | 0.581 G (1.2%) |
 
-## 4. Steps
+Charged three cycles a correction with nothing hidden by the ring, that is 1.67%, 0.93% and 0.45% of
+the single-core section's cycles; SQLite, Clang, HTML5 and Text Rendering carry most of it. The real
+two levels on the same SimPoints, against the one-level predictor (2K in the loop):
+
+| configuration | single-core cycles | SQLite | Clang |
+|---|---|---|---|
+| one level, 8K entries in the loop (does not close timing) | -0.49% | -1.47% | -17.10% |
+| two levels, L1 32 rows | +0.21% | +9.90% | -9.66% |
+| two levels, L1 64 rows | -0.03% | +5.44% | -11.51% |
+
+## 4. Steps (all done)
 
 1. The end pick becomes a module, instantiated once (cycle-identical).
 2. L2 at 8K entries (`BTBB` 13): its own GB5 SimPoint price.
 3. L1, the L2 stage, the correction and the ring's partial rollback; lockstep, ChaCha20, SimPoints.
 4. The predictor out of context, then a build.
+
+## 5. Outcome
+
+- The first build hung every userspace lockstep at 22,327,587 retires: one window corrected every
+  three cycles, L1 first-matching a stale copy in a way before L2's (L1's rows are not L2's, so an L2
+  eviction can leave L1's copy). A fill now clears every other way that matched.
+- The two-level builds came in at -0.05 to -0.4 ns after physopt, the frontend down to a third of
+  the failing endpoints; the largest single family was the D$ response's wake chained through the
+  scheduler's pick into wake-at-select. Reading wake-at-select the cycle after the issue removed it,
+  cycle-identically.
+- Built with ExtraNetDelay_high (-0.007 ns after two physopt passes), then the 46 failing paths'
+  319 nets re-routed for delay and optimized again: +0.001 ns. The 4 GiB board's gate passes;
+  ChaCha20 runs 26.09 cycles an iteration with its loop 6 bytes into a pair, as aligned code does;
+  GB5 948.01 G cycles (IPC 1.338), -0.29% against 7f8f5a94.
