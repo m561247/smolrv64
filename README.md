@@ -17,11 +17,11 @@ change has to boot Ubuntu to a login prompt on the board with zero faults before
 
 | | |
 |---|---|
-| Geekbench 5.4.1, board, 2026-10-27 | **20** single-core (Integer 24, Crypto 2, Floating Point 13), **20** multi-core ([result 24759238](https://browser.geekbench.com/v5/cpu/24759238), [every subtest](workloads/gb5/result-2026-10-27b.md)); the whole suite in 1 h 36 min at IPC 1.33 |
-| Memory, board, 2026-10-27 | a dependent load **3.0** cycles from the D$, **21.0** from the L2, 44.9 from DRAM with a second-level dTLB lookup (71.0 with a page walk); sequential reads 7.93 bytes a cycle in the D$, 3.71 from the L2, 2.88 from DRAM, writes 7.91, 5.64 and 5.17 (`tools/board/membench/summary.sh`, beside every Geekbench run) |
+| Geekbench 5.4.1, board, 2026-10-29 | **20** single-core (Integer 24, Crypto 2, Floating Point 13), **20** multi-core ([result 24766670](https://browser.geekbench.com/v5/cpu/24766670), [every subtest](workloads/gb5/result-2026-10-29.md)); the whole suite in 1 h 36 min at IPC 1.34 |
+| Memory, board, 2026-10-29 | a dependent load **3.0** cycles from the D$, **21.0** from the L2, 45.1 from DRAM with a second-level dTLB lookup (71.0 with a page walk); sequential reads 7.93 bytes a cycle in the D$, 3.71 from the L2, 2.88 from DRAM, writes 7.91, 5.64 and 5.17 (`tools/board/membench/summary.sh`, beside every Geekbench run) |
 | Geekbench 6.7.1, board (4 GiB), 2026-10-15 to 16 | **10** single-core, **10** multi-core ([result 19352041](https://browser.geekbench.com/v6/cpu/19352041), [every subtest](workloads/gb6/result-2026-10-16.md)); the whole suite in 17 h 48 min at IPC 1.00 |
-| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-27 | **3.14** DMIPS/MHz: 181.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
-| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-27 | **5.50** CoreMark/MHz: 181,820 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; `make run B=coremark`) |
+| Dhrystone 2.1, the RTL in lockstep simulation, 2026-10-29 | **3.07** DMIPS/MHz: 185.2 cycles a run, DMIPS being runs a second over 1757 (riscv-tests' Dhrystone at `-O2` with the full `-march`; `make run B=dhrystone` in [workloads/rvbench](workloads/rvbench)) |
+| CoreMark 1.0, the RTL in lockstep simulation, 2026-10-29 | **5.52** CoreMark/MHz: 181,084 cycles an iteration, the standard 2K performance run's CRCs (`-O2` with the full `-march`; `make run B=coremark`) |
 | `sha256sum` of a 30 MB file, board, 2026-09-25 | IPC 1.56 to 1.63 over three runs, 43 cycles per byte |
 | Clock | 166.67 MHz on the XCKU5P (a 6.000 ns cycle), closed four-wide; DDR4 at 333 MHz |
 | Software | OpenSBI and mainline Linux; Ubuntu 25.04 boots over an NFS root through the core's own virtio-net |
@@ -234,7 +234,7 @@ words. Ubuntu's NFS root runs through it.
 ## Performance
 
 Geekbench 5 on the board is the target metric: the scores above, with every subtest's rate
-in [workloads/gb5/result-2026-10-21c.md](workloads/gb5/result-2026-10-21c.md). The whole-run
+in [workloads/gb5/result-2026-10-29.md](workloads/gb5/result-2026-10-29.md). The whole-run
 IPC from `perf stat` is the number comparable across builds, and the subtest rates are what
 the scores follow.
 
