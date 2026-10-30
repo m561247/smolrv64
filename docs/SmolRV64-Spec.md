@@ -991,8 +991,12 @@ only `fmadd` has: 20 bits/entry against 29.
   **As a dependency matrix since 2026-09-17** (Henry Wong's form, for the intra-queue wake
   only): `dep[k][q][j]` -- entry k's source q is produced by entry j -- is written at
   dispatch by comparing the new entry's sources against every live destination (register
-  against register) and read at select as one column; the column of an issuing entry is
-  cleared after the row write. The previous form read `e_prd` at the selected index (a
+  against register) and read as one column the cycle AFTER an issue, from the registered issue
+  (`sq_v`, `sq_oh`): a dependent is ready in that cycle either way, so the column is one more
+  source of readiness beside the writeback compares (`swk`), and it is cleared then. The pick's
+  index reaches neither `e_r` nor `dep`: a landing's wake -> ready -> pick -> the column -> `e_r` was
+  one cycle's chain, 145 failing endpoints of a build (2026-10-29); cycle-identical (the 300 M
+  boot retires the same). The form before the matrix read `e_prd` at the selected index (a
   LUTRAM read the select decides, fan-out 248) and compared that tag against every source,
   the tail of every path into `e_r`. `e_prd` is flops now. Results from other units still
   arrive by tag on `wb_v`/`wb_preg`. An always-on check compares the matrix with the tag

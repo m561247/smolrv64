@@ -167,6 +167,18 @@ module smolrv64_iq
       end
    endfunction
 
+   // THE SELECT'S WAKE, FROM REGISTERS. An entry issued this cycle wakes its dependents through the
+   // dependency matrix's column for it (below), and a dependent is ready in the next cycle -- so the
+   // column is read then, from the registered issue (sq_v, sq_oh), as one more source of readiness
+   // beside the writeback compares, and the column is cleared then. The pick's index never reaches
+   // e_r or dep: a landing's wake -> ready -> pick -> the column -> e_r was one cycle's chain.
+   reg              sq_v;
+   reg  [NENT-1:0]  sq_oh;
+   reg  [IDXB-1:0]  sq_ix;
+   initial begin sq_v = 1'b0;  sq_oh = {NENT{1'b0}};  sq_ix = {IDXB{1'b0}}; end
+   reg  [NENT-1:0]  dep [0:NENT*NSRC-1];
+   wire [NENT*NSRC-1:0] swk;            // the source's producer issued last cycle
+
    // ---- ready, and the pick ----
    // Flat, not inside the generate block: a procedural loop cannot index a generate
    // instance with a runtime variable, and the stall attribution below needs exactly that.
@@ -182,7 +194,8 @@ module smolrv64_iq
          wire sw = (SPEC != 0) & e_ag[g] & s_v & (e_ps[g][0 +: PBITS] == s_preg);
          for (gs = 0; gs < NSRC; gs = gs + 1) begin : g_src
             assign shit[g*NSRC + gs] = hit(e_ps[g][gs*PBITS +: PBITS]);
-            assign srdy[g*NSRC + gs] = e_r[g][gs] | shit[g*NSRC + gs] | ((gs == 0) & sw);
+            assign swk[g*NSRC + gs]  = sq_v & |(dep[g*NSRC + gs] & sq_oh);
+            assign srdy[g*NSRC + gs] = e_r[g][gs] | shit[g*NSRC + gs] | swk[g*NSRC + gs] | ((gs == 0) & sw);
          end
          assign sp_only[g] = sw & ~e_r[g][0] & ~shit[g*NSRC];
          // In order: only the head is a candidate. No age compare, just a pointer match.
@@ -276,15 +289,14 @@ module smolrv64_iq
    // WAKE-AT-SELECT AS A DEPENDENCY MATRIX (fixed-latency schedulers). dep[k*NSRC+q][j] says
    // entry k's source q is produced by entry j OF THIS SCHEDULER. Rows are written at
    // dispatch by comparing the new entry's sources against every live destination -- register
-   // against register, off the select path -- and read at select as ONE COLUMN. The previous
-   // form read e_prd at the selected index (a LUTRAM read the select decides, fan-out 248) and
-   // compared that tag against every source: sel -> RADR -> self_pr -> compare -> e_r was the
-   // tail of every path into e_r. Results from other units still arrive by tag on wb_v/wb_preg.
-   // (Wong's matrix scheduler, applied to the intra-queue wake alone.) A source can only be
-   // produced by an OLDER entry, so "producer live when the consumer dispatched" is exact.
+   // against register, off the select path -- and read the cycle after an issue as ONE COLUMN,
+   // the issued entry's (swk above), which is cleared then: its slot's next occupant can only be
+   // dispatched in that cycle, so no row names it before. Results from other units still arrive by
+   // tag on wb_v/wb_preg. (Wong's matrix scheduler, applied to the intra-queue wake alone.) A
+   // source can only be produced by an OLDER entry, so "producer live when the consumer
+   // dispatched" is exact.
    wire             self_v  = (FIXEDL != 0) & do_iss;
    wire [NENT-1:0]  isel_oh = {{(NENT-1){1'b0}}, 1'b1} << isel;
-   reg  [NENT-1:0]  dep [0:NENT*NSRC-1];
    reg  [NENT-1:0]  drow [0:NSRC-1];                 // the dispatching entry's rows
    integer dj, dq;
    always @* begin
@@ -315,11 +327,13 @@ module smolrv64_iq
       if (reset) begin
          v <= {NENT{1'b0}};  e_sp <= {NENT{1'b0}};
          qhead <= {IDXB{1'b0}}; qtail <= {IDXB{1'b0}};
+         sq_v <= 1'b0;
       end else begin
+         sq_v  <= self_v & ~flush;
+         sq_oh <= isel_oh;  sq_ix <= isel;
          for (k = 0; k < NENT; k = k + 1) if (v[k])
             for (q = 0; q < NSRC; q = q + 1)
-               if (hit(e_ps[k][q*PBITS +: PBITS])
-                   || (self_v && |(dep[k*NSRC+q] & isel_oh)))
+               if (hit(e_ps[k][q*PBITS +: PBITS]) || swk[k*NSRC+q])
                   e_r[k][q] <= 1'b1;
          // the verdict on last cycle's speculative issues: freed, or a candidate again
          if ((SPEC != 0) & sv_v) for (k = 0; k < NENT; k = k + 1) if (e_sp[k]) begin
@@ -344,17 +358,14 @@ module smolrv64_iq
             e_ag[fsel]   <= d_ag;
             e_sp[fsel]   <= 1'b0;
             for (q = 0; q < NSRC; q = q + 1) begin
-               dep[fsel*NSRC+q] <= drow[q];               // registers only; the column clear below wins over it
-               e_r[fsel][q] <= d_r[q] | hit(d_ps[q*PBITS +: PBITS])
-                             | (self_v && |(drow[q] & isel_oh));
+               dep[fsel*NSRC+q] <= drow[q];               // registers only; its producer issuing now wakes it next cycle (swk)
+               e_r[fsel][q] <= d_r[q] | hit(d_ps[q*PBITS +: PBITS]);
             end
          end
-         // The column of the issuing entry, AFTER the row write so it wins for the row that
-         // was written this cycle too: its slot's next occupant is a stranger. Ordered here,
-         // not inside the do_iss arm, so the row write's D input is the register compare
-         // alone -- masking it by the select put the load-landing cone (D$ response tag ->
-         // wakeup -> select) on 359 dep endpoints.
-         if (do_iss) for (k = 0; k < NENT*NSRC; k = k + 1) dep[k][isel] <= 1'b0;
+         // The column of the entry issued LAST cycle, from the registers: read now (swk), and its
+         // slot's next occupant is a stranger. A row written now has no bit for it (it was not live
+         // when the row was compared).
+         if (sq_v) for (k = 0; k < NENT*NSRC; k = k + 1) dep[k][sq_ix] <= 1'b0;
          // the kill: a dead entry's dependents are dead too (a source is an older op's), so
          // no live row keeps a bit for it. Each entry is tested by the op it holds after this edge:
          // the entry dispatched into now by its new op's ROB slot, not its previous occupant's
